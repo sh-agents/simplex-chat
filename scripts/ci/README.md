@@ -181,3 +181,7 @@ Each run uploads the app it built, for manual tests, as an artifact kept 14 days
 ## The Claude job
 
 It needs the GitHub environment `app-sim-claude` with the secret `CLAUDE_CODE_OAUTH_TOKEN`, a Claude subscription token. The environment's branch rule alone decides which branches may use it: on a branch it doesn't allow, a run that asks for Claude fails at the Claude job's environment check, and the scripted test runs as usual. Each run spends the subscription's usage limits; the job summary gives its tokens and cost estimated at API prices.
+
+## Builds for signing
+
+`build-apps.yml`, also started only by hand, builds the Android APKs, the Play bundle and the iOS archive of a commit without signing them, and uploads them as artifacts for signing outside CI: [details](build-apps/README.md).
