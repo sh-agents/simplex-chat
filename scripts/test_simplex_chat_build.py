@@ -17,15 +17,15 @@ import zipfile
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
-    "reproduce", pathlib.Path(__file__).with_name("simplex-chat-reproduce-builds.py")
+    "build_script", pathlib.Path(__file__).with_name("simplex-chat-build.py")
 )
-reproduce = importlib.util.module_from_spec(spec)
+build_script = importlib.util.module_from_spec(spec)
 # dataclasses look the module up by name
-sys.modules[spec.name] = reproduce
-spec.loader.exec_module(reproduce)
+sys.modules[spec.name] = build_script
+spec.loader.exec_module(build_script)
 
-Arch, Step, Target = reproduce.Arch, reproduce.Step, reproduce.Target
-JAMMY, NOBLE, JAMMY_ARM, NOBLE_ARM = reproduce.DESKTOP_IMAGES
+Arch, Step, Target = build_script.Arch, build_script.Step, build_script.Target
+JAMMY, NOBLE, JAMMY_ARM, NOBLE_ARM = build_script.DESKTOP_IMAGES
 UTF8_FLAG = 0x800
 GITHUB = {"GITHUB_ACTIONS": "true"}
 APKSIGNER_PADDING = struct.pack("<HHH", 0xD935, 2, 4)
@@ -42,7 +42,7 @@ def make_zip(entries):
     # zipfile resets flag_bits when it writes an entry, so the flags are set in the written headers
     data = bytearray(buffer.getvalue())
     flags = {name: f for name, _, f, _ in entries}
-    for entry in reproduce.central_directory(bytes(data)):
+    for entry in build_script.central_directory(bytes(data)):
         packed = struct.pack("<H", flags[entry.name])
         data[entry.central_offset + 8 : entry.central_offset + 10] = packed
         data[entry.local_offset + 6 : entry.local_offset + 8] = packed
@@ -50,12 +50,12 @@ def make_zip(entries):
 
 
 def local_flags(data, name):
-    entry = next(e for e in reproduce.central_directory(data) if e.name == name)
+    entry = next(e for e in build_script.central_directory(data) if e.name == name)
     return struct.unpack("<H", data[entry.local_offset + 6 : entry.local_offset + 8])[0]
 
 
 def central_flags(data, name):
-    return next(e.flags for e in reproduce.central_directory(data) if e.name == name)
+    return next(e.flags for e in build_script.central_directory(data) if e.name == name)
 
 
 SIGNED = make_zip(
@@ -98,7 +98,7 @@ class Recorder:
             if pattern in joined:
                 self.fail_once.remove(pattern)
                 if check:
-                    raise reproduce.ReproduceError(f"failed: {joined}")
+                    raise build_script.ReproduceError(f"failed: {joined}")
         stdout = next((answer for pattern, answer in self.answers.items() if pattern in joined), "")
         return mock.Mock(returncode=0, stdout=stdout)
 
@@ -117,56 +117,56 @@ class Recorder:
 class ApkZipTest(unittest.TestCase):
     def test_apksigner_padding_is_detected_on_any_entry(self):
         apk = make_zip([("classes.dex", b"dex", 0, b""), ("res/a.png", b"png", 0, APKSIGNER_PADDING)])
-        self.assertEqual(reproduce.apk_padding(apk), "apksigner")
+        self.assertEqual(build_script.apk_padding(apk), "apksigner")
 
     def test_zip_without_the_extra_field_has_zero_padding(self):
         apk = make_zip([("classes.dex", b"dex", 0, b""), ("res/a.png", b"png", 0, b"\x00\x00")])
-        self.assertEqual(reproduce.apk_padding(apk), "zero")
+        self.assertEqual(build_script.apk_padding(apk), "zero")
 
     def test_non_zip_is_rejected(self):
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.apk_padding(b"not a zip")
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.apk_padding(b"not a zip")
 
     def test_v1_signature_files_get_the_flags_in_both_headers(self):
-        patched = reproduce.copy_v1_flags(SIGNED, COPIED)
+        patched = build_script.copy_v1_flags(SIGNED, COPIED)
         for name in ("META-INF/KEY0.SF", "META-INF/KEY0.RSA", "META-INF/MANIFEST.MF"):
             self.assertEqual(local_flags(patched, name), UTF8_FLAG, name)
             self.assertEqual(central_flags(patched, name), UTF8_FLAG, name)
 
     def test_other_entries_keep_their_flags(self):
-        patched = reproduce.copy_v1_flags(SIGNED, COPIED)
+        patched = build_script.copy_v1_flags(SIGNED, COPIED)
         for name in ("classes.dex", "META-INF/versions/9/OSGI-INF/MANIFEST.MF"):
             self.assertEqual(local_flags(patched, name), 0, name)
             self.assertEqual(central_flags(patched, name), 0, name)
 
     def test_patched_zip_matches_the_signed_one_byte_for_byte(self):
         self.assertNotEqual(COPIED, SIGNED)
-        self.assertEqual(reproduce.copy_v1_flags(SIGNED, COPIED), SIGNED)
+        self.assertEqual(build_script.copy_v1_flags(SIGNED, COPIED), SIGNED)
 
     def test_patched_zip_still_reads(self):
-        with zipfile.ZipFile(io.BytesIO(reproduce.copy_v1_flags(SIGNED, COPIED))) as z:
+        with zipfile.ZipFile(io.BytesIO(build_script.copy_v1_flags(SIGNED, COPIED))) as z:
             self.assertIsNone(z.testzip())
             self.assertEqual(z.read("META-INF/KEY0.SF"), b"sf")
 
     def test_v1_signature_file_names(self):
-        self.assertTrue(reproduce.is_v1_signature_file("META-INF/MANIFEST.MF"))
-        self.assertTrue(reproduce.is_v1_signature_file("META-INF/KEY0.SF"))
-        self.assertTrue(reproduce.is_v1_signature_file("META-INF/CERT.EC"))
-        self.assertFalse(reproduce.is_v1_signature_file("META-INF/versions/9/OSGI-INF/MANIFEST.MF"))
-        self.assertFalse(reproduce.is_v1_signature_file("META-INF/androidx.core_core.version"))
-        self.assertFalse(reproduce.is_v1_signature_file("assets/KEY0.SF"))
+        self.assertTrue(build_script.is_v1_signature_file("META-INF/MANIFEST.MF"))
+        self.assertTrue(build_script.is_v1_signature_file("META-INF/KEY0.SF"))
+        self.assertTrue(build_script.is_v1_signature_file("META-INF/CERT.EC"))
+        self.assertFalse(build_script.is_v1_signature_file("META-INF/versions/9/OSGI-INF/MANIFEST.MF"))
+        self.assertFalse(build_script.is_v1_signature_file("META-INF/androidx.core_core.version"))
+        self.assertFalse(build_script.is_v1_signature_file("assets/KEY0.SF"))
 
 
 class ReleaseDetailsTest(unittest.TestCase):
     def test_tag_version(self):
-        self.assertEqual(reproduce.tag_version("v7.1.0-beta.7"), "7.1.0")
-        self.assertEqual(reproduce.tag_version("v6.4.8"), "6.4.8")
+        self.assertEqual(build_script.tag_version("v7.1.0-beta.7"), "7.1.0")
+        self.assertEqual(build_script.tag_version("v6.4.8"), "6.4.8")
 
     def test_android_build_tag(self):
         tags = ["v6.4.0", "v6.4.0-armv7a", "v7.1.0"]
-        self.assertEqual(reproduce.android_build_tag("v6.4.0", tags, Arch.ARMV7A), "v6.4.0-armv7a")
-        self.assertEqual(reproduce.android_build_tag("v6.4.0", tags, Arch.AARCH64), "v6.4.0")
-        self.assertEqual(reproduce.android_build_tag("v7.1.0", tags, Arch.ARMV7A), "v7.1.0")
+        self.assertEqual(build_script.android_build_tag("v6.4.0", tags, Arch.ARMV7A), "v6.4.0-armv7a")
+        self.assertEqual(build_script.android_build_tag("v6.4.0", tags, Arch.AARCH64), "v6.4.0")
+        self.assertEqual(build_script.android_build_tag("v7.1.0", tags, Arch.ARMV7A), "v7.1.0")
 
     def test_arches(self):
         self.assertEqual([a.abi for a in Arch], ["arm64-v8a", "armeabi-v7a"])
@@ -177,10 +177,10 @@ class ReleaseDetailsTest(unittest.TestCase):
             props = pathlib.Path(tmp) / "apps/multiplatform/gradle.properties"
             props.parent.mkdir(parents=True)
             props.write_text("android.version_name=7.1-beta.7\nandroid.version_code=387\n")
-            self.assertEqual(reproduce.android_vercode(pathlib.Path(tmp)), "387")
+            self.assertEqual(build_script.android_vercode(pathlib.Path(tmp)), "387")
             props.write_text("android.version_name=7.1\n")
-            with self.assertRaises(reproduce.ReproduceError):
-                reproduce.android_vercode(pathlib.Path(tmp))
+            with self.assertRaises(build_script.ReproduceError):
+                build_script.android_vercode(pathlib.Path(tmp))
 
 
 class FilesTest(unittest.TestCase):
@@ -191,10 +191,10 @@ class FilesTest(unittest.TestCase):
             (d / "a.zip").write_bytes(b"a")
             (d / "SHA256SUMS").write_text("old")
             with mock.patch("builtins.print"):
-                reproduce.write_sha256sums(d)
+                build_script.write_sha256sums(d)
             self.assertEqual(
                 (d / "SHA256SUMS").read_text(),
-                f"{reproduce.sha256(d / 'a.zip')}  a.zip\n{reproduce.sha256(d / 'b.apk')}  b.apk\n",
+                f"{build_script.sha256(d / 'a.zip')}  a.zip\n{build_script.sha256(d / 'b.apk')}  b.apk\n",
             )
 
     def test_compare_dirs_reports_differing_and_missing_files(self):
@@ -203,7 +203,7 @@ class FilesTest(unittest.TestCase):
                 (pathlib.Path(built) / name).write_bytes(data)
             (pathlib.Path(released) / "same").write_bytes(b"1")
             (pathlib.Path(released) / "differs").write_bytes(b"x")
-            self.assertEqual(reproduce.compare_dirs(pathlib.Path(built), pathlib.Path(released)), ["differs", "missing"])
+            self.assertEqual(build_script.compare_dirs(pathlib.Path(built), pathlib.Path(released)), ["differs", "missing"])
 
     def test_permissions_are_normalized(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,57 +214,57 @@ class FilesTest(unittest.TestCase):
             (root / "dir/data").write_text("")
             (root / "dir/data").chmod(0o600)
             (root / "link").symlink_to("dir/data")
-            reproduce.normalize_permissions(root)
+            build_script.normalize_permissions(root)
             modes = [(root / p).stat().st_mode & 0o777 for p in ("dir", "dir/script.sh", "dir/data")]
             self.assertEqual(modes, [0o755, 0o755, 0o644])
 
     def test_single_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = pathlib.Path(tmp)
-            with self.assertRaises(reproduce.ReproduceError):
-                reproduce.single_file(d, "*.aab")
+            with self.assertRaises(build_script.ReproduceError):
+                build_script.single_file(d, "*.aab")
             (d / "a.aab").write_bytes(b"")
-            self.assertEqual(reproduce.single_file(d, "*.aab"), d / "a.aab")
+            self.assertEqual(build_script.single_file(d, "*.aab"), d / "a.aab")
             (d / "b.aab").write_bytes(b"")
-            with self.assertRaises(reproduce.ReproduceError):
-                reproduce.single_file(d, "*.aab")
+            with self.assertRaises(build_script.ReproduceError):
+                build_script.single_file(d, "*.aab")
 
 
 class ParseArgsTest(unittest.TestCase):
     def test_reproduce_defaults_to_desktop_and_both_arches(self):
         self.assertEqual(
-            reproduce.parse_args(["v7.1.0"]),
-            reproduce.Reproduce("v7.1.0", (Target.DESKTOP,), (Arch.AARCH64, Arch.ARMV7A), False),
+            build_script.parse_args(["reproduce", "v7.1.0"]),
+            build_script.Reproduce("v7.1.0", (Target.DESKTOP,), (Arch.AARCH64, Arch.ARMV7A), False),
         )
 
     def test_reproduce_android_with_options(self):
         self.assertEqual(
-            reproduce.parse_args(["v7.1.0", "android", "--arches", "armv7a", "--nix-cache"]),
-            reproduce.Reproduce("v7.1.0", (Target.ANDROID,), (Arch.ARMV7A,), True),
+            build_script.parse_args(["reproduce", "v7.1.0", "android", "--arches", "armv7a", "--nix-cache"]),
+            build_script.Reproduce("v7.1.0", (Target.ANDROID,), (Arch.ARMV7A,), True),
         )
 
     def test_reproduce_rejects_unknown_arch_and_target(self):
-        for argv in (["v7.1.0", "android", "--arches", "x86"], ["v7.1.0", "ios"]):
+        for argv in (["reproduce", "v7.1.0", "android", "--arches", "x86"], ["reproduce", "v7.1.0", "ios"], ["v7.1.0"], []):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
-                reproduce.parse_args(argv)
+                build_script.parse_args(argv)
 
     def test_build_commands(self):
         out, here = pathlib.Path("o"), pathlib.Path(".")
         self.assertEqual(
-            reproduce.parse_args(["build", "android-apk", "armv7a", "--out", "o", "--nix-cache"]),
-            reproduce.BuildApk(Arch.ARMV7A, out, here, True),
+            build_script.parse_args(["build", "android-apk", "armv7a", "--out", "o", "--nix-cache"]),
+            build_script.BuildApk(Arch.ARMV7A, out, here, True),
         )
         self.assertEqual(
-            reproduce.parse_args(["build", "android-bundle", "--libs", "l", "--out", "o", "--source", "s"]),
-            reproduce.BuildBundle(pathlib.Path("l"), out, pathlib.Path("s")),
+            build_script.parse_args(["build", "android-bundle", "--libs", "l", "--out", "o", "--source", "s"]),
+            build_script.BuildBundle(pathlib.Path("l"), out, pathlib.Path("s")),
         )
         self.assertEqual(
-            reproduce.parse_args(["build", "desktop-linux", "24.04", "--version", "7.1.0", "--out", "o"]),
-            reproduce.BuildDesktopLinux(reproduce.linux_image("24.04", platform.machine()), "7.1.0", out, here),
+            build_script.parse_args(["build", "desktop-linux", "24.04", "--version", "7.1.0", "--out", "o"]),
+            build_script.BuildDesktopLinux(build_script.linux_image("24.04", platform.machine()), "7.1.0", out, here),
         )
         self.assertEqual(
-            reproduce.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
-            reproduce.BuildIosArchive(pathlib.Path("a"), out, here, True),
+            build_script.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
+            build_script.BuildIosArchive(pathlib.Path("a"), out, here, True),
         )
 
     def test_build_commands_reject_missing_or_unknown_arguments(self):
@@ -275,7 +275,7 @@ class ParseArgsTest(unittest.TestCase):
             ["build", "android-apk", "x86", "--out", "o"],
         ):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
-                reproduce.parse_args(argv)
+                build_script.parse_args(argv)
 
 
 class ContainerTest(unittest.TestCase):
@@ -283,8 +283,8 @@ class ContainerTest(unittest.TestCase):
         recorder = Recorder(answers={"printenv": "/home/builder\n"})
         src = pathlib.Path("/src")
         with (
-            mock.patch.object(reproduce, "run", recorder),
-            reproduce.Container(src, {src: "/project"}, {"TAG": "22.04"}, ["--cap-add", "SYS_ADMIN"]) as c,
+            mock.patch.object(build_script, "run", recorder),
+            build_script.Container(src, {src: "/project"}, {"TAG": "22.04"}, ["--cap-add", "SYS_ADMIN"]) as c,
         ):
             home = c.run(Step(("printenv", "HOME")), capture=True)
             c.run(Step(("tee", "/f"), workdir="/w", env={"A": "1"}, user="root", input="x"))
@@ -303,17 +303,17 @@ class ContainerTest(unittest.TestCase):
     def test_image_is_removed_when_the_container_fails_to_start(self):
         recorder = Recorder(fail_once=["docker run"])
         with (
-            mock.patch.object(reproduce, "run", recorder),
-            self.assertRaises(reproduce.ReproduceError),
-            reproduce.Container(pathlib.Path("/src"), {}),
+            mock.patch.object(build_script, "run", recorder),
+            self.assertRaises(build_script.ReproduceError),
+            build_script.Container(pathlib.Path("/src"), {}),
         ):
             pass
         self.assertEqual(recorder.commands[-1][:3], ["docker", "image", "rm"])
 
     def test_copy_out_follows_symlinks(self):
         recorder = Recorder()
-        with mock.patch.object(reproduce, "run", recorder):
-            reproduce.Container(pathlib.Path("/src"), {}).copy_out("/project/result/x.zip", pathlib.Path("/out"))
+        with mock.patch.object(build_script, "run", recorder):
+            build_script.Container(pathlib.Path("/src"), {}).copy_out("/project/result/x.zip", pathlib.Path("/out"))
         self.assertEqual(recorder.commands[0][:3], ["docker", "cp", "-L"])
 
 
@@ -331,11 +331,11 @@ class AndroidTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def container(self):
-        return reproduce.Container(self.source, {})
+        return build_script.Container(self.source, {})
 
     def test_armv7a_container_sets_pid_max_in_its_namespace(self):
         recorder = Recorder()
-        with mock.patch.object(reproduce, "run", recorder), reproduce.android_container(self.source, self.out, set_pid_max=True):
+        with mock.patch.object(build_script, "run", recorder), build_script.android_container(self.source, self.out, set_pid_max=True):
             pass
         start = next(c for c in recorder.commands if c[1] == "run")
         self.assertIn("systempaths=unconfined", start)
@@ -349,8 +349,8 @@ class AndroidTest(unittest.TestCase):
             fail_once=["build-android.sh"],
             answers={"HOME": "/home/builder\n", "PATH": "/usr/bin\n", "find": "/home/builder/.gradle/wrapper/dists/g/bin/gradle\n"},
         )
-        with mock.patch.object(reproduce, "run", recorder), mock.patch.object(reproduce, "warn") as warn:
-            reproduce.build_apk(self.container(), self.source, Arch.ARMV7A, self.out, "simplex-armv7a.apk", True, True)
+        with mock.patch.object(build_script, "run", recorder), mock.patch.object(build_script, "warn") as warn:
+            build_script.build_apk(self.container(), self.source, Arch.ARMV7A, self.out, "simplex-armv7a.apk", True, True)
         self.assertIn("running it again", warn.call_args.args[0])
         builds = [c for c in recorder.commands if "./scripts/android/build-android.sh" in c]
         self.assertEqual(len(builds), 2)
@@ -366,31 +366,31 @@ class AndroidTest(unittest.TestCase):
     def test_apk_build_without_cache_or_libraries(self):
         (self.source / "simplex-chat-arm64-v8a.apk").write_bytes(b"apk")
         recorder = Recorder(answers={"find": "/g/bin/gradle\n"})
-        with mock.patch.object(reproduce, "run", recorder):
-            reproduce.build_apk(self.container(), self.source, Arch.AARCH64, self.out, "x.apk", False, False)
+        with mock.patch.object(build_script, "run", recorder):
+            build_script.build_apk(self.container(), self.source, Arch.AARCH64, self.out, "x.apk", False, False)
         build = next(c for c in recorder.commands if "./scripts/android/build-android.sh" in c)
         self.assertFalse(any(a.startswith("NIX_CONFIG") for a in build))
         self.assertFalse(any(c[:2] == ["docker", "cp"] for c in recorder.commands))
 
     def test_missing_gradle_distribution(self):
-        with mock.patch.object(reproduce, "run", Recorder()), self.assertRaises(reproduce.ReproduceError):
-            reproduce.build_apk(self.container(), self.source, Arch.AARCH64, self.out, "x.apk", False, False)
+        with mock.patch.object(build_script, "run", Recorder()), self.assertRaises(build_script.ReproduceError):
+            build_script.build_apk(self.container(), self.source, Arch.AARCH64, self.out, "x.apk", False, False)
 
     def test_bundle_extracts_both_arches_with_release_properties(self):
         libs = self.root / "libs"
         for arch in Arch:
             directory = libs / f"android-{arch}-unsigned"
             directory.mkdir(parents=True)
-            for lib in reproduce.ANDROID_LIBS:
+            for lib in build_script.ANDROID_LIBS:
                 with zipfile.ZipFile(directory / f"pkg-{arch}-android-{lib}.zip", "w") as z:
                     z.writestr(f"{lib}.so", f"{arch} {lib}")
-        bundle_dir = self.source / reproduce.ANDROID_BUNDLE_DIR
+        bundle_dir = self.source / build_script.ANDROID_BUNDLE_DIR
         bundle_dir.mkdir(parents=True)
         (bundle_dir / "android-google-release.aab").write_bytes(b"aab")
         recorder = Recorder()
-        with mock.patch.object(reproduce, "run", recorder):
-            reproduce.build_bundle(self.container(), self.source, libs, self.out)
-        extracted = self.source / reproduce.ANDROID_LIBS_DIR / "armeabi-v7a/libsupport.so"
+        with mock.patch.object(build_script, "run", recorder):
+            build_script.build_bundle(self.container(), self.source, libs, self.out)
+        extracted = self.source / build_script.ANDROID_LIBS_DIR / "armeabi-v7a/libsupport.so"
         self.assertEqual(extracted.read_text(), "armv7a libsupport")
         self.assertEqual(recorder.steps(), [["./gradlew", "--no-daemon", ":android:bundleGoogleRelease"]])
         self.assertEqual(
@@ -400,13 +400,13 @@ class AndroidTest(unittest.TestCase):
         self.assertEqual((self.out / "simplex.aab").read_bytes(), b"aab")
 
     def test_bundle_fails_without_a_library(self):
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.build_bundle(self.container(), self.source, self.root / "none", self.out)
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.build_bundle(self.container(), self.source, self.root / "none", self.out)
 
     def test_release_signer(self):
         recorder = Recorder(answers={"apksigner": "Signer #1 certificate SHA-256 digest: 3c52c4fd\n"})
-        with mock.patch.object(reproduce, "run", recorder):
-            self.assertEqual(reproduce.release_signer(self.container(), "simplex-aarch64.apk"), "3C:52:C4:FD")
+        with mock.patch.object(build_script, "run", recorder):
+            self.assertEqual(build_script.release_signer(self.container(), "simplex-aarch64.apk"), "3C:52:C4:FD")
 
 
 SIGNING_ENV = {
@@ -427,35 +427,35 @@ class AndroidSigningTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_unset_environment_builds_unsigned(self):
-        self.assertIsNone(reproduce.AndroidSigning.from_env({}))
+        self.assertIsNone(build_script.AndroidSigning.from_env({}))
 
     def test_partial_environment_names_what_is_missing(self):
         environ = dict(self.environ)
         del environ["ANDROID_KEY_PASSWORD"]
-        with self.assertRaises(reproduce.ReproduceError) as raised:
-            reproduce.AndroidSigning.from_env(environ)
+        with self.assertRaises(build_script.ReproduceError) as raised:
+            build_script.AndroidSigning.from_env(environ)
         self.assertIn("missing: ANDROID_KEY_PASSWORD", str(raised.exception))
 
     def test_missing_keystore_file(self):
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.AndroidSigning.from_env({**self.environ, "ANDROID_KEYSTORE": str(self.keystore) + ".gone"})
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.AndroidSigning.from_env({**self.environ, "ANDROID_KEYSTORE": str(self.keystore) + ".gone"})
 
     def test_passwords_are_secrets_kept_out_of_env_and_repr(self):
-        signing = reproduce.AndroidSigning.from_env(self.environ)
+        signing = build_script.AndroidSigning.from_env(self.environ)
         self.assertEqual(signing.env, {"ANDROID_KEYSTORE": "/keystore/release.keystore", "ANDROID_KEY_ALIAS": "simplex"})
         self.assertEqual(signing.secrets, {"ANDROID_KEYSTORE_PASSWORD": "store-secret", "ANDROID_KEY_PASSWORD": "key-secret"})
         self.assertNotIn("secret", repr(signing))
 
     def test_gradle_reads_the_same_variables(self):
-        gradle = (pathlib.Path(reproduce.__file__).parents[1] / "apps/multiplatform/android/build.gradle.kts").read_text()
-        names = ", ".join(f'"{name}"' for name in reproduce.ANDROID_SIGNING_ENV)
+        gradle = (pathlib.Path(build_script.__file__).parents[1] / "apps/multiplatform/android/build.gradle.kts").read_text()
+        names = ", ".join(f'"{name}"' for name in build_script.ANDROID_SIGNING_ENV)
         self.assertIn(f"val releaseSigningEnv = listOf({names})", gradle)
 
     def test_container_mounts_the_keystore_read_only(self):
         recorder = Recorder()
-        signing = reproduce.AndroidSigning.from_env(self.environ)
+        signing = build_script.AndroidSigning.from_env(self.environ)
         root = self.keystore.parent
-        with mock.patch.object(reproduce, "run", recorder), reproduce.android_container(root, root, False, signing):
+        with mock.patch.object(build_script, "run", recorder), build_script.android_container(root, root, False, signing):
             pass
         start = next(c for c in recorder.commands if c[1] == "run")
         self.assertIn(f"{self.keystore.resolve()}:/keystore/release.keystore:ro", start)
@@ -466,9 +466,9 @@ class AndroidSigningTest(unittest.TestCase):
         (source / "apps/multiplatform/gradle.properties").write_text("android.version_code=387\n")
         (source / "simplex-chat-arm64-v8a.apk").write_bytes(b"signed apk")
         recorder = Recorder(answers={"find": "/g/bin/gradle\n"})
-        signing = reproduce.AndroidSigning.from_env(self.environ)
-        with mock.patch.object(reproduce, "run", recorder):
-            reproduce.build_apk(reproduce.Container(source, {}), source, Arch.AARCH64, source, "x.apk", False, False, signing)
+        signing = build_script.AndroidSigning.from_env(self.environ)
+        with mock.patch.object(build_script, "run", recorder):
+            build_script.build_apk(build_script.Container(source, {}), source, Arch.AARCH64, source, "x.apk", False, False, signing)
         index = next(i for i, c in enumerate(recorder.commands) if "./scripts/android/build-android.sh" in c)
         build = recorder.commands[index]
         self.assertIn("ANDROID_KEYSTORE=/keystore/release.keystore", build)
@@ -478,8 +478,8 @@ class AndroidSigningTest(unittest.TestCase):
         self.assertEqual(recorder.envs[index], signing.secrets)
 
     def test_unsigned_build_warns(self):
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(reproduce, "warn") as warn:
-            self.assertIsNone(reproduce.android_signing())
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(build_script, "warn") as warn:
+            self.assertIsNone(build_script.android_signing())
         self.assertIn("building unsigned", warn.call_args.args[0])
 
 
@@ -498,8 +498,8 @@ class VerifyApkTest(unittest.TestCase):
                     (out / pathlib.Path(args[-1]).name).write_bytes(outputs.pop(0))
                 return recorder(args, **kwargs)
 
-            with mock.patch.object(reproduce, "run", fake_run):
-                result = reproduce.verify_apk(reproduce.Container(out, {}), out, "rel.apk", "built.apk")
+            with mock.patch.object(build_script, "run", fake_run):
+                result = build_script.verify_apk(build_script.Container(out, {}), out, "rel.apk", "built.apk")
             return result, recorder.steps()
 
     def test_agp_signed_release_verifies_without_realigning(self):
@@ -536,7 +536,7 @@ class VerifyApkTest(unittest.TestCase):
 class DesktopTest(unittest.TestCase):
     def test_files_of_each_image(self):
         self.assertEqual(
-            reproduce.desktop_files(JAMMY),
+            build_script.desktop_files(JAMMY),
             [
                 "simplex-chat-ubuntu-22_04-x86_64",
                 "simplex-chat-ubuntu-22_04-x86_64.deb",
@@ -544,12 +544,12 @@ class DesktopTest(unittest.TestCase):
                 "simplex-desktop-x86_64.AppImage",
             ],
         )
-        self.assertNotIn("simplex-desktop-x86_64.AppImage", reproduce.desktop_files(NOBLE))
+        self.assertNotIn("simplex-desktop-x86_64.AppImage", build_script.desktop_files(NOBLE))
 
     def test_aarch64_files_and_image(self):
-        self.assertEqual(reproduce.linux_image("22.04", "aarch64"), JAMMY_ARM)
+        self.assertEqual(build_script.linux_image("22.04", "aarch64"), JAMMY_ARM)
         self.assertEqual(
-            reproduce.desktop_files(JAMMY_ARM),
+            build_script.desktop_files(JAMMY_ARM),
             [
                 "simplex-chat-ubuntu-22_04-aarch64",
                 "simplex-chat-ubuntu-22_04-aarch64.deb",
@@ -557,12 +557,12 @@ class DesktopTest(unittest.TestCase):
                 "simplex-desktop-aarch64.AppImage",
             ],
         )
-        self.assertIn("linux-aarch64", reproduce.desktop_steps(JAMMY_ARM, "7.1.0")[2].argv)
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.linux_image("24.04", "riscv64")
+        self.assertIn("linux-aarch64", build_script.desktop_steps(JAMMY_ARM, "7.1.0")[2].argv)
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.linux_image("24.04", "riscv64")
 
     def test_steps_of_each_image(self):
-        steps = reproduce.desktop_steps(JAMMY, "7.1.0")
+        steps = build_script.desktop_steps(JAMMY, "7.1.0")
         self.assertEqual(
             [s.argv[:2] for s in steps],
             [
@@ -573,21 +573,21 @@ class DesktopTest(unittest.TestCase):
                 ("./scripts/desktop/make-appimage-linux.sh",),
             ],
         )
-        self.assertEqual(len(reproduce.desktop_steps(NOBLE, "7.1.0")), 2)
+        self.assertEqual(len(build_script.desktop_steps(NOBLE, "7.1.0")), 2)
         self.assertEqual(steps[1].env, {"ASSETS_DIR": "../../assets"})
 
     def test_appimage_bundles_the_pinned_openssl(self):
-        configure, build, appimage = reproduce.desktop_steps(JAMMY, "7.1.0")[2:]
-        self.assertEqual(configure.workdir, f"/out/openssl-{reproduce.OPENSSL_VERSION}")
+        configure, build, appimage = build_script.desktop_steps(JAMMY, "7.1.0")[2:]
+        self.assertEqual(configure.workdir, f"/out/openssl-{build_script.OPENSSL_VERSION}")
         self.assertIn("--openssldir=/etc/ssl", configure.argv)
         self.assertIn("--prefix=/usr/local", configure.argv)
         self.assertEqual(build.env, {"SOURCE_DATE_EPOCH": "1704067200"})
-        self.assertEqual(appimage.env["LIBCRYPTO"], f"/out/openssl-{reproduce.OPENSSL_VERSION}/libcrypto.so.3")
+        self.assertEqual(appimage.env["LIBCRYPTO"], f"/out/openssl-{build_script.OPENSSL_VERSION}/libcrypto.so.3")
 
     def test_build_runs_the_steps_and_copies_the_released_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, out = pathlib.Path(tmp) / "src", pathlib.Path(tmp) / "out"
-            release = source / reproduce.DESKTOP_RELEASE_DIR
+            release = source / build_script.DESKTOP_RELEASE_DIR
             (release / "deb").mkdir(parents=True)
             (release / "deb/simplex_x86_64.deb").write_bytes(b"desktop deb")
             (release / "SimpleX_Chat-x86_64.AppImage").write_bytes(b"appimage")
@@ -603,10 +603,10 @@ class DesktopTest(unittest.TestCase):
                     (work / "deb-build/simplex-chat.deb").write_bytes(b"cli deb")
                 return recorder(args, **kwargs)
 
-            with mock.patch.object(reproduce, "run", fake_run), mock.patch.object(reproduce, "log"), mock.patch.object(
-                reproduce, "fetch_openssl"
+            with mock.patch.object(build_script, "run", fake_run), mock.patch.object(build_script, "log"), mock.patch.object(
+                build_script, "fetch_openssl"
             ) as fetch_openssl:
-                reproduce.build_desktop_linux(source, JAMMY, "7.1.0", out)
+                build_script.build_desktop_linux(source, JAMMY, "7.1.0", out)
             work = next(pathlib.Path(a.split(":")[0]) for c in recorder.commands for a in c if a.endswith(":/out"))
             fetch_openssl.assert_called_once_with(work)
             self.assertIn("flags: +openssl", (source / "cabal.project.local").read_text())
@@ -615,7 +615,7 @@ class DesktopTest(unittest.TestCase):
             self.assertIn(f"HASH={JAMMY.digest}", build)
             self.assertEqual(
                 [s[0] for s in recorder.steps()],
-                ["cabal", "cabal", "cabal", "cabal", "cp", "strip"] + [s.argv[0] for s in reproduce.desktop_steps(JAMMY, "7.1.0")],
+                ["cabal", "cabal", "cabal", "cabal", "cp", "strip"] + [s.argv[0] for s in build_script.desktop_steps(JAMMY, "7.1.0")],
             )
             self.assertIn(["cp", "/project/dist-newstyle/build/simplex-chat", "/out/simplex-chat"], recorder.steps())
             self.assertEqual(
@@ -633,23 +633,23 @@ class DesktopTest(unittest.TestCase):
             results = pathlib.Path(tmp) / "v7.1.0-simplex-chat"
 
             def fake_build(source, image, version, out):
-                for name in reproduce.desktop_files(image):
+                for name in build_script.desktop_files(image):
                     (out / name).write_bytes(name.encode())
 
             def fake_download(url, target):
                 target.write_bytes(b"other" if target.name.endswith(".AppImage") else target.name.encode())
 
-            with mock.patch.object(reproduce, "checkout"), mock.patch.object(
-                reproduce, "build_desktop_linux", fake_build
-            ), mock.patch.object(reproduce, "download", fake_download), mock.patch.object(reproduce, "log"):
-                mismatched = reproduce.reproduce_desktop("v7.1.0", pathlib.Path(tmp), results)
+            with mock.patch.object(build_script, "checkout"), mock.patch.object(
+                build_script, "build_desktop_linux", fake_build
+            ), mock.patch.object(build_script, "download", fake_download), mock.patch.object(build_script, "log"):
+                mismatched = build_script.reproduce_desktop("v7.1.0", pathlib.Path(tmp), results)
             self.assertEqual(mismatched, ["simplex-desktop-x86_64.AppImage"])
             self.assertFalse((results / "_sha256sums").exists())
 
 
 class OpenSslTest(unittest.TestCase):
     def tarball(self, path):
-        member = tarfile.TarInfo(f"openssl-{reproduce.OPENSSL_VERSION}/Configure")
+        member = tarfile.TarInfo(f"openssl-{build_script.OPENSSL_VERSION}/Configure")
         member.size = 4
         with tarfile.open(path, "w:gz") as tar:
             tar.addfile(member, io.BytesIO(b"perl"))
@@ -658,41 +658,41 @@ class OpenSslTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
             self.tarball(work / "fixture.tar.gz")
-            digest = reproduce.sha256(work / "fixture.tar.gz")
+            digest = build_script.sha256(work / "fixture.tar.gz")
 
             def fixture_download(url, target):
                 shutil.copy(work / "fixture.tar.gz", target)
 
-            with mock.patch.object(reproduce, "download", fixture_download), mock.patch.object(reproduce, "OPENSSL_SHA256", digest):
-                source = reproduce.fetch_openssl(work)
+            with mock.patch.object(build_script, "download", fixture_download), mock.patch.object(build_script, "OPENSSL_SHA256", digest):
+                source = build_script.fetch_openssl(work)
             self.assertEqual((source / "Configure").read_text(), "perl")
 
     def test_fetch_rejects_a_changed_tarball(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
-            with mock.patch.object(reproduce, "download", lambda url, target: self.tarball(target)), self.assertRaises(
-                reproduce.ReproduceError
+            with mock.patch.object(build_script, "download", lambda url, target: self.tarball(target)), self.assertRaises(
+                build_script.ReproduceError
             ) as raised:
-                reproduce.fetch_openssl(work)
+                build_script.fetch_openssl(work)
             self.assertIn("pinned SHA-256", str(raised.exception))
-            self.assertFalse((work / f"openssl-{reproduce.OPENSSL_VERSION}").exists())
+            self.assertFalse((work / f"openssl-{build_script.OPENSSL_VERSION}").exists())
 
     def test_build_installs_only_when_asked(self):
-        build = reproduce.openssl_build("darwin64-arm64-cc", "/w/openssl", "/etc/ssl", install=True)
+        build = build_script.openssl_build("darwin64-arm64-cc", "/w/openssl", "/etc/ssl", install=True)
         self.assertEqual(
             build[0],
             ("perl", "Configure", "darwin64-arm64-cc", "--prefix=/w/openssl", "--openssldir=/etc/ssl")
             + ("--libdir=lib", "no-docs", "no-tests"),
         )
         self.assertEqual(build[-1], ("make", "install_sw"))
-        self.assertNotIn(("make", "install_sw"), reproduce.openssl_build("mingw64", "/p", "/d", install=False))
+        self.assertNotIn(("make", "install_sw"), build_script.openssl_build("mingw64", "/p", "/d", install=False))
 
     def test_flake_pins_the_same_openssl(self):
-        flake = (pathlib.Path(reproduce.__file__).parents[1] / "flake.nix").read_text()
+        flake = (pathlib.Path(build_script.__file__).parents[1] / "flake.nix").read_text()
         pin = flake[flake.index("let pinOpenssl") : flake.index("}); in", flake.index("let pinOpenssl"))]
-        self.assertIn(f'version = "{reproduce.OPENSSL_VERSION}";', pin)
-        self.assertIn(f'url = "{reproduce.OPENSSL_URL}";', pin)
-        self.assertIn(f'sha256 = "{reproduce.OPENSSL_SHA256}";', pin)
+        self.assertIn(f'version = "{build_script.OPENSSL_VERSION}";', pin)
+        self.assertIn(f'url = "{build_script.OPENSSL_URL}";', pin)
+        self.assertIn(f'sha256 = "{build_script.OPENSSL_SHA256}";', pin)
 
 
 class HostDesktopTest(unittest.TestCase):
@@ -717,12 +717,12 @@ class HostDesktopTest(unittest.TestCase):
                 (lib / "lib").mkdir(parents=True, exist_ok=True)
                 (lib / "lib/libcrypto.a").write_bytes(b"static")
             if "build-lib" in " ".join(args) or "build-desktop-mac.sh" in " ".join(args):
-                libs = self.source / reproduce.DESKTOP_LIBS_DIR / libs_dir
+                libs = self.source / build_script.DESKTOP_LIBS_DIR / libs_dir
                 (libs / "vlc").mkdir(parents=True)
                 (libs / "libsimplex.so").write_bytes(b"lib")
                 (libs / "vlc/libvlc").write_bytes(b"vlc")
-                (self.source / reproduce.DESKTOP_RELEASE_DIR / desktop_dir).mkdir(parents=True)
-                (self.source / reproduce.DESKTOP_RELEASE_DIR / desktop_dir / desktop_name).write_bytes(b"desktop")
+                (self.source / build_script.DESKTOP_RELEASE_DIR / desktop_dir).mkdir(parents=True)
+                (self.source / build_script.DESKTOP_RELEASE_DIR / desktop_dir / desktop_name).write_bytes(b"desktop")
             if args[0] == "dlltool":
                 (self.source / "libsimplex.lib").write_bytes(b"import lib")
             return recorder(args, **kwargs)
@@ -732,7 +732,7 @@ class HostDesktopTest(unittest.TestCase):
         return recorder, fake_run
 
     def fetch(self, work):
-        source = work / f"openssl-{reproduce.OPENSSL_VERSION}"
+        source = work / f"openssl-{build_script.OPENSSL_VERSION}"
         source.mkdir()
         (source / "libcrypto.a").write_bytes(b"static")
         return source
@@ -742,28 +742,29 @@ class HostDesktopTest(unittest.TestCase):
             return sorted(z.namelist())
 
     def test_cabal_local_links_both_packages_with_openssl(self):
-        text = reproduce.openssl_cabal_local("/o/include", "/o/lib", "-optl-lws2_32")
+        text = build_script.openssl_cabal_local("/o/include", "/o/lib", "-optl-lws2_32")
         self.assertEqual(text.count("extra-include-dirs: /o/include"), 2)
         self.assertIn("package simplexmq\n", text)
         self.assertIn("package direct-sqlcipher\n    extra-include-dirs: /o/include\n    extra-lib-dirs: /o/lib\n    flags: +openssl", text)
         self.assertTrue(text.endswith("package simplex-chat\n    ghc-options: -optl-lws2_32\n"))
-        self.assertNotIn("simplex-chat", reproduce.openssl_cabal_local("/i", "/l"))
+        self.assertNotIn("simplex-chat", build_script.openssl_cabal_local("/i", "/l"))
 
     def test_cli_loading_libcrypto_is_rejected(self):
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.check_static_openssl(pathlib.Path("cli"), "\t/opt/homebrew/opt/openssl@3.0/lib/libcrypto.3.dylib\n")
-        reproduce.check_static_openssl(pathlib.Path("cli"), "\t/usr/lib/libSystem.B.dylib\n")
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.check_static_openssl(pathlib.Path("cli"), "\t/opt/homebrew/opt/openssl@3.0/lib/libcrypto.3.dylib\n")
+        build_script.check_static_openssl(pathlib.Path("cli"), "\t/usr/lib/libSystem.B.dylib\n")
 
     def test_apple_signing_needs_all_or_none(self):
-        full = {name: "x" for name in reproduce.APPLE_SIGNING_ENV}
+        full = {name: "x" for name in build_script.APPLE_SIGNING_ENV}
         with mock.patch.dict(os.environ, full, clear=True):
-            self.assertTrue(reproduce.apple_signing(require=True))
-        with mock.patch.dict(os.environ, {"APPLE_SIMPLEX_SIGNING_KEYCHAIN": "x"}, clear=True), self.assertRaises(reproduce.ReproduceError):
-            reproduce.apple_signing(require=False)
-        with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(reproduce.ReproduceError):
-            reproduce.apple_signing(require=True)
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(reproduce, "warn") as warn:
-            self.assertFalse(reproduce.apple_signing(require=False))
+            self.assertTrue(build_script.apple_signing(require=True))
+        partial = {"APPLE_SIMPLEX_SIGNING_KEYCHAIN": "x"}
+        with mock.patch.dict(os.environ, partial, clear=True), self.assertRaises(build_script.ReproduceError):
+            build_script.apple_signing(require=False)
+        with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(build_script.ReproduceError):
+            build_script.apple_signing(require=True)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(build_script, "warn") as warn:
+            self.assertFalse(build_script.apple_signing(require=False))
         self.assertIn("unsigned", warn.call_args.args[0])
 
     def test_macos_unsigned_build(self):
@@ -775,17 +776,17 @@ class HostDesktopTest(unittest.TestCase):
             return source
 
         with (
-            mock.patch.object(reproduce, "run", fake_run),
-            mock.patch.object(reproduce, "fetch_openssl", fetch),
-            mock.patch.object(reproduce.platform, "machine", return_value="arm64"),
+            mock.patch.object(build_script, "run", fake_run),
+            mock.patch.object(build_script, "fetch_openssl", fetch),
+            mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch.object(reproduce, "warn"),
-            mock.patch.object(reproduce.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(self.root / "work"))),
+            mock.patch.object(build_script, "warn"),
+            mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(self.root / "work"))),
         ):
             (self.root / "work").mkdir()
             (self.root / "work/openssl/lib").mkdir(parents=True)
             (self.root / "work/openssl/lib/libcrypto.a").write_bytes(b"static")
-            reproduce.build_desktop_macos(self.source, self.out, require_signing=False)
+            build_script.build_desktop_macos(self.source, self.out, require_signing=False)
         configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
         self.assertIn("darwin64-arm64-cc", configure)
         self.assertIn("--openssldir=/etc/ssl", configure)
@@ -802,26 +803,26 @@ class HostDesktopTest(unittest.TestCase):
     def test_macos_cli_linking_libcrypto_fails(self):
         _, fake_run = self.fake_build("mac-aarch64", "dmg", "SimpleX-7.1.0.dmg", "\t@rpath/libcrypto.3.dylib\n")
         with (
-            mock.patch.object(reproduce, "run", fake_run),
-            mock.patch.object(reproduce, "fetch_openssl", self.fetch),
-            mock.patch.object(reproduce.platform, "machine", return_value="x86_64"),
-            mock.patch.object(reproduce, "apple_signing", return_value=False),
-            mock.patch.object(reproduce, "static_libcrypto", return_value=self.root),
-            self.assertRaises(reproduce.ReproduceError),
+            mock.patch.object(build_script, "run", fake_run),
+            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(build_script.platform, "machine", return_value="x86_64"),
+            mock.patch.object(build_script, "apple_signing", return_value=False),
+            mock.patch.object(build_script, "static_libcrypto", return_value=self.root),
+            self.assertRaises(build_script.ReproduceError),
         ):
-            reproduce.build_desktop_macos(self.source, self.out, require_signing=False)
+            build_script.build_desktop_macos(self.source, self.out, require_signing=False)
 
     def test_windows_build(self):
         recorder, fake_run = self.fake_build("windows-x86_64", "msi", "SimpleX-7.1.0.msi", "\tDLL Name: KERNEL32.dll\n")
-        with mock.patch.object(reproduce, "run", fake_run), mock.patch.object(reproduce, "fetch_openssl", self.fetch):
-            reproduce.build_desktop_windows(self.source, self.out)
+        with mock.patch.object(build_script, "run", fake_run), mock.patch.object(build_script, "fetch_openssl", self.fetch):
+            build_script.build_desktop_windows(self.source, self.out)
         configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
         self.assertIn("mingw64", configure)
         self.assertIn("--prefix=C:/Program Files/OpenSSL", configure)
         self.assertIn("--openssldir=C:/Program Files/Common Files/SSL", configure)
         self.assertNotIn(["make", "install_sw"], recorder.commands)
         lib_build = recorder.commands.index(["bash", "scripts/desktop/build-lib-windows.sh"])
-        self.assertTrue(recorder.envs[lib_build]["OPENSSL_DIR"].endswith(f"/openssl-{reproduce.OPENSSL_VERSION}"))
+        self.assertTrue(recorder.envs[lib_build]["OPENSSL_DIR"].endswith(f"/openssl-{build_script.OPENSSL_VERSION}"))
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-windows-x86_64.zip", "simplex-chat-windows-x86-64", "simplex-desktop-windows-x86_64.msi"],
@@ -833,15 +834,15 @@ class HostDesktopTest(unittest.TestCase):
 
         def fake_cli(source, cabal_local):
             cabal_locals.append(cabal_local)
-            raise reproduce.ReproduceError("stop")
+            raise build_script.ReproduceError("stop")
 
         with (
-            mock.patch.object(reproduce, "run"),
-            mock.patch.object(reproduce, "fetch_openssl", self.fetch),
-            mock.patch.object(reproduce, "build_host_cli", fake_cli),
-            self.assertRaises(reproduce.ReproduceError),
+            mock.patch.object(build_script, "run"),
+            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(build_script, "build_host_cli", fake_cli),
+            self.assertRaises(build_script.ReproduceError),
         ):
-            reproduce.build_desktop_windows(self.source, self.out)
+            build_script.build_desktop_windows(self.source, self.out)
         self.assertIn("/openssl-static\n", cabal_locals[0])
         self.assertIn("ghc-options: -optl-lws2_32 -optl-lgdi32 -optl-lcrypt32", cabal_locals[0])
 
@@ -853,7 +854,7 @@ class HostDesktopTest(unittest.TestCase):
         pack.parent.chmod(0o555)
         keep = self.source / "dist-newstyle/src/aeson-1"
         keep.mkdir()
-        reproduce.remove_cabal_sources(self.source)
+        build_script.remove_cabal_sources(self.source)
         self.assertFalse((self.source / "dist-newstyle/src/simplexmq-abc").exists())
         self.assertTrue(keep.exists())
 
@@ -890,42 +891,42 @@ ENTITLEMENTS = """<?xml version="1.0" encoding="UTF-8"?>
 
 class IosDetailsTest(unittest.TestCase):
     def test_minimum_versions_reads_both_load_commands(self):
-        self.assertEqual(reproduce.minimum_versions(OTOOL), ["11.0", "14.2"])
-        self.assertEqual(reproduce.minimum_versions("Load command 1\n      cmd LC_SYMTAB\n"), [])
+        self.assertEqual(build_script.minimum_versions(OTOOL), ["11.0", "14.2"])
+        self.assertEqual(build_script.minimum_versions("Load command 1\n      cmd LC_SYMTAB\n"), [])
 
     def test_versions_compare_numerically(self):
-        self.assertGreater(reproduce.version_tuple("15.10"), reproduce.version_tuple("15.9"))
-        self.assertEqual(max(["9.0", "15.0", "11.0"], key=reproduce.version_tuple), "15.0")
+        self.assertGreater(build_script.version_tuple("15.10"), build_script.version_tuple("15.9"))
+        self.assertEqual(max(["9.0", "15.0", "11.0"], key=build_script.version_tuple), "15.0")
 
     def test_build_settings_take_the_first_value(self):
         output = (
             "Build settings for target X:\n"
             "    DEVELOPMENT_TEAM = 5NN7GUYB6T\n    IPHONEOS_DEPLOYMENT_TARGET = 15.0\n    DEVELOPMENT_TEAM = OTHER\n"
         )
-        settings = reproduce.build_settings(output, ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
+        settings = build_script.build_settings(output, ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
         self.assertEqual(settings, {"DEVELOPMENT_TEAM": "5NN7GUYB6T", "IPHONEOS_DEPLOYMENT_TARGET": "15.0"})
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.build_settings("    DEVELOPMENT_TEAM = 5NN7GUYB6T\n", ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.build_settings("    DEVELOPMENT_TEAM = 5NN7GUYB6T\n", ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
 
     def test_entitlements_get_the_team_prefix(self):
-        self.assertIn("<string>5NN7GUYB6T.chat.simplex.app</string>", reproduce.resolve_entitlements(ENTITLEMENTS, "5NN7GUYB6T"))
+        self.assertIn("<string>5NN7GUYB6T.chat.simplex.app</string>", build_script.resolve_entitlements(ENTITLEMENTS, "5NN7GUYB6T"))
 
     def test_nix_env_finds_a_certificate_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             cert = pathlib.Path(tmp) / "ca-bundle.crt"
             cert.write_text("")
             with mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True), mock.patch.object(
-                reproduce, "NIX_CERT_FILES", (pathlib.Path(tmp) / "missing", cert)
+                build_script, "NIX_CERT_FILES", (pathlib.Path(tmp) / "missing", cert)
             ):
-                env = reproduce.nix_env()
+                env = build_script.nix_env()
             self.assertEqual(env["NIX_SSL_CERT_FILE"], str(cert))
             self.assertTrue(env["PATH"].endswith(":/usr/bin"))
             with (
                 mock.patch.dict(os.environ, {}, clear=True),
-                mock.patch.object(reproduce, "NIX_CERT_FILES", ()),
-                self.assertRaises(reproduce.ReproduceError),
+                mock.patch.object(build_script, "NIX_CERT_FILES", ()),
+                self.assertRaises(build_script.ReproduceError),
             ):
-                reproduce.nix_env()
+                build_script.nix_env()
 
 
 class FakeApple:
@@ -965,28 +966,28 @@ class IosSigningTest(unittest.TestCase):
 
     def test_signs_nested_code_first_then_the_bundle_with_resolved_entitlements(self):
         apple = FakeApple()
-        with mock.patch.object(reproduce, "run", apple), mock.patch("builtins.print"):
-            reproduce.sign_bundle(self.bundle, self.entitlements, "5NN7GUYB6T", self.dir)
+        with mock.patch.object(build_script, "run", apple), mock.patch("builtins.print"):
+            build_script.sign_bundle(self.bundle, self.entitlements, "5NN7GUYB6T", self.dir)
         signs = [c for c in apple.commands if "--sign" in c]
         self.assertEqual([pathlib.Path(c[-1]).name for c in signs], ["SimpleXChat.framework", "SimpleX.app"])
         self.assertIn("5NN7GUYB6T.chat.simplex.app", apple.signed[str(self.bundle)])
 
     def test_rejects_a_signature_with_other_entitlements(self):
-        with mock.patch.object(reproduce, "run", FakeApple(tamper=True)), self.assertRaises(reproduce.ReproduceError):
-            reproduce.sign_bundle(self.bundle, self.entitlements, "5NN7GUYB6T", self.dir)
+        with mock.patch.object(build_script, "run", FakeApple(tamper=True)), self.assertRaises(build_script.ReproduceError):
+            build_script.sign_bundle(self.bundle, self.entitlements, "5NN7GUYB6T", self.dir)
 
     def test_rejects_a_bundle_without_entitlements(self):
-        with self.assertRaises(reproduce.ReproduceError):
-            reproduce.sign_bundle(self.bundle, self.dir / "missing.entitlements", "5NN7GUYB6T", self.dir)
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.sign_bundle(self.bundle, self.dir / "missing.entitlements", "5NN7GUYB6T", self.dir)
 
     def test_minimum_version_guard(self):
         libs = self.dir / "apps/ios/Libraries/ios"
         libs.mkdir(parents=True)
         (libs / "libffi.a").write_bytes(b"")
-        with mock.patch.object(reproduce, "run", FakeApple()), mock.patch("builtins.print"):
-            reproduce.check_minimum_versions(self.dir, "15.0")
-            with self.assertRaises(reproduce.ReproduceError):
-                reproduce.check_minimum_versions(self.dir, "14.0")
+        with mock.patch.object(build_script, "run", FakeApple()), mock.patch("builtins.print"):
+            build_script.check_minimum_versions(self.dir, "15.0")
+            with self.assertRaises(build_script.ReproduceError):
+                build_script.check_minimum_versions(self.dir, "14.0")
 
 
 class IosArchiveTest(unittest.TestCase):
@@ -1011,7 +1012,7 @@ class IosArchiveTest(unittest.TestCase):
                     self.assertIn("NIX_SSL_CERT_FILE", env)
                     link = pathlib.Path(args[args.index("--out-link") + 1])
                     link.mkdir()
-                    (link / reproduce.IOS_CORE_ZIP).write_bytes(b"core")
+                    (link / build_script.IOS_CORE_ZIP).write_bytes(b"core")
                 elif args[0] == "scripts/ios/copy-assets.sh":
                     (source / "apps/ios/Shared/SimpleXAssets.xcassets/logo.imageset").mkdir()
                 elif args[:2] == ["xcodebuild", "-showBuildSettings"]:
@@ -1025,12 +1026,12 @@ class IosArchiveTest(unittest.TestCase):
                     pathlib.Path(args[-1]).write_bytes(b"archive")
                 return apple(args, cwd, env, input, check, capture)
 
-            with mock.patch.object(reproduce, "run", fake_run), mock.patch("builtins.print"), mock.patch.object(
-                reproduce.Path, "home", return_value=home
-            ), mock.patch.object(reproduce, "nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}):
-                reproduce.build_ios_archive(source, art, out, install=False)
+            with mock.patch.object(build_script, "run", fake_run), mock.patch("builtins.print"), mock.patch.object(
+                build_script.Path, "home", return_value=home
+            ), mock.patch.object(build_script, "nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}):
+                build_script.build_ios_archive(source, art, out, install=False)
 
-            self.assertEqual((home / "Downloads" / reproduce.IOS_CORE_ZIP).read_bytes(), b"core")
+            self.assertEqual((home / "Downloads" / build_script.IOS_CORE_ZIP).read_bytes(), b"core")
             xcconfig = (source / "apps/ios/Local.xcconfig").read_text()
             self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", xcconfig)
             self.assertIn(f"SIMPLEX_ASSETS_DIR = {art}", xcconfig)
@@ -1054,8 +1055,8 @@ class IosArchiveTest(unittest.TestCase):
             self.assertEqual((out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
 
     def test_needs_the_art_assets(self):
-        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(reproduce.ReproduceError):
-            reproduce.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(build_script.ReproduceError):
+            build_script.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
 
 
 class GitHubLogTest(unittest.TestCase):
@@ -1067,30 +1068,30 @@ class GitHubLogTest(unittest.TestCase):
         return out.getvalue(), err.getvalue()
 
     def test_warn_annotates_on_github_actions(self):
-        out, err = self.output(GITHUB, lambda: reproduce.warn("unsigned build"))
+        out, err = self.output(GITHUB, lambda: build_script.warn("unsigned build"))
         self.assertEqual((out, err), ("::warning::unsigned build\n", ""))
 
     def test_warn_prints_to_stderr_elsewhere(self):
-        out, err = self.output({}, lambda: reproduce.warn("unsigned build"))
+        out, err = self.output({}, lambda: build_script.warn("unsigned build"))
         self.assertEqual(out, "")
         self.assertIn("warning: unsigned build", err)
 
     def test_error_escapes_newlines_and_percent(self):
-        out, _ = self.output(GITHUB, lambda: reproduce.error("100% failed\nat step 2"))
+        out, _ = self.output(GITHUB, lambda: build_script.error("100% failed\nat step 2"))
         self.assertEqual(out, "::error::100%25 failed%0Aat step 2\n")
 
     def test_group_is_closed_when_its_command_fails(self):
         def failing():
-            with reproduce.log_group("cabal build"):
-                raise reproduce.ReproduceError("failed")
+            with build_script.log_group("cabal build"):
+                raise build_script.ReproduceError("failed")
 
-        out, _ = self.output(GITHUB, lambda: self.assertRaises(reproduce.ReproduceError, failing))
+        out, _ = self.output(GITHUB, lambda: self.assertRaises(build_script.ReproduceError, failing))
         self.assertEqual(out, "::group::cabal build\n::endgroup::\n")
 
     def test_run_groups_shown_output_only(self):
         def commands():
-            reproduce.run([sys.executable, "-c", "print('built')"])
-            reproduce.run([sys.executable, "-c", "print('hidden')"], capture=True, title="never shown")
+            build_script.run([sys.executable, "-c", "print('built')"])
+            build_script.run([sys.executable, "-c", "print('hidden')"], capture=True, title="never shown")
 
         with mock.patch.object(subprocess, "run", return_value=mock.Mock(returncode=0, stdout="")):
             out, _ = self.output(GITHUB, commands)
@@ -1098,9 +1099,9 @@ class GitHubLogTest(unittest.TestCase):
 
     def test_container_steps_are_titled_with_their_command(self):
         recorder = Recorder()
-        container = reproduce.Container(pathlib.Path("."), {}, {}, [])
-        with mock.patch.object(reproduce, "run", wraps=recorder) as run:
-            container.run(reproduce.Step(("cabal", "update"), env={"PATH": "/x"}))
+        container = build_script.Container(pathlib.Path("."), {}, {}, [])
+        with mock.patch.object(build_script, "run", wraps=recorder) as run:
+            container.run(build_script.Step(("cabal", "update"), env={"PATH": "/x"}))
         self.assertEqual(run.call_args.kwargs["title"], "cabal update")
 
     def test_summary_lists_files_on_github_actions(self):
@@ -1108,7 +1109,7 @@ class GitHubLogTest(unittest.TestCase):
             d = pathlib.Path(tmp)
             (d / "simplex-aarch64.apk").write_bytes(b"apk")
             summary = d / "summary.md"
-            self.output({**GITHUB, "GITHUB_STEP_SUMMARY": str(summary)}, lambda: reproduce.write_sha256sums(d))
+            self.output({**GITHUB, "GITHUB_STEP_SUMMARY": str(summary)}, lambda: build_script.write_sha256sums(d))
             text = summary.read_text()
         self.assertIn("| `simplex-aarch64.apk` | 3 | `", text)
         self.assertNotIn("SHA256SUMS`", text)
@@ -1116,42 +1117,42 @@ class GitHubLogTest(unittest.TestCase):
     def test_summary_is_skipped_elsewhere(self):
         with tempfile.TemporaryDirectory() as tmp:
             summary = pathlib.Path(tmp) / "summary.md"
-            self.output({"GITHUB_STEP_SUMMARY": str(summary)}, lambda: reproduce.add_summary("text"))
+            self.output({"GITHUB_STEP_SUMMARY": str(summary)}, lambda: build_script.add_summary("text"))
             self.assertFalse(summary.exists())
 
 
 class MainTest(unittest.TestCase):
     def test_errors_exit_with_1(self):
-        with mock.patch.object(reproduce, "reproduce", side_effect=reproduce.ReproduceError("boom")), mock.patch.dict(
+        with mock.patch.object(build_script, "reproduce", side_effect=build_script.ReproduceError("boom")), mock.patch.dict(
             os.environ, {}, clear=True
         ), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            self.assertEqual(reproduce.main(["v7.1.0"]), 1)
+            self.assertEqual(build_script.main(["reproduce", "v7.1.0"]), 1)
         self.assertIn("error: boom", err.getvalue())
 
     def test_build_commands_go_to_build(self):
-        with mock.patch.object(reproduce, "build") as build:
-            self.assertEqual(reproduce.main(["build", "android-bundle", "--libs", "l", "--out", "o"]), 0)
-        self.assertIsInstance(build.call_args.args[0], reproduce.BuildBundle)
+        with mock.patch.object(build_script, "build") as build:
+            self.assertEqual(build_script.main(["build", "android-bundle", "--libs", "l", "--out", "o"]), 0)
+        self.assertIsInstance(build.call_args.args[0], build_script.BuildBundle)
 
     def test_missing_tools_are_named(self):
-        with mock.patch.object(reproduce.shutil, "which", return_value=None), self.assertRaises(reproduce.ReproduceError) as e:
-            reproduce.require_tools(["git", "docker"])
+        with mock.patch.object(build_script.shutil, "which", return_value=None), self.assertRaises(build_script.ReproduceError) as e:
+            build_script.require_tools(["git", "docker"])
         self.assertIn("git, docker", str(e.exception))
 
     def test_unreachable_docker_daemon(self):
-        with mock.patch.object(reproduce.shutil, "which", return_value="/usr/bin/docker"), mock.patch.object(
-            reproduce.subprocess, "run", return_value=mock.Mock(returncode=1)
-        ), self.assertRaises(reproduce.ReproduceError) as e:
-            reproduce.require_tools(["docker"])
+        with mock.patch.object(build_script.shutil, "which", return_value="/usr/bin/docker"), mock.patch.object(
+            build_script.subprocess, "run", return_value=mock.Mock(returncode=1)
+        ), self.assertRaises(build_script.ReproduceError) as e:
+            build_script.require_tools(["docker"])
         self.assertIn("daemon", str(e.exception))
 
     def test_ios_needs_nix_unless_installing_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            command = reproduce.BuildIosArchive(pathlib.Path("a"), pathlib.Path(tmp), pathlib.Path("."), False)
-            with mock.patch.object(reproduce, "require_tools"), mock.patch.object(
-                reproduce, "NIX_PROFILE", pathlib.Path("/nonexistent")
-            ), self.assertRaises(reproduce.ReproduceError) as e:
-                reproduce.build(command)
+            command = build_script.BuildIosArchive(pathlib.Path("a"), pathlib.Path(tmp), pathlib.Path("."), False)
+            with mock.patch.object(build_script, "require_tools"), mock.patch.object(
+                build_script, "NIX_PROFILE", pathlib.Path("/nonexistent")
+            ), self.assertRaises(build_script.ReproduceError) as e:
+                build_script.build(command)
         self.assertIn("--install-nix", str(e.exception))
 
 

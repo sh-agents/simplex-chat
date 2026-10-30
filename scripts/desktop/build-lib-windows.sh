@@ -34,7 +34,7 @@ for elem in "${exports[@]}"; do count=$(grep -R "\"$elem\"" flake.nix | wc -l); 
 cd $root_dir
 mkdir dist-newstyle 2>/dev/null || true
 
-# The OpenSSL source tree built by simplex-chat-reproduce-builds.py, as a C:/... path
+# The OpenSSL source tree built by simplex-chat-build.py, as a C:/... path
 openssl_dir=${OPENSSL_DIR:?set OPENSSL_DIR to an OpenSSL build}
 rm -rf $BUILD_DIR 2>/dev/null || true
 # Existence of these directories produces build error: cabal's bug

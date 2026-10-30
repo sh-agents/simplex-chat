@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// The release key, as simplex-chat-reproduce-builds.py passes it; android.injected.signing.* properties take precedence
+// The release key, as simplex-chat-build.py passes it; android.injected.signing.* properties take precedence
 val releaseSigningEnv = listOf("ANDROID_KEYSTORE", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD")
     .associateWith { System.getenv(it) }
 if (releaseSigningEnv.values.any { it != null } && releaseSigningEnv.values.any { it == null }) {

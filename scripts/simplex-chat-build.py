@@ -3,15 +3,15 @@
 """Builds SimpleX Chat release files and reproduces releases.
 
 Reproduce a release (desktop is the default target):
-    simplex-chat-reproduce-builds.py <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache]
+    simplex-chat-build.py reproduce <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache]
 
 Build one commit's release files, as CI does:
-    simplex-chat-reproduce-builds.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
-    simplex-chat-reproduce-builds.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
-    simplex-chat-reproduce-builds.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
-    simplex-chat-reproduce-builds.py build desktop-macos --out <dir> [--source <dir>] [--require-signing]
-    simplex-chat-reproduce-builds.py build desktop-windows --out <dir> [--source <dir>]
-    simplex-chat-reproduce-builds.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
+    simplex-chat-build.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
+    simplex-chat-build.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
+    simplex-chat-build.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
+    simplex-chat-build.py build desktop-macos --out <dir> [--source <dir>] [--require-signing]
+    simplex-chat-build.py build desktop-windows --out <dir> [--source <dir>]
+    simplex-chat-build.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
 
 Needs Python 3.12+, git and Docker; ios-archive needs macOS with Xcode and Nix. Results go to ./<tag>-simplex-chat.
 The Android builds are signed by Gradle when ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
@@ -21,7 +21,7 @@ ANDROID_KEY_PASSWORD are set, and unsigned otherwise.
 import sys
 
 if sys.version_info < (3, 12):  # noqa: UP036 # runs on the older Pythons it rejects
-    sys.exit("simplex-chat-reproduce-builds.py needs Python 3.12 or newer")
+    sys.exit("simplex-chat-build.py needs Python 3.12 or newer")
 
 import argparse
 import contextlib
@@ -1205,7 +1205,7 @@ def execute(command: Command) -> None:
 
 
 def parse_build_args(argv: Sequence[str]) -> Command:
-    parser = argparse.ArgumentParser(prog="simplex-chat-reproduce-builds.py build", description="Build one commit's release files.")
+    parser = argparse.ArgumentParser(prog="simplex-chat-build.py build", description="Build one commit's release files.")
     kinds = parser.add_subparsers(dest="kind", required=True)
     apk = kinds.add_parser("android-apk", help="the deterministic unsigned APK and its core libraries")
     apk.add_argument("arch", type=Arch, choices=list(Arch))
@@ -1249,9 +1249,19 @@ def parse_arches(value: str) -> tuple[Arch, ...]:
 
 
 def parse_args(argv: Sequence[str]) -> Command:
-    if argv[:1] == ["build"]:
-        return parse_build_args(argv[1:])
-    parser = argparse.ArgumentParser(description="Reproduce a SimpleX Chat release and compare it with the released files.")
+    match argv[:1]:
+        case ["build"]:
+            return parse_build_args(argv[1:])
+        case ["reproduce"]:
+            return parse_reproduce_args(argv[1:])
+    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,reproduce} ...", description=__doc__)
+    parser.error("the first argument is build or reproduce")
+
+
+def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:
+    parser = argparse.ArgumentParser(
+        prog="simplex-chat-build.py reproduce", description="Reproduce a SimpleX Chat release and compare it with the released files."
+    )
     parser.add_argument("tag", help="release tag, e.g. v7.1.0")
     parser.add_argument("targets", nargs="*", type=Target, choices=list(Target), help="default: desktop")
     parser.add_argument("--arches", type=parse_arches, default=tuple(Arch), help="Android arches, e.g. aarch64,armv7a")

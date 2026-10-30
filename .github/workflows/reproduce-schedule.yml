@@ -30,7 +30,7 @@ jobs:
         run: ./scripts/ci/linux_util_free_space.sh
       - name: Execute reproduce script
         run: |
-          "${GITHUB_WORKSPACE}/scripts/simplex-chat-reproduce-builds.py" "$TAG" || :
+          "${GITHUB_WORKSPACE}/scripts/simplex-chat-build.py" reproduce "$TAG" || :
 
       - name: Check if build has been reproduced
         env:

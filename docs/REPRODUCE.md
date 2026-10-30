@@ -132,19 +132,19 @@ To reproduce the build you must have:
 1. Download script:
 
    ```sh
-   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-reproduce-builds.py'
+   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-build.py'
    ```
 
 2. Make it executable:
 
    ```sh
-   chmod +x simplex-chat-reproduce-builds.py
+   chmod +x simplex-chat-build.py
    ```
 
 3. Execute the script with the required tag:
 
    ```sh
-   ./simplex-chat-reproduce-builds.py 'v6.4.8'
+   ./simplex-chat-build.py reproduce 'v6.4.8'
    ```
 
    The script executes these steps (please review the script to confirm):
@@ -178,22 +178,22 @@ In addition to basic requirements, Android build will:
 1. Download script:
 
    ```sh
-   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-reproduce-builds.py'
+   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-build.py'
    ```
 
 2. Make it executable:
 
    ```sh
-   chmod +x simplex-chat-reproduce-builds.py
+   chmod +x simplex-chat-build.py
    ```
 
 3. Execute the script with the required tag and the `android` target:
 
    ```sh
-   ./simplex-chat-reproduce-builds.py 'v6.5.0-beta.3' android
+   ./simplex-chat-build.py reproduce 'v6.5.0-beta.3' android
    ```
 
-   `--arches aarch64` or `--arches armv7a` builds one architecture. `--nix-cache` downloads the Nix toolchains and dependencies from the zw3rk and IOG caches instead of building them, which takes hours instead of a day; the paths are the same, built by those caches' builders. Running `./simplex-chat-reproduce-builds.py 'v6.5.0-beta.3' desktop android` reproduces both.
+   `--arches aarch64` or `--arches armv7a` builds one architecture. `--nix-cache` downloads the Nix toolchains and dependencies from the zw3rk and IOG caches instead of building them, which takes hours instead of a day; the paths are the same, built by those caches' builders. Running `./simplex-chat-build.py reproduce 'v6.5.0-beta.3' desktop android` reproduces both.
 
    The script executes these steps (please review the script to confirm):
 

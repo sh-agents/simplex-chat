@@ -39,7 +39,7 @@
       # `appendOverlays` with a singleton is identical to `extend`.
       let pkgs = haskellNix.legacyPackages.${system}.appendOverlays [android26]; in
       let pkgs8107 = haskellNix-ghc8107.legacyPackages.${system}.appendOverlays [android26]; in
-      # The same version and hash as OPENSSL_VERSION and OPENSSL_SHA256 in scripts/simplex-chat-reproduce-builds.py
+      # The same version and hash as OPENSSL_VERSION and OPENSSL_SHA256 in scripts/simplex-chat-build.py
       let pinOpenssl = openssl: openssl.overrideAttrs (_: {
         version = "3.5.9";
         src = pkgs.fetchurl {
