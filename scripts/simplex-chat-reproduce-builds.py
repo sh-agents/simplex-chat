@@ -548,19 +548,23 @@ def release_signer(container: Container, apk_name: str) -> str:
     return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2)).upper()
 
 
+def copy_signature(container: Container, out: Path, released: str, unsigned: str) -> bytes:
+    """The unsigned APK with the released APK's signature, and the v1 signature flags that apksigcopier drops."""
+    container.run(Step(("apksigcopier", "copy", f"{OUT}/{released}", f"{OUT}/{unsigned}", f"{OUT}/{unsigned}.signed")))
+    signed = out / f"{unsigned}.signed"
+    signed.write_bytes(copy_v1_flags((out / released).read_bytes(), signed.read_bytes()))
+    return signed.read_bytes()
+
+
 def verify_apk(container: Container, out: Path, released: str, built: str) -> bool:
-    """Copies the released APK's signature onto the built one, padded as the release is, and compares them."""
+    """Copies the released APK's signature onto the built one and compares them: onto the APK as built, as AGP signs
+    releases, then onto it aligned and padded as apksigner signed the releases before."""
     released_data = (out / released).read_bytes()
+    if copy_signature(container, out, released, built) == released_data:
+        return True
     pad = ("--pad-like-apksigner",) if apk_padding(released_data) == "apksigner" else ()
-    container.run_all(
-        [
-            Step(("repro-apk", "zipalign", "--page-size", "16", *pad, "--replace", f"{OUT}/{built}", f"{OUT}/{built}.aligned")),
-            Step(("apksigcopier", "copy", f"{OUT}/{released}", f"{OUT}/{built}.aligned", f"{OUT}/{built}.signed")),
-        ]
-    )
-    signed = out / f"{built}.signed"
-    signed.write_bytes(copy_v1_flags(released_data, signed.read_bytes()))
-    return signed.read_bytes() == released_data
+    container.run(Step(("repro-apk", "zipalign", "--page-size", "16", *pad, "--replace", f"{OUT}/{built}", f"{OUT}/{built}.aligned")))
+    return copy_signature(container, out, released, f"{built}.aligned") == released_data
 
 
 def reproduce_android(tag: str, arches: Sequence[Arch], nix_cache: bool, source: Path, results: Path) -> list[str]:

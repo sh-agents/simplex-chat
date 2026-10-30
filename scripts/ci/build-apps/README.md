@@ -22,9 +22,11 @@ It needs the repository secret `SIMPLEX_ART_SSH_KEY`, the private half of a read
 
 ## Android: signing reproducibly
 
-The APKs are the foss flavor, as `scripts/android/build-android.sh` builds them: deterministic, aligned to 4 KB pages and unsigned. Two runs on different runners built byte-identical APKs and core libraries.
+The APKs are the foss flavor, as `scripts/android/build-android.sh` builds them: AGP's unsigned output, which is deterministic. Two runs on different runners built byte-identical APKs, core libraries and bundles.
 
-The reproduce script rebuilds the APK, aligns it to 16 KB pages with `repro-apk zipalign`, padded as the released APK is (apksigner 35 and later pad with their `0xd935` extra field, AGP and older apksigner with zeros), copies the release's signature onto it with `apksigcopier`, restores the ZIP flags of the v1 signature files that apksigcopier 1.1.1 drops, and compares the two. An APK from this artifact passes that check when it is signed as `scripts/android/compress-and-sign-apk.sh` signs releases (`apksigner sign` with its defaults), and also with `--alignment-preserved` after a 16 KB `zipalign`, with or without a v1 signature: tested with apksigner 37.0.0 and the container's apksigcopier 1.1.1 and repro-apk 0.3.0.
+Releases are signed by Gradle: `assembleFossRelease` with the `android.injected.signing.*` properties, as release-mobile.py passes them, makes AGP sign the same APK, named `simplex.apk` and `simplex-armv7a.apk`. Without the properties Gradle warns that the release APKs are unsigned. An APK of this artifact signed outside Gradle stays verifiable when its layout is kept: `apksigner sign --alignment-preserved`.
+
+The reproduce script rebuilds the APK, copies the release's signature onto it with `apksigcopier` and compares the two. Releases signed before Gradle signed them, by apksigner after a repack, are checked by aligning the rebuilt APK to 16 KB pages with `repro-apk zipalign` first, padded as the released APK is (apksigner 35 and later pad with their `0xd935` extra field, older ones with zeros), and restoring the ZIP flags of the v1 signature files that apksigcopier 1.1.1 drops.
 
 The bundle is the google flavor for Google Play; nothing checks its reproducibility.
 

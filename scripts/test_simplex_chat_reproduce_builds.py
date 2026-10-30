@@ -406,33 +406,53 @@ class AndroidTest(unittest.TestCase):
 
 
 class VerifyApkTest(unittest.TestCase):
-    def check(self, released_bytes, signed_by_copier, expect_pad):
+    def check(self, released_bytes, copier_outputs):
+        """copier_outputs: what apksigcopier writes on each copy, in order."""
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp)
             (out / "rel.apk").write_bytes(released_bytes)
             recorder = Recorder()
+            outputs = list(copier_outputs)
 
             def fake_run(args, **kwargs):
-                (out / "built.apk.signed").write_bytes(signed_by_copier)
+                args = [str(a) for a in args]
+                if "apksigcopier" in args:
+                    (out / pathlib.Path(args[-1]).name).write_bytes(outputs.pop(0))
                 return recorder(args, **kwargs)
 
             with mock.patch.object(reproduce, "run", fake_run):
                 result = reproduce.verify_apk(reproduce.Container(out, {}), out, "rel.apk", "built.apk")
-            zipalign, copy = recorder.steps()
-            self.assertEqual("--pad-like-apksigner" in zipalign, expect_pad)
-            self.assertEqual(copy, ["apksigcopier", "copy", "/out/rel.apk", "/out/built.apk.aligned", "/out/built.apk.signed"])
-            return result
+            return result, recorder.steps()
+
+    def test_agp_signed_release_verifies_without_realigning(self):
+        result, steps = self.check(SIGNED, [SIGNED])
+        self.assertTrue(result)
+        self.assertEqual(steps, [["apksigcopier", "copy", "/out/rel.apk", "/out/built.apk", "/out/built.apk.signed"]])
 
     def test_flags_dropped_by_apksigcopier_are_restored(self):
-        self.assertTrue(self.check(SIGNED, COPIED, expect_pad=False))
+        result, steps = self.check(SIGNED, [COPIED])
+        self.assertTrue(result)
+        self.assertEqual(len(steps), 1)
 
-    def test_apksigner_padded_release_is_rebuilt_with_the_same_padding(self):
+    def test_apksigner_padded_release_is_realigned_with_the_same_padding(self):
         padded = make_zip([("res/a.png", b"png", 0, APKSIGNER_PADDING)])
-        self.assertTrue(self.check(padded, padded, expect_pad=True))
+        other = make_zip([("res/a.png", b"png", 0, b"")])
+        result, steps = self.check(padded, [other, padded])
+        self.assertTrue(result)
+        copy, zipalign, copy_aligned = steps
+        self.assertIn("--pad-like-apksigner", zipalign)
+        self.assertEqual(copy_aligned, ["apksigcopier", "copy", "/out/rel.apk", "/out/built.apk.aligned", "/out/built.apk.aligned.signed"])
+
+    def test_zero_padded_release_is_realigned_without_apksigner_padding(self):
+        other = make_zip([("classes.dex", b"other", 0, b"")])
+        result, steps = self.check(SIGNED, [other, SIGNED])
+        self.assertTrue(result)
+        self.assertNotIn("--pad-like-apksigner", steps[1])
 
     def test_different_content_does_not_verify(self):
         other = make_zip([("classes.dex", b"other", 0, b"")])
-        self.assertFalse(self.check(SIGNED, other, expect_pad=False))
+        result, _ = self.check(SIGNED, [other, other])
+        self.assertFalse(result)
 
 
 class DesktopTest(unittest.TestCase):
