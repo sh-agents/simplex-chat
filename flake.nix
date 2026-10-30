@@ -39,6 +39,16 @@
       # `appendOverlays` with a singleton is identical to `extend`.
       let pkgs = haskellNix.legacyPackages.${system}.appendOverlays [android26]; in
       let pkgs8107 = haskellNix-ghc8107.legacyPackages.${system}.appendOverlays [android26]; in
+      # The same version and hash as OPENSSL_VERSION and OPENSSL_SHA256 in scripts/simplex-chat-reproduce-builds.py
+      let pinOpenssl = openssl: openssl.overrideAttrs (_: {
+        version = "3.5.9";
+        src = pkgs.fetchurl {
+          url = "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz";
+          sha256 = "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a";
+        };
+        # nixpkgs' patches are written for OpenSSL 3.0 and only change where certificates are looked up
+        patches = [];
+      }); in
       let drv' = { extra-modules, pkgs', compiler-nix-name ? "ghc963", ... }: pkgs'.haskell-nix.project {
         inherit compiler-nix-name;
         index-state = "2023-12-12T00:00:00Z";
@@ -343,7 +353,7 @@
                 extra-modules = [{
                   packages.direct-sqlcipher.flags.openssl = true;
                   packages.direct-sqlcipher.components.library.libs = pkgs8107.lib.mkForce [
-                    (android32Pkgs.openssl.override { static = true; enableKTLS = false; })
+                    (pinOpenssl (android32Pkgs.openssl.override { static = true; enableKTLS = false; }))
                   ];
                   packages.direct-sqlcipher.patches = [
                     ./scripts/nix/direct-sqlcipher-android-log.patch
@@ -351,7 +361,7 @@
                   packages.simplex-chat.flags.client_library = true;
                   packages.simplexmq.flags.client_library = true;
                   packages.simplexmq.components.library.libs = pkgs8107.lib.mkForce [
-                    (android32Pkgs.openssl.override { static = true; enableKTLS = false; })
+                    (pinOpenssl (android32Pkgs.openssl.override { static = true; enableKTLS = false; }))
                   ];
                 }];
               }).simplex-chat.components.library.override {
@@ -377,8 +387,8 @@
                   # find ${android32Pkgs.gmp6.override { withStatic = true; }}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidIconv8107}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${android32Pkgs.stdenv.cc.libc}/lib -name "*.a" -exec cp {} $out/_pkg \;
-                  echo ${android32Pkgs.openssl.override { enableKTLS = false; }}
-                  find ${(android32Pkgs.openssl.override { enableKTLS = false; }).out}/lib -name "*.so" -exec cp {} $out/_pkg \;
+                  echo ${pinOpenssl (android32Pkgs.openssl.override { enableKTLS = false; })}
+                  find ${(pinOpenssl (android32Pkgs.openssl.override { enableKTLS = false; })).out}/lib -name "*.so" -exec cp {} $out/_pkg \;
 
                   # remove the .1 and other version suffixes from .so's. Androids linker
                   # doesn't play nice with them.
@@ -421,7 +431,7 @@
                   packages.text.flags.simdutf = false;
                   packages.direct-sqlcipher.flags.openssl = true;
                   packages.direct-sqlcipher.components.library.libs = pkgs.lib.mkForce [
-                    (androidPkgs.openssl.override { static = true; })
+                    (pinOpenssl (androidPkgs.openssl.override { static = true; }))
                   ];
                   packages.direct-sqlcipher.patches = [
                     ./scripts/nix/direct-sqlcipher-android-log.patch
@@ -429,7 +439,7 @@
                   packages.simplex-chat.flags.client_library = true;
                   packages.simplexmq.flags.client_library = true;
                   packages.simplexmq.components.library.libs = pkgs.lib.mkForce [
-                    (androidPkgs.openssl.override { static = true; })
+                    (pinOpenssl (androidPkgs.openssl.override { static = true; }))
                   ];
                 }];
               }).simplex-chat.components.library.override (p: {
@@ -500,8 +510,8 @@
                   # find ${androidPkgs.gmp6.override { withStatic = true; }}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidIconv}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidPkgs.stdenv.cc.libc}/lib -name "*.a" -exec cp {} $out/_pkg \;
-                  echo ${androidPkgs.openssl}
-                  find ${androidPkgs.openssl.out}/lib -name "*.so" -exec cp {} $out/_pkg \;
+                  echo ${pinOpenssl androidPkgs.openssl}
+                  find ${(pinOpenssl androidPkgs.openssl).out}/lib -name "*.so" -exec cp {} $out/_pkg \;
 
                   # remove the .1 and other version suffixes from .so's. Androids linker
                   # doesn't play nice with them.
@@ -555,7 +565,7 @@
                   packages.simplexmq.flags.client_library = true;
                   packages.simplexmq.components.library.libs = pkgs.lib.mkForce [
                     # TODO: have a cross override for iOS, that sets this.
-                    ((pkgs.openssl.override { static = true; }).overrideDerivation (old: { CFLAGS = "-mcpu=apple-a7 -march=armv8-a+norcpc" ;}))
+                    ((pinOpenssl (pkgs.openssl.override { static = true; })).overrideDerivation (old: { CFLAGS = "-mcpu=apple-a7 -march=armv8-a+norcpc" ;}))
                   ];
                 }];
               }).simplex-chat.components.library.override (
@@ -571,7 +581,7 @@
                   packages.simplex-chat.flags.client_library = true;
                   packages.simplexmq.flags.client_library = true;
                   packages.simplexmq.components.library.libs = pkgs.lib.mkForce [
-                    ((pkgs.openssl.override { static = true; }).overrideDerivation (old: { CFLAGS = "-mcpu=apple-a7 -march=armv8-a+norcpc" ;}))
+                    ((pinOpenssl (pkgs.openssl.override { static = true; })).overrideDerivation (old: { CFLAGS = "-mcpu=apple-a7 -march=armv8-a+norcpc" ;}))
                   ];
                 }];
               }).simplex-chat.components.library.override (
@@ -591,7 +601,7 @@
                   packages.simplex-chat.flags.client_library = true;
                   packages.simplexmq.flags.client_library = true;
                   packages.simplexmq.components.library.libs = pkgs.lib.mkForce [
-                    (pkgs.openssl.override { static = true; })
+                    (pinOpenssl (pkgs.openssl.override { static = true; }))
                   ];
                 }];
               }).simplex-chat.components.library.override (
@@ -607,7 +617,7 @@
                   packages.simplex-chat.flags.client_library = true;
                   packages.simplexmq.flags.client_library = true;
                   packages.simplexmq.components.library.libs = pkgs.lib.mkForce [
-                    (pkgs.openssl.override { static = true; })
+                    (pinOpenssl (pkgs.openssl.override { static = true; }))
                   ];
                 }];
               }).simplex-chat.components.library.override (
