@@ -43,6 +43,11 @@ start_container() {
   docker exec "$container" sh -c 'cd apps/multiplatform && ./gradlew --version'
 }
 
+# Gradle's downloads fail now and then; scripts/simplex-chat-reproduce-builds-android.sh also runs the build twice.
+retry_once() {
+  "$@" || { echo "failed, running again: $*" >&2; "$@"; }
+}
+
 checksums() {
   local sums
   sums=$(cd "$out" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum)
@@ -59,7 +64,8 @@ build_apk() {
     # each pid namespace, copied when it is created, so it is set in the container's, which the build's inherit.
     docker exec -u root "$container" sh -c 'echo 65535 > /proc/sys/kernel/pid_max && cat /proc/sys/kernel/pid_max'
   fi
-  docker exec -e NIX_CONFIG="$nix_config" -e ARCH="$arch" -e ABI="$android_abi" -e VERCODE="$vercode" "$container" sh -eu -c '
+  # shellcheck disable=SC2016 # the script expands its variables in the container's shell
+  retry_once docker exec -e NIX_CONFIG="$nix_config" -e ARCH="$arch" -e ABI="$android_abi" -e VERCODE="$vercode" "$container" sh -eu -c '
     gradle_bin=$(find "$HOME/.gradle/wrapper/dists" -name gradle -type f -executable | head -1)
     export PATH="$(dirname "$gradle_bin"):$PATH"
     ARCHES="$ARCH" ./scripts/android/build-android.sh -gs "$VERCODE"
@@ -80,7 +86,7 @@ build_bundle() {
     done
   done
   start_container
-  docker exec "$container" sh -eu -c '
+  retry_once docker exec "$container" sh -eu -c '
     cd apps/multiplatform
     ./gradlew --no-daemon -Psimplex.assets.dir=../../assets :android:bundleGoogleRelease
     cp android/build/outputs/bundle/googleRelease/*.aab /out/simplex.aab'
