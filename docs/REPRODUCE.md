@@ -129,22 +129,16 @@ To reproduce the build you must have:
 
 ### Linux desktop apps and CLI
 
-1. Download script:
+1. Download the script with its `simplex_build` package:
 
    ```sh
-   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-build.py'
+   git clone --depth 1 https://github.com/simplex-chat/simplex-chat simplex-chat-scripts
    ```
 
-2. Make it executable:
+2. Execute the script with the required tag:
 
    ```sh
-   chmod +x simplex-chat-build.py
-   ```
-
-3. Execute the script with the required tag:
-
-   ```sh
-   ./simplex-chat-build.py reproduce 'v6.4.8'
+   simplex-chat-scripts/scripts/simplex-chat-build.py reproduce 'v6.4.8'
    ```
 
    The script executes these steps (please review the script to confirm):
@@ -155,7 +149,7 @@ To reproduce the build you must have:
 
    This will take a while.
 
-4. After compilation, you should see the folder named as the tag and repository name (e.g., `v6.4.8-simplex-chat`) with two subfolders:
+3. After compilation, you should see the folder named as the tag and repository name (e.g., `v6.4.8-simplex-chat`) with two subfolders:
 
    ```sh
    ls v6.4.8-simplex-chat
@@ -175,25 +169,19 @@ In addition to basic requirements, Android build will:
 - Take ~20h to build all the architectures (depends on core count)
 - Require at least 16gb of RAM
 
-1. Download script:
+1. Download the script with its `simplex_build` package:
 
    ```sh
-   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-build.py'
+   git clone --depth 1 https://github.com/simplex-chat/simplex-chat simplex-chat-scripts
    ```
 
-2. Make it executable:
+2. Execute the script with the required tag and the `android` target:
 
    ```sh
-   chmod +x simplex-chat-build.py
+   simplex-chat-scripts/scripts/simplex-chat-build.py reproduce 'v6.5.0-beta.3' android
    ```
 
-3. Execute the script with the required tag and the `android` target:
-
-   ```sh
-   ./simplex-chat-build.py reproduce 'v6.5.0-beta.3' android
-   ```
-
-   `--arches aarch64` or `--arches armv7a` builds one architecture. `--nix-cache` downloads the Nix toolchains and dependencies from the zw3rk and IOG caches instead of building them, which takes hours instead of a day; the paths are the same, built by those caches' builders. Running `./simplex-chat-build.py reproduce 'v6.5.0-beta.3' desktop android` reproduces both.
+   `--arches aarch64` or `--arches armv7a` builds one architecture. `--nix-cache` downloads the Nix toolchains and dependencies from the zw3rk and IOG caches instead of building them, which takes hours instead of a day; the paths are the same, built by those caches' builders. Running `simplex-chat-scripts/scripts/simplex-chat-build.py reproduce 'v6.5.0-beta.3' desktop android` reproduces both.
 
    The script executes these steps (please review the script to confirm):
 

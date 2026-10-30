@@ -1,0 +1,120 @@
+"""The Windows CLI, msi and core libraries, built in an MSYS2 UCRT64 shell."""
+
+import os
+import shutil
+import stat
+import tempfile
+import zipfile
+from collections.abc import Callable
+from pathlib import Path
+
+from .common import edit_lines, fetch_pinned, run, single_dir, single_file
+from .desktop import (
+    DESKTOP_ENV,
+    DESKTOP_RELEASE_DIR,
+    VLC_RELEASE,
+    VLC_SHA256,
+    WINDOWS_DESKTOP,
+    Database,
+    build_host_cli,
+    check_exports,
+    client_library_constraints,
+    desktop_libs,
+    link_desktop_libs,
+    zip_desktop_libs,
+)
+from .openssl import OpenSsl, check_static_openssl, host_openssl, static_libcrypto
+
+# The system libraries that the static libcrypto of a MinGW build needs (ex_libs of OpenSSL's mingw-common)
+OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
+
+
+def remove_cabal_sources(source: Path) -> None:
+    """cabal fails on Windows when these checkouts exist, and can't delete simplexmq's read-only git pack files."""
+
+    def make_writable(function: Callable[[str], object], path: str, error: BaseException) -> None:
+        # Windows refuses to delete read-only files, POSIX to delete entries of read-only directories
+        os.chmod(os.path.dirname(path), stat.S_IRWXU)
+        os.chmod(path, stat.S_IRWXU)
+        function(path)
+
+    for path in [*source.glob("dist-newstyle/src/direct-sq*"), *source.glob("dist-newstyle/src/simplexmq*")]:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, onexc=make_writable)
+        else:
+            path.unlink()
+
+
+def disable_ghc_lld() -> None:
+    """With GHC's lld, linking libsimplex.dll can't find the exported symbols; a missing linker makes GHC use ld."""
+    settings = Path(run(["ghc", "--print-libdir"], capture=True).stdout.strip()) / "settings"
+    edit_lines(settings, lambda line: line.replace("ld.lld.exe", "abracadabra.exe", 1))
+
+
+def build_windows_lib(source: Path, openssl: OpenSsl) -> Path:
+    """libsimplex.dll and the libcrypto it loads, in the desktop app's libraries directory, which it returns."""
+    check_exports(source)
+    for old in source.glob("dist-newstyle/build/x86_64-windows/ghc-*/simplex-chat-*"):
+        shutil.rmtree(old)
+    remove_cabal_sources(source)
+    options = f"-shared -threaded -optl-L{openssl.lib.as_posix()} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
+    (source / "cabal.project.local").write_text(openssl.cabal_local(options))
+    disable_ghc_lld()
+    run(["cabal", "build", "lib:simplex-chat", *client_library_constraints(Database.SQLITE)], cwd=source)
+    libs = desktop_libs(source, WINDOWS_DESKTOP.libs_dir)
+    shutil.rmtree(libs, ignore_errors=True)
+    shutil.rmtree(source / "apps/multiplatform/desktop/build/cmake", ignore_errors=True)
+    libs.mkdir(parents=True)
+    shutil.copy(openssl.lib / "libcrypto-3-x64.dll", libs)
+    shutil.copy(source / "libsimplex.dll", libs)
+    return libs
+
+
+def add_vlc_windows(libs: Path, work: Path) -> None:
+    vlc = libs / "vlc"
+    shutil.rmtree(vlc, ignore_errors=True)
+    (vlc / "vlc").mkdir(parents=True)
+    name = "vlc-win-x86_64.zip"
+    extracted = work / "vlc"
+    with zipfile.ZipFile(fetch_pinned(f"{VLC_RELEASE}/{name}", VLC_SHA256[name], work / name)) as z:
+        z.extractall(extracted)
+    root = single_dir(extracted, "vlc-*")
+    # the plugin cache must hold the time the plugins get when the app extracts them from its jar
+    for plugin in (p for p in (root / "plugins").rglob("*") if ".dll" in p.name):
+        os.utime(plugin, (plugin.stat().st_atime, 0))
+    run([root / "vlc-cache-gen.exe", "plugins"], cwd=root)
+    for dll in root.glob("*.dll"):
+        shutil.copy(dll, vlc)
+    shutil.copytree(root / "plugins", vlc / "vlc/plugins", dirs_exist_ok=True)
+
+
+def release_windows_libs(source: Path, openssl: OpenSsl, out: Path) -> Path:
+    """The library release, with the import library of libsimplex.dll; returns the libraries directory of the app."""
+    libs = build_windows_lib(source, openssl)
+    run(["dlltool", "-d", "libsimplex.dll.def", "-l", "libsimplex.lib", "-D", "libsimplex.dll"], cwd=source)
+    zip_desktop_libs(libs, [source / "libsimplex.lib"], out / WINDOWS_DESKTOP.libs)
+    return libs
+
+
+def build_windows_libs(source: Path, out: Path) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        release_windows_libs(source, host_openssl(Path(tmp).resolve()), out)
+
+
+def build_desktop_windows(source: Path, out: Path) -> None:
+    host = WINDOWS_DESKTOP
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp).resolve()
+        openssl = host_openssl(work)
+        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
+        remove_cabal_sources(source)
+        cli = build_host_cli(source, static.cabal_local(OPENSSL_WINDOWS_STATIC_LINK))
+        remove_cabal_sources(source)
+        check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
+        shutil.copy(cli, out / host.cli)
+        libs = release_windows_libs(source, openssl, out)
+        add_vlc_windows(libs, work)
+        link_desktop_libs(source, host.libs_dir, "windows-x64")
+        assets = f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"
+        run(["bash", "./gradlew", assets, "packageMsi"], cwd=source / "apps/multiplatform")
+        shutil.copy(single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi"), out / host.desktop)

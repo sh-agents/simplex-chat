@@ -2,7 +2,7 @@
 
 `.github/workflows/build-apps.yml` builds the Android and iOS apps of a commit without signing them and uploads them as artifacts, to be signed outside CI. No signing key or certificate reaches GitHub.
 
-Each job runs `scripts/simplex-chat-build.py build`, the script that also reproduces releases ([docs/REPRODUCE.md](../../../docs/REPRODUCE.md)), so a reproduce run rebuilds an APK exactly as this workflow built it. The same commands build locally: `build apk <arch> --out <dir>`, `build aab --libs <dir> --out <dir>` with Docker, and `build xcarchive --art <simplex-chat-art> --out <dir>` on a Mac with Xcode and Nix.
+Each job runs `scripts/simplex-chat-build.py build` (its code is the `scripts/simplex_build` package, tested with `python3 -m unittest discover -s scripts/simplex_build -t scripts`), the script that also reproduces releases ([docs/REPRODUCE.md](../../../docs/REPRODUCE.md)), so a reproduce run rebuilds an APK exactly as this workflow built it. The same commands build locally: `build apk <arch> --out <dir>`, `build aab --libs <dir> --out <dir>` with Docker, and `build xcarchive --art <simplex-chat-art> --out <dir>` on a Mac with Xcode and Nix.
 
 ## Running it
 
