@@ -85,7 +85,7 @@ To reproduce the build you must have:
 
 - Linux machine
 - `x86-64` architecture
-- Installed `docker`, `curl` and `git`, and Python 3.9 or newer for the apps
+- Installed `docker`, `curl` and `git`, and Python 3.12 or newer for the apps
 
 ### Server binaries
 

@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 
-"""Reproduces SimpleX Chat release builds in Docker and compares them with the released files.
+"""Builds SimpleX Chat release files and reproduces releases.
 
 Reproduce a release (desktop is the default target):
     simplex-chat-reproduce-builds.py <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache]
 
-Build one commit's apps unsigned, as CI's build-apps workflow does:
+Build one commit's release files, as CI does:
     simplex-chat-reproduce-builds.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
     simplex-chat-reproduce-builds.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
     simplex-chat-reproduce-builds.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
     simplex-chat-reproduce-builds.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
 
-Needs Python 3.9+, git and Docker; ios-archive needs macOS with Xcode and Nix. Results go to ./<tag>-simplex-chat.
+Needs Python 3.12+, git and Docker; ios-archive needs macOS with Xcode and Nix. Results go to ./<tag>-simplex-chat.
 """
 
-from __future__ import annotations
+import sys
+
+if sys.version_info < (3, 12):  # noqa: UP036 # runs on the older Pythons it rejects
+    sys.exit("simplex-chat-reproduce-builds.py needs Python 3.12 or newer")
 
 import argparse
 import contextlib
@@ -25,15 +28,13 @@ import plistlib
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 import urllib.request
 import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Union
 
 REPO = "https://github.com/simplex-chat/simplex-chat"
 GHC = "9.6.3"
@@ -43,27 +44,21 @@ class ReproduceError(Exception):
     pass
 
 
-class Target(str, enum.Enum):
+class Target(enum.StrEnum):
     DESKTOP = "desktop"
     ANDROID = "android"
 
-    def __str__(self) -> str:
-        return self.value
 
-
-class Arch(str, enum.Enum):
+class Arch(enum.StrEnum):
     AARCH64 = "aarch64"
     ARMV7A = "armv7a"
-
-    def __str__(self) -> str:
-        return self.value
 
     @property
     def abi(self) -> str:
         return {Arch.AARCH64: "arm64-v8a", Arch.ARMV7A: "armeabi-v7a"}[self]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UbuntuImage:
     version: str
     digest: str
@@ -80,11 +75,14 @@ DESKTOP_IMAGES = (
 )
 APPIMAGE_IMAGE = "22.04"
 DESKTOP_CABAL_LOCAL = "ignore-project: False\npackage direct-sqlcipher\n    flags: +openssl"
+DESKTOP_ENV = {"ASSETS_DIR": "../../assets"}
+DESKTOP_RELEASE_DIR = "apps/multiplatform/release/main"
 
 # SHA-256 of the certificate that signs the released APKs
 SIMPLEX_KEY = "3C:52:C4:FD:3C:AD:1C:07:C9:B0:0A:70:80:E3:58:FA:B9:FE:FC:B8:AF:5A:EC:14:77:65:F1:6D:0F:21:AD:85"
 ANDROID_LIBS_DIR = "apps/multiplatform/common/src/commonMain/cpp/android/libs"
 ANDROID_LIBS = ("libsimplex", "libsupport")
+ANDROID_BUNDLE_DIR = "apps/multiplatform/android/build/outputs/bundle/googleRelease"
 # The local.properties of release-mobile.py's builds
 ANDROID_LOCAL_PROPERTIES = {
     "compression.level": "5",
@@ -102,12 +100,22 @@ NIX_CACHE_CONFIG = (
 # the 2.22 installer gives build users UIDs from 301, which macOS 15 and later reserve
 NIX_INSTALLER = "https://releases.nixos.org/nix/nix-2.34.6/install"
 NIX_INSTALLER_SHA256 = "bf6d12da4aeaae38ab509dc736df648597bcdee051046ea76d3d53d5b18fa54a"
-NIX_PROFILE = "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
+NIX_PROFILE = Path("/nix/var/nix/profiles/default")
+# The certificate bundles nix-daemon.sh looks for, in its order
+NIX_CERT_FILES = (
+    Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/ssl/ca-bundle.pem"),
+    Path("/etc/ssl/certs/ca-bundle.crt"),
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+    NIX_PROFILE / "etc/ssl/certs/ca-bundle.crt",
+    NIX_PROFILE / "etc/ca-bundle.crt",
+)
 IOS_CORE_JOB = ".#hydraJobs.aarch64-darwin.aarch64-darwin-ios:lib:simplex-chat"
 IOS_CORE_ZIP = "pkg-ios-aarch64-swift-json.zip"
 IOS_PROJECT = "apps/ios/SimpleX.xcodeproj"
 IOS_SCHEME = "SimpleX (iOS)"
-IOS_TOOLS = ("sh", "xcodebuild", "codesign", "otool", "plutil", "ditto")
+IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "ditto")
+IOS_LOCAL_XCCONFIG = "SIMPLEX_ASSETS_DIR = {art}\nSWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS\n"
 
 LOCAL_HEADER = b"PK\x03\x04"
 CENTRAL_HEADER = b"PK\x01\x02"
@@ -129,10 +137,21 @@ def require_tools(tools: Sequence[str]) -> None:
 
 
 def run(
-    args: Sequence[str | Path], cwd: Path | None = None, check: bool = True, capture: bool = False
+    args: Sequence[str | Path],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    input: str | None = None,
+    check: bool = True,
+    capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        [str(a) for a in args], cwd=cwd, check=False, text=True, stdout=subprocess.PIPE if capture else None
+        [str(a) for a in args],
+        cwd=cwd,
+        env={**os.environ, **env} if env else None,
+        input=input,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
     )
     if check and result.returncode != 0:
         raise ReproduceError(f"failed ({result.returncode}): {' '.join(map(str, args))}")
@@ -143,7 +162,7 @@ def run(
 # APK ZIP details that apksigcopier and repro-apk don't handle
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ZipEntry:
     name: str
     central_offset: int
@@ -192,7 +211,7 @@ def apk_padding(data: bytes) -> str:
 
 
 def is_v1_signature_file(name: str) -> bool:
-    if not name.startswith("META-INF/") or "/" in name[len("META-INF/") :]:
+    if not name.startswith("META-INF/") or "/" in name.removeprefix("META-INF/"):
         return False
     return name == "META-INF/MANIFEST.MF" or name.endswith(V1_SIGNATURE_SUFFIXES)
 
@@ -214,11 +233,8 @@ def copy_v1_flags(source: bytes, target: bytes) -> bytes:
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def write_sha256sums(directory: Path, target: Path | None = None) -> None:
@@ -236,6 +252,26 @@ def compare_dirs(built: Path, released: Path) -> list[str]:
         if not other.is_file() or sha256(path) != sha256(other):
             mismatched.append(path.name)
     return mismatched
+
+
+def normalize_permissions(root: Path) -> None:
+    """Directories and executable files 755, other files 644, so that checkouts on any machine build the same."""
+    for directory, dirs, files in os.walk(root):
+        for name in dirs:
+            path = Path(directory, name)
+            if not path.is_symlink():
+                path.chmod(0o755)
+        for name in files:
+            path = Path(directory, name)
+            if not path.is_symlink():
+                path.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
+
+
+def single_file(directory: Path, pattern: str) -> Path:
+    found = sorted(directory.glob(pattern))
+    if len(found) != 1:
+        raise ReproduceError(f"expected one {pattern} in {directory}, found {len(found)}")
+    return found[0]
 
 
 def download(url: str, target: Path) -> None:
@@ -285,6 +321,20 @@ def checkout(source: Path, tag: str) -> None:
 # ---------------------------------------------------------------------------------------------------------------------
 # Docker
 
+PROJECT = "/project"
+OUT = "/out"
+
+
+@dataclass(frozen=True, slots=True)
+class Step:
+    """A command run in a container, without a shell."""
+
+    argv: tuple[str, ...]
+    workdir: str = PROJECT
+    env: Mapping[str, str] = field(default_factory=dict)
+    user: str | None = None
+    input: str | None = None
+
 
 class Container:
     """A container of an image built from Dockerfile.build, removed with the image on exit."""
@@ -302,16 +352,16 @@ class Container:
         self.build_args = {"USER_UID": str(os.getuid()), "USER_GID": str(os.getgid()), **(build_args or {})}
         self.run_args = list(run_args)
 
-    def __enter__(self) -> Container:
+    def __enter__(self) -> "Container":
         build: list[str | Path] = ["docker", "build", "--no-cache", "-f", self.source / "Dockerfile.build", "-t", self.name]
         for key, value in self.build_args.items():
             build += ["--build-arg", f"{key}={value}"]
-        run(build + [self.source])
+        run([*build, self.source])
         start: list[str | Path] = ["docker", "run", "-t", "-d", "--name", self.name, *self.run_args]
         for host, container in self.mounts.items():
             start += ["-v", f"{host}:{container}"]
         try:
-            run(start + [self.name], capture=True)
+            run([*start, self.name], capture=True)
         except BaseException:
             self.remove()
             raise
@@ -326,45 +376,23 @@ class Container:
         run(["docker", "rm", "--force", self.name], check=False, capture=True)
         run(["docker", "image", "rm", self.name], check=False, capture=True)
 
-    def exec(
-        self, script: str, env: Mapping[str, str] | None = None, user: str | None = None, capture: bool = False
-    ) -> subprocess.CompletedProcess[str]:
-        args = ["docker", "exec"]
-        if user:
-            args += ["-u", user]
-        for key, value in (env or {}).items():
+    def run(self, step: Step, capture: bool = False) -> str:
+        args = ["docker", "exec", "-w", step.workdir]
+        if step.input is not None:
+            args.append("-i")
+        if step.user:
+            args += ["-u", step.user]
+        for key, value in step.env.items():
             args += ["-e", f"{key}={value}"]
-        return run(args + [self.name, "sh", "-eu", "-c", script], capture=capture)
+        return run([*args, self.name, *step.argv], input=step.input, capture=capture).stdout or ""
+
+    def run_all(self, steps: Sequence[Step]) -> None:
+        for step in steps:
+            self.run(step)
 
     def copy_out(self, path: str, target: Path) -> None:
-        run(["docker", "cp", f"{self.name}:{path}", target])
-
-
-# ---------------------------------------------------------------------------------------------------------------------
-# Android
-
-
-@contextlib.contextmanager
-def android_container(source: Path, out: Path, set_pid_max: bool) -> Iterator[Container]:
-    # FUSE and SYS_ADMIN are what Dockerfile.build's builds need; systempaths=unconfined makes /proc/sys writable
-    with Container(
-        source,
-        {source.resolve(): "/project", out.resolve(): "/out"},
-        run_args=[
-            "--device", "/dev/fuse",
-            "--cap-add", "SYS_ADMIN",
-            "--security-opt", "apparmor:unconfined",
-            "--security-opt", "seccomp:unconfined",
-            "--security-opt", "systempaths=unconfined",
-        ],
-    ) as container:
-        if set_pid_max:
-            # 32-bit bionic aborts above pid 65535, which the armv7a GHC runs under qemu. Since Linux 6.14 pid_max
-            # belongs to each pid namespace, copied when it is created, so it is set in the container's.
-            container.exec("echo 65535 > /proc/sys/kernel/pid_max", user="root")
-        # build-android.sh needs the gradle of the wrapper's version on PATH
-        container.exec("cd apps/multiplatform && ./gradlew --version")
-        yield container
+        # -L copies the targets of symlinks, such as Nix's out-links into the container's store
+        run(["docker", "cp", "-L", f"{self.name}:{path}", target])
 
 
 def retry_once(action: Callable[[], object]) -> None:
@@ -376,29 +404,58 @@ def retry_once(action: Callable[[], object]) -> None:
         action()
 
 
-def build_apk(container: Container, source: Path, arch: Arch, out_name: str, nix_cache: bool, keep_libs: bool) -> None:
-    """The deterministic unsigned APK of scripts/android/build-android.sh, to /out/<out_name>."""
-    env = {"ARCH": arch.value, "ABI": arch.abi, "VERCODE": android_vercode(source), "OUT": out_name}
+# ---------------------------------------------------------------------------------------------------------------------
+# Android
+
+
+@contextlib.contextmanager
+def android_container(source: Path, out: Path, set_pid_max: bool) -> Iterator[Container]:
+    # FUSE and SYS_ADMIN are what Dockerfile.build's builds need; systempaths=unconfined makes /proc/sys writable
+    with Container(
+        source,
+        {source.resolve(): PROJECT, out.resolve(): OUT},
+        run_args=[
+            "--device", "/dev/fuse",
+            "--cap-add", "SYS_ADMIN",
+            "--security-opt", "apparmor:unconfined",
+            "--security-opt", "seccomp:unconfined",
+            "--security-opt", "systempaths=unconfined",
+        ],
+    ) as container:
+        if set_pid_max:
+            # 32-bit bionic aborts above pid 65535, which the armv7a GHC runs under qemu. Since Linux 6.14 pid_max
+            # belongs to each pid namespace, copied when it is created, so it is set in the container's.
+            container.run(Step(("tee", "/proc/sys/kernel/pid_max"), user="root", input="65535\n"))
+        yield container
+
+
+def gradle_path(container: Container) -> str:
+    """PATH with the gradle of the project's wrapper first, which build-android.sh needs as `gradle`."""
+    container.run(Step(("./gradlew", "--version"), workdir=f"{PROJECT}/apps/multiplatform"))
+    home = container.run(Step(("printenv", "HOME")), capture=True).strip()
+    found = container.run(
+        Step(("find", f"{home}/.gradle/wrapper/dists", "-name", "gradle", "-type", "f", "-executable")), capture=True
+    ).split()
+    if not found:
+        raise ReproduceError("the gradle wrapper's distribution is not found")
+    path = container.run(Step(("printenv", "PATH")), capture=True).strip()
+    return f"{Path(found[0]).parent}:{path}"
+
+
+def build_apk(container: Container, source: Path, arch: Arch, out: Path, out_name: str, nix_cache: bool, keep_libs: bool) -> None:
+    """The deterministic unsigned APK of scripts/android/build-android.sh, as <out>/<out_name>."""
+    env = {"ARCHES": arch.value, "PATH": gradle_path(container)}
     if nix_cache:
         env["NIX_CONFIG"] = NIX_CACHE_CONFIG
-    retry_once(
-        lambda: container.exec(
-            'gradle_bin=$(find "$HOME/.gradle/wrapper/dists" -name gradle -type f -executable | head -1)\n'
-            'export PATH="$(dirname "$gradle_bin"):$PATH"\n'
-            'ARCHES="$ARCH" ./scripts/android/build-android.sh -gs "$VERCODE"\n'
-            'cp "simplex-chat-$ABI.apk" "/out/$OUT"\n',
-            env=env,
-        )
-    )
+    build = Step(("./scripts/android/build-android.sh", "-gs", android_vercode(source)), env=env)
+    retry_once(lambda: container.run(build))
+    shutil.copy(source / f"simplex-chat-{arch.abi}.apk", out / out_name)
     if keep_libs:
-        container.exec(
-            'cp "result-$ARCH-libsimplex/pkg-$ARCH-android-libsimplex.zip" '
-            '"result-$ARCH-libsupport/pkg-$ARCH-android-libsupport.zip" /out/',
-            env=env,
-        )
+        for lib in ANDROID_LIBS:
+            container.copy_out(f"{PROJECT}/result-{arch}-{lib}/pkg-{arch}-android-{lib}.zip", out)
 
 
-def build_bundle(container: Container, source: Path, libs: Path) -> None:
+def build_bundle(container: Container, source: Path, libs: Path, out: Path) -> None:
     # Gradle reads compression.level only from local.properties; a non-zero level extracts the native libraries at
     # install, as the APKs do.
     properties = "".join(f"{key}={value}\n" for key, value in ANDROID_LOCAL_PROPERTIES.items())
@@ -407,23 +464,19 @@ def build_bundle(container: Container, source: Path, libs: Path) -> None:
         target = source / ANDROID_LIBS_DIR / arch.abi
         target.mkdir(parents=True, exist_ok=True)
         for lib in ANDROID_LIBS:
-            name = f"pkg-{arch.value}-android-{lib}.zip"
+            name = f"pkg-{arch}-android-{lib}.zip"
             found = sorted(libs.rglob(name))
             if not found:
                 raise ReproduceError(f"{name} not found in {libs}")
             with zipfile.ZipFile(found[0]) as z:
                 z.extractall(target)
-    retry_once(
-        lambda: container.exec(
-            "cd apps/multiplatform\n"
-            "./gradlew --no-daemon :android:bundleGoogleRelease\n"
-            "cp android/build/outputs/bundle/googleRelease/*.aab /out/simplex.aab\n"
-        )
-    )
+    build = Step(("./gradlew", "--no-daemon", ":android:bundleGoogleRelease"), workdir=f"{PROJECT}/apps/multiplatform")
+    retry_once(lambda: container.run(build))
+    shutil.copy(single_file(source / ANDROID_BUNDLE_DIR, "*.aab"), out / "simplex.aab")
 
 
 def release_signer(container: Container, apk_name: str) -> str:
-    output = container.exec(f'apksigner verify --print-certs "/out/{apk_name}"', capture=True).stdout
+    output = container.run(Step(("apksigner", "verify", "--print-certs", f"{OUT}/{apk_name}")), capture=True)
     digest = next(line.split()[-1] for line in output.splitlines() if "SHA-256" in line)
     return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2)).upper()
 
@@ -431,10 +484,12 @@ def release_signer(container: Container, apk_name: str) -> str:
 def verify_apk(container: Container, out: Path, released: str, built: str) -> bool:
     """Copies the released APK's signature onto the built one, padded as the release is, and compares them."""
     released_data = (out / released).read_bytes()
-    pad = "--pad-like-apksigner" if apk_padding(released_data) == "apksigner" else ""
-    container.exec(
-        f'repro-apk zipalign --page-size 16 {pad} --replace "/out/{built}" "/out/{built}.aligned"\n'
-        f'apksigcopier copy "/out/{released}" "/out/{built}.aligned" "/out/{built}.signed"\n'
+    pad = ("--pad-like-apksigner",) if apk_padding(released_data) == "apksigner" else ()
+    container.run_all(
+        [
+            Step(("repro-apk", "zipalign", "--page-size", "16", *pad, "--replace", f"{OUT}/{built}", f"{OUT}/{built}.aligned")),
+            Step(("apksigcopier", "copy", f"{OUT}/{released}", f"{OUT}/{built}.aligned", f"{OUT}/{built}.signed")),
+        ]
     )
     signed = out / f"{built}.signed"
     signed.write_bytes(copy_v1_flags(released_data, signed.read_bytes()))
@@ -446,24 +501,94 @@ def reproduce_android(tag: str, arches: Sequence[Arch], nix_cache: bool, source:
     out.mkdir(parents=True, exist_ok=True)
     tags = run(["git", "-C", source, "tag", "--list"], capture=True).stdout.split()
     for arch in arches:
-        download(release_url(tag, f"simplex-{arch.value}.apk"), out / f"simplex-{arch.value}.apk")
+        download(release_url(tag, f"simplex-{arch}.apk"), out / f"simplex-{arch}.apk")
     failed = []
     with android_container(source, out, Arch.ARMV7A in arches) as container:
         for arch in arches:
-            released = f"simplex-{arch.value}.apk"
+            released = f"simplex-{arch}.apk"
             signer = release_signer(container, released)
             if signer != SIMPLEX_KEY:
                 raise ReproduceError(f"{released} is signed by {signer}, not by the SimpleX key")
             log(f"{released} is signed by the SimpleX key")
             checkout(source, android_build_tag(tag, tags, arch))
-            log(f"building {arch.value}")
-            build_apk(container, source, arch, f"{released}.built", nix_cache, keep_libs=False)
+            log(f"building {arch}")
+            build_apk(container, source, arch, out, f"{released}.built", nix_cache, keep_libs=False)
             if verify_apk(container, out, released, f"{released}.built"):
                 log(f"{released} is reproduced")
             else:
                 log(f"{released} is NOT reproduced")
                 failed.append(released)
     return failed
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Desktop and CLI
+
+
+def desktop_steps(image: UbuntuImage, version: str) -> list[Step]:
+    """After the CLI is built and copied to /out: its deb, the desktop deb and, on APPIMAGE_IMAGE, the AppImage."""
+    steps = [
+        Step(("./scripts/desktop/build-cli-deb.sh", version, f"{OUT}/simplex-chat", f"{OUT}/deb-build")),
+        Step(("./scripts/desktop/make-deb-linux.sh",), env=DESKTOP_ENV),
+    ]
+    if image.version == APPIMAGE_IMAGE:
+        steps.append(Step(("./scripts/desktop/make-appimage-linux.sh",), env=DESKTOP_ENV))
+    return steps
+
+
+CLI_BUILD_STEPS = (Step(("cabal", "clean")), Step(("cabal", "update")), Step(("cabal", "build", "-j")))
+
+
+def desktop_files(image: UbuntuImage) -> list[str]:
+    cli = f"simplex-chat-ubuntu-{image.suffix}-x86_64"
+    files = [cli, f"{cli}.deb", f"simplex-desktop-ubuntu-{image.suffix}-x86_64.deb"]
+    if image.version == APPIMAGE_IMAGE:
+        files.append("simplex-desktop-x86_64.AppImage")
+    return files
+
+
+def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Path) -> None:
+    """The Linux release files of an Ubuntu image, with their released names."""
+    (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
+    normalize_permissions(source)
+    log(f"building Ubuntu {image.version} CLI and desktop apps")
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        with Container(
+            source,
+            {source: PROJECT, work: OUT},
+            build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
+            run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
+        ) as container:
+            container.run_all(CLI_BUILD_STEPS)
+            cli = container.run(Step(("cabal", "list-bin", "exe:simplex-chat")), capture=True).strip()
+            container.run_all([Step(("cp", cli, f"{OUT}/simplex-chat")), Step(("strip", f"{OUT}/simplex-chat"))])
+            container.run_all(desktop_steps(image, version))
+        release = source / DESKTOP_RELEASE_DIR
+        built = [work / "simplex-chat", work / "deb-build/simplex-chat.deb", release / "deb/simplex_x86_64.deb"]
+        if image.version == APPIMAGE_IMAGE:
+            built.append(single_file(release, "*imple*.AppImage"))
+        for path, name in zip(built, desktop_files(image), strict=True):
+            shutil.copy(path, out / name)
+
+
+def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
+    built = results / "from-source"
+    released = results / "prebuilt"
+    built.mkdir(parents=True, exist_ok=True)
+    released.mkdir(parents=True, exist_ok=True)
+    for image in DESKTOP_IMAGES:
+        checkout(source, tag)
+        build_desktop_linux(source, image, tag_version(tag), built)
+        for name in desktop_files(image):
+            download(release_url(tag, name), released / name)
+    mismatched = compare_dirs(built, released)
+    for name in mismatched:
+        log(f"{name}: sha256 doesn't match")
+    if not mismatched:
+        write_sha256sums(built, results / "_sha256sums")
+        log(f"checksums: {results / '_sha256sums'}")
+    return mismatched
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -479,16 +604,14 @@ def minimum_versions(otool_output: str) -> list[str]:
     versions = []
     in_version_min = False
     for line in otool_output.splitlines():
-        fields = line.split()
-        if len(fields) < 2:
-            continue
-        if fields[0] == "minos":
-            versions.append(fields[1])
-        elif fields[0] == "cmd":
-            in_version_min = fields[1].startswith("LC_VERSION_MIN_")
-        elif in_version_min and fields[0] == "version":
-            versions.append(fields[1])
-            in_version_min = False
+        match line.split():
+            case ["minos", version, *_]:
+                versions.append(version)
+            case ["cmd", command, *_]:
+                in_version_min = command.startswith("LC_VERSION_MIN_")
+            case ["version", version, *_] if in_version_min:
+                versions.append(version)
+                in_version_min = False
     return versions
 
 
@@ -509,8 +632,15 @@ def resolve_entitlements(text: str, team: str) -> str:
     return text.replace("$(AppIdentifierPrefix)", f"{team}.")
 
 
-def nix_shell(script: str, cwd: Path) -> None:
-    run(["sh", "-c", f". {NIX_PROFILE} && {script}"], cwd=cwd)
+def nix_env() -> dict[str, str]:
+    """What nix-daemon.sh sets for running nix: its bin on PATH and a certificate bundle."""
+    env = {"PATH": f"{NIX_PROFILE / 'bin'}:{os.environ.get('PATH', '')}"}
+    if "NIX_SSL_CERT_FILE" not in os.environ:
+        cert = next((c for c in NIX_CERT_FILES if c.is_file()), None)
+        if cert is None:
+            raise ReproduceError("no certificate bundle for Nix found")
+        env["NIX_SSL_CERT_FILE"] = str(cert)
+    return env
 
 
 def install_nix(work: Path) -> None:
@@ -558,7 +688,7 @@ def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None
         work = Path(tmp)
         if install:
             install_nix(work)
-        nix_shell(f'nix build -L --out-link "{work / "core"}" "{IOS_CORE_JOB}"', source)
+        run(["nix", "build", "-L", "--out-link", work / "core", IOS_CORE_JOB], cwd=source, env=nix_env())
         downloads = Path.home() / "Downloads"
         downloads.mkdir(parents=True, exist_ok=True)
         shutil.copy(work / "core" / IOS_CORE_ZIP, downloads / IOS_CORE_ZIP)
@@ -567,9 +697,7 @@ def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None
 
         # The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on
         # SIMPLEX_ASSETS. copy-assets.sh runs first, as its build phase runs after the extensions' catalogs are built.
-        (source / "apps/ios/Local.xcconfig").write_text(
-            f"SIMPLEX_ASSETS_DIR = {art}\nSWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS\n"
-        )
+        (source / "apps/ios/Local.xcconfig").write_text(IOS_LOCAL_XCCONFIG.format(art=art))
         run(["scripts/ios/copy-assets.sh", art], cwd=source)
         if not list((source / "apps/ios/Shared/SimpleXAssets.xcassets").glob("*.imageset")):
             raise ReproduceError(f"copy-assets.sh copied no imagesets from {art}")
@@ -606,79 +734,10 @@ def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Desktop and CLI
-
-
-def desktop_files(image: UbuntuImage) -> dict[str, str]:
-    """Released file names of an Ubuntu image's builds, with their paths in the container."""
-    cli = f"simplex-chat-ubuntu-{image.suffix}-x86_64"
-    files = {
-        cli: "/out/simplex-chat",
-        f"{cli}.deb": "/out/deb-build/simplex-chat.deb",
-        f"simplex-desktop-ubuntu-{image.suffix}-x86_64.deb": "/project/apps/multiplatform/release/main/deb/simplex_x86_64.deb",
-    }
-    if image.version == APPIMAGE_IMAGE:
-        files["simplex-desktop-x86_64.AppImage"] = "/project/apps/multiplatform/release/main/simplex.appimage"
-    return files
-
-
-def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Path) -> None:
-    """The Linux CLI, its deb, the desktop deb and, on APPIMAGE_IMAGE, the AppImage, with their released names."""
-    (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
-    log(f"building Ubuntu {image.version} CLI and desktop apps")
-    with Container(
-        source,
-        {source: "/project"},
-        build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
-        run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
-    ) as container:
-        container.exec(
-            "find /project -type d -exec chmod 755 {} +\n"
-            "find /project -type f -perm /111 -exec chmod 755 {} +\n"
-            "find /project -type f ! -perm /111 -exec chmod 644 {} +\n"
-            "cabal clean && cabal update && cabal build -j\n"
-            "mkdir -p /out\n"
-            "bin=$(find /project/dist-newstyle -name simplex-chat -type f -executable)\n"
-            'mv "$bin" /out/simplex-chat && strip /out/simplex-chat\n'
-            f'./scripts/desktop/build-cli-deb.sh "{version}"\n'
-            "export ASSETS_DIR=../../assets\n"
-            "./scripts/desktop/make-deb-linux.sh\n"
-        )
-        if image.version == APPIMAGE_IMAGE:
-            container.exec(
-                "export ASSETS_DIR=../../assets\n"
-                "./scripts/desktop/make-appimage-linux.sh\n"
-                "mv ./apps/multiplatform/release/main/*imple*.AppImage ./apps/multiplatform/release/main/simplex.appimage\n"
-            )
-        for name, path in desktop_files(image).items():
-            container.copy_out(path, out / name)
-        container.exec("rm -rf ./dist-newstyle ./apps/multiplatform")
-
-
-def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
-    built = results / "from-source"
-    released = results / "prebuilt"
-    built.mkdir(parents=True, exist_ok=True)
-    released.mkdir(parents=True, exist_ok=True)
-    for image in DESKTOP_IMAGES:
-        checkout(source, tag)
-        build_desktop_linux(source, image, tag_version(tag), built)
-        for name in desktop_files(image):
-            download(release_url(tag, name), released / name)
-    mismatched = compare_dirs(built, released)
-    for name in mismatched:
-        log(f"{name}: sha256 doesn't match")
-    if not mismatched:
-        write_sha256sums(built, results / "_sha256sums")
-        log(f"checksums: {results / '_sha256sums'}")
-    return mismatched
-
-
-# ---------------------------------------------------------------------------------------------------------------------
 # Commands
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reproduce:
     tag: str
     targets: tuple[Target, ...]
@@ -686,7 +745,7 @@ class Reproduce:
     nix_cache: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BuildApk:
     arch: Arch
     out: Path
@@ -694,14 +753,14 @@ class BuildApk:
     nix_cache: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BuildBundle:
     libs: Path
     out: Path
     source: Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BuildDesktopLinux:
     image: UbuntuImage
     version: str
@@ -709,7 +768,7 @@ class BuildDesktopLinux:
     source: Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BuildIosArchive:
     art: Path
     out: Path
@@ -717,10 +776,11 @@ class BuildIosArchive:
     install_nix: bool
 
 
-Command = Union[Reproduce, BuildApk, BuildBundle, BuildDesktopLinux, BuildIosArchive]
+# An assignment rather than a type statement, so that older Pythons parse the file and print the version check
+Command = Reproduce | BuildApk | BuildBundle | BuildDesktopLinux | BuildIosArchive
 
 
-def reproduce(command: Reproduce) -> int:
+def reproduce(command: Reproduce) -> None:
     require_tools(["git", "docker"])
     results = Path.cwd() / f"{command.tag}-simplex-chat"
     failed: list[str] = []
@@ -731,58 +791,49 @@ def reproduce(command: Reproduce) -> int:
         if Target.ANDROID in command.targets:
             failed += reproduce_android(command.tag, command.arches, command.nix_cache, source, results)
     if failed:
-        log(f"{command.tag} is not reproduced: {', '.join(failed)}")
-        return 1
-    log(f"{command.tag} is reproduced: {', '.join(t.value for t in command.targets)}")
-    return 0
+        raise ReproduceError(f"{command.tag} is not reproduced: {', '.join(failed)}")
+    log(f"{command.tag} is reproduced: {', '.join(command.targets)}")
 
 
-def build_android(command: BuildApk | BuildBundle) -> int:
-    require_tools(["docker"])
-    source, out = command.source.resolve(), command.out.resolve()
+def prepare_out(out: Path) -> Path:
+    out = out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    set_pid_max = isinstance(command, BuildApk) and command.arch == Arch.ARMV7A
-    with android_container(source, out, set_pid_max) as container:
-        if isinstance(command, BuildApk):
-            build_apk(container, source, command.arch, f"simplex-{command.arch.value}.apk", command.nix_cache, keep_libs=True)
-        else:
-            build_bundle(container, source, command.libs.resolve())
+    return out
+
+
+def build(command: BuildApk | BuildBundle | BuildDesktopLinux | BuildIosArchive) -> None:
+    out = prepare_out(command.out)
+    source = command.source.resolve()
+    match command:
+        case BuildApk(arch=arch, nix_cache=nix_cache):
+            require_tools(["docker"])
+            with android_container(source, out, arch == Arch.ARMV7A) as container:
+                build_apk(container, source, arch, out, f"simplex-{arch}.apk", nix_cache, keep_libs=True)
+        case BuildBundle(libs=libs):
+            require_tools(["docker"])
+            with android_container(source, out, set_pid_max=False) as container:
+                build_bundle(container, source, libs.resolve(), out)
+        case BuildDesktopLinux(image=image, version=version):
+            require_tools(["docker"])
+            build_desktop_linux(source, image, version, out)
+        case BuildIosArchive(art=art, install_nix=install):
+            require_tools(IOS_TOOLS)
+            if not install and not (NIX_PROFILE / "bin/nix").exists():
+                raise ReproduceError(f"Nix is not installed ({NIX_PROFILE / 'bin/nix'} not found): install it, or pass --install-nix")
+            build_ios_archive(source, art.resolve(), out, install)
     write_sha256sums(out)
-    return 0
 
 
-def build_ios(command: BuildIosArchive) -> int:
-    require_tools(IOS_TOOLS)
-    if not command.install_nix and not Path(NIX_PROFILE).is_file():
-        raise ReproduceError(f"Nix is not installed ({NIX_PROFILE} not found): install it, or pass --install-nix")
-    out = command.out.resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    build_ios_archive(command.source.resolve(), command.art.resolve(), out, command.install_nix)
-    write_sha256sums(out)
-    return 0
-
-
-def build_desktop(command: BuildDesktopLinux) -> int:
-    require_tools(["docker"])
-    out = command.out.resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    build_desktop_linux(command.source.resolve(), command.image, command.version, out)
-    write_sha256sums(out)
-    return 0
-
-
-def execute(command: Command) -> int:
-    if isinstance(command, Reproduce):
-        return reproduce(command)
-    if isinstance(command, BuildIosArchive):
-        return build_ios(command)
-    if isinstance(command, BuildDesktopLinux):
-        return build_desktop(command)
-    return build_android(command)
+def execute(command: Command) -> None:
+    match command:
+        case Reproduce():
+            reproduce(command)
+        case _:
+            build(command)
 
 
 def parse_build_args(argv: Sequence[str]) -> Command:
-    parser = argparse.ArgumentParser(prog="simplex-chat-reproduce-builds.py build", description="Build one commit's apps unsigned.")
+    parser = argparse.ArgumentParser(prog="simplex-chat-reproduce-builds.py build", description="Build one commit's release files.")
     kinds = parser.add_subparsers(dest="kind", required=True)
     apk = kinds.add_parser("android-apk", help="the deterministic unsigned APK and its core libraries")
     apk.add_argument("arch", type=Arch, choices=list(Arch))
@@ -799,14 +850,16 @@ def parse_build_args(argv: Sequence[str]) -> Command:
         sub.add_argument("--out", type=Path, required=True)
         sub.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
     args = parser.parse_args(argv)
-    if args.kind == "android-apk":
-        return BuildApk(args.arch, args.out, args.source, args.nix_cache)
-    if args.kind == "android-bundle":
-        return BuildBundle(args.libs, args.out, args.source)
-    if args.kind == "desktop-linux":
-        image = next(image for image in DESKTOP_IMAGES if image.version == args.image)
-        return BuildDesktopLinux(image, args.version, args.out, args.source)
-    return BuildIosArchive(args.art, args.out, args.source, args.install_nix)
+    match args.kind:
+        case "android-apk":
+            return BuildApk(args.arch, args.out, args.source, args.nix_cache)
+        case "android-bundle":
+            return BuildBundle(args.libs, args.out, args.source)
+        case "desktop-linux":
+            image = next(image for image in DESKTOP_IMAGES if image.version == args.image)
+            return BuildDesktopLinux(image, args.version, args.out, args.source)
+        case _:
+            return BuildIosArchive(args.art, args.out, args.source, args.install_nix)
 
 
 def parse_arches(value: str) -> tuple[Arch, ...]:
@@ -816,20 +869,12 @@ def parse_arches(value: str) -> tuple[Arch, ...]:
         raise argparse.ArgumentTypeError(f"{e}, choose from {', '.join(Arch)}") from e
 
 
-def parse_target(value: str) -> Target:
-    # a type rather than choices: argparse before 3.12 checks choices against the empty list of nargs="*"
-    try:
-        return Target(value)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(f"{e}, choose from {', '.join(Target)}") from e
-
-
 def parse_args(argv: Sequence[str]) -> Command:
     if argv[:1] == ["build"]:
         return parse_build_args(argv[1:])
     parser = argparse.ArgumentParser(description="Reproduce a SimpleX Chat release and compare it with the released files.")
     parser.add_argument("tag", help="release tag, e.g. v7.1.0")
-    parser.add_argument("targets", nargs="*", type=parse_target, help="desktop (default), android or both")
+    parser.add_argument("targets", nargs="*", type=Target, choices=list(Target), help="default: desktop")
     parser.add_argument("--arches", type=parse_arches, default=tuple(Arch), help="Android arches, e.g. aarch64,armv7a")
     parser.add_argument("--nix-cache", action="store_true", help="substitute the Android toolchains from zw3rk's and IOG's caches")
     args = parser.parse_args(argv)
@@ -840,10 +885,11 @@ def main(argv: Sequence[str]) -> int:
     command = parse_args(argv)
     os.environ["DOCKER_BUILDKIT"] = "1"
     try:
-        return execute(command)
+        execute(command)
     except ReproduceError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    return 0
 
 
 if __name__ == "__main__":
