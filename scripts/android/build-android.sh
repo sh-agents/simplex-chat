@@ -108,8 +108,10 @@ build() {
     android_simplex_lib="${folder}#hydraJobs.x86_64-linux.${arch}-android:lib:simplex-chat"
     android_support_lib="${folder}#hydraJobs.x86_64-linux.${arch}-android:lib:support"
 
-    android_simplex_lib_output="${PWD}/result/pkg-${arch}-android-libsimplex.zip"
-    android_support_lib_output="${PWD}/result/pkg-${arch}-android-libsupport.zip"
+    android_simplex_lib_result="${PWD}/result-${arch}-libsimplex"
+    android_support_lib_result="${PWD}/result-${arch}-libsupport"
+    android_simplex_lib_output="${android_simplex_lib_result}/pkg-${arch}-android-libsimplex.zip"
+    android_support_lib_output="${android_support_lib_result}/pkg-${arch}-android-libsupport.zip"
 
     arch_map "$arch"
 
@@ -121,10 +123,10 @@ build() {
     # Create missing folders
     mkdir -p "$libs_folder/$android_arch"
 
-    nix build "$android_simplex_lib"
+    nix build --out-link "$android_simplex_lib_result" "$android_simplex_lib"
     unzip -o "$android_simplex_lib_output" -d "$libs_folder/$android_arch"
 
-    nix build "$android_support_lib"
+    nix build --out-link "$android_support_lib_result" "$android_support_lib"
     unzip -o "$android_support_lib_output" -d "$libs_folder/$android_arch"
 
     # Build only one arch
