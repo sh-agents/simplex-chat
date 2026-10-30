@@ -7,6 +7,7 @@ import os
 import pathlib
 import platform
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -262,6 +263,17 @@ class ParseArgsTest(unittest.TestCase):
             build_script.parse_args(["build", "desktop-linux", "24.04", "--version", "7.1.0", "--out", "o"]),
             build_script.BuildDesktopLinux(build_script.linux_image("24.04", platform.machine()), "7.1.0", out, here),
         )
+        self.assertEqual(
+            build_script.parse_args(["build", "linux-libs", "--database", "postgres", "--host", "--out", "o"]),
+            build_script.BuildLinuxLibs(
+                build_script.linux_image("22.04", platform.machine()), build_script.Database.POSTGRES, out, here, True
+            ),
+        )
+        self.assertEqual(
+            build_script.parse_args(["build", "desktop-macos", "--require-signing", "--out", "o"]),
+            build_script.BuildDesktopMacos(out, here, True),
+        )
+        self.assertEqual(build_script.parse_args(["build", "desktop-windows", "--out", "o"]), build_script.BuildDesktopWindows(out, here))
         self.assertEqual(
             build_script.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
             build_script.BuildIosArchive(pathlib.Path("a"), out, here, True),
@@ -533,7 +545,39 @@ class VerifyApkTest(unittest.TestCase):
         self.assertFalse(result)
 
 
+class FakeRunner:
+    """Stands in for a Container or HostRunner: paths are host paths, and actions[argv[0]] runs for each step."""
+
+    def __init__(self, actions=None, answers=None):
+        self.steps = []
+        self.actions = actions or {}
+        self.answers = answers or {}
+
+    def run(self, step, capture=False, secrets=None):
+        self.steps.append(step)
+        action = self.actions.get(pathlib.Path(step.argv[0]).name)
+        if action:
+            action(step)
+        return next((answer for pattern, answer in self.answers.items() if pattern in " ".join(step.argv)), "")
+
+    def path(self, host):
+        return str(host)
+
+    def argvs(self):
+        return [step.argv for step in self.steps]
+
+
 class DesktopTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.source = self.root / "src"
+        self.multiplatform = self.source / "apps/multiplatform"
+        self.multiplatform.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
     def test_files_of_each_image(self):
         self.assertEqual(
             build_script.desktop_files(JAMMY),
@@ -545,6 +589,8 @@ class DesktopTest(unittest.TestCase):
             ],
         )
         self.assertNotIn("simplex-desktop-x86_64.AppImage", build_script.desktop_files(NOBLE))
+        postgres = build_script.linux_libs_zip("x86_64", build_script.Database.POSTGRES)
+        self.assertEqual(postgres, "simplex-chat-libs-linux-x86_64-postgres.zip")
 
     def test_aarch64_files_and_image(self):
         self.assertEqual(build_script.linux_image("22.04", "aarch64"), JAMMY_ARM)
@@ -557,76 +603,267 @@ class DesktopTest(unittest.TestCase):
                 "simplex-desktop-aarch64.AppImage",
             ],
         )
-        self.assertIn("linux-aarch64", build_script.desktop_steps(JAMMY_ARM, "7.1.0")[2].argv)
         with self.assertRaises(build_script.ReproduceError):
             build_script.linux_image("24.04", "riscv64")
 
-    def test_steps_of_each_image(self):
-        steps = build_script.desktop_steps(JAMMY, "7.1.0")
-        self.assertEqual(
-            [s.argv[:2] for s in steps],
-            [
-                ("./scripts/desktop/build-cli-deb.sh", "7.1.0"),
-                ("./scripts/desktop/make-deb-linux.sh",),
-                ("perl", "Configure"),
-                ("make", f"-j{os.cpu_count()}"),
-                ("./scripts/desktop/make-appimage-linux.sh",),
-            ],
+    def write_exports(self, definitions, flake):
+        (self.source / "src/Simplex/Chat").mkdir(parents=True)
+        (self.source / "src/Simplex/Chat/Mobile.hs").write_text(
+            'foreign export ccall "chat_send_cmd" cChatSendCmd :: X\nforeign export ccall "chat_reopen_store" cReopen :: X\n'
         )
-        self.assertEqual(len(build_script.desktop_steps(NOBLE, "7.1.0")), 2)
-        self.assertEqual(steps[1].env, {"ASSETS_DIR": "../../assets"})
+        (self.source / "libsimplex.dll.def").write_text(definitions)
+        (self.source / "flake.nix").write_text(flake)
 
-    def test_appimage_bundles_the_pinned_openssl(self):
-        configure, build, appimage = build_script.desktop_steps(JAMMY, "7.1.0")[2:]
-        self.assertEqual(configure.workdir, f"/out/openssl-{build_script.OPENSSL_VERSION}")
-        self.assertIn("--openssldir=/etc/ssl", configure.argv)
-        self.assertIn("--prefix=/usr/local", configure.argv)
-        self.assertEqual(build.env, {"SOURCE_DATE_EPOCH": "1704067200"})
-        self.assertEqual(appimage.env["LIBCRYPTO"], f"/out/openssl-{build_script.OPENSSL_VERSION}/libcrypto.so.3")
+    def test_exports_are_checked_without_the_android_only_ones(self):
+        self.write_exports("EXPORTS\n  chat_send_cmd\n", '"chat_send_cmd"\n')
+        build_script.check_exports(self.source)
 
-    def test_build_runs_the_steps_and_copies_the_released_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source, out = pathlib.Path(tmp) / "src", pathlib.Path(tmp) / "out"
-            release = source / build_script.DESKTOP_RELEASE_DIR
-            (release / "deb").mkdir(parents=True)
-            (release / "deb/simplex_x86_64.deb").write_bytes(b"desktop deb")
-            (release / "SimpleX_Chat-x86_64.AppImage").write_bytes(b"appimage")
-            out.mkdir()
-            recorder = Recorder(answers={"list-bin": "/project/dist-newstyle/build/simplex-chat\n"})
+    def test_missing_or_duplicated_exports_fail(self):
+        self.write_exports("EXPORTS\n", '"chat_send_cmd"\n')
+        with self.assertRaises(build_script.ReproduceError) as raised:
+            build_script.check_exports(self.source)
+        self.assertIn("libsimplex.dll.def", str(raised.exception))
+        (self.source / "libsimplex.dll.def").write_text("chat_send_cmd\n")
+        (self.source / "flake.nix").write_text('"chat_send_cmd"\n"chat_send_cmd"\n')
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.check_exports(self.source)
 
-            def fake_run(args, **kwargs):
-                args = [str(a) for a in args]
-                if args[:2] == ["docker", "run"]:
-                    work = next(pathlib.Path(a.split(":")[0]) for a in args if a.endswith(":/out"))
-                    (work / "deb-build").mkdir()
-                    (work / "simplex-chat").write_bytes(b"cli")
-                    (work / "deb-build/simplex-chat.deb").write_bytes(b"cli deb")
-                return recorder(args, **kwargs)
+    def test_touch_tree_follows_symlinks_and_skips_dangling_ones(self):
+        tree = self.root / "tree"
+        (tree / "dir").mkdir(parents=True)
+        (tree / "dir/file").write_text("x")
+        (tree / "link").symlink_to("dir/file")
+        (tree / "dangling").symlink_to("missing")
+        build_script.touch_tree(tree, "1704067200")
+        for path in (tree, tree / "dir", tree / "dir/file"):
+            self.assertEqual(path.stat().st_mtime, 1704067200)
+        self.assertFalse((tree / "missing").exists())
 
-            with mock.patch.object(build_script, "run", fake_run), mock.patch.object(build_script, "log"), mock.patch.object(
-                build_script, "fetch_openssl"
-            ) as fetch_openssl:
-                build_script.build_desktop_linux(source, JAMMY, "7.1.0", out)
-            work = next(pathlib.Path(a.split(":")[0]) for c in recorder.commands for a in c if a.endswith(":/out"))
-            fetch_openssl.assert_called_once_with(work)
-            self.assertIn("flags: +openssl", (source / "cabal.project.local").read_text())
-            build = next(c for c in recorder.commands if c[:2] == ["docker", "build"])
-            self.assertIn("TAG=22.04", build)
-            self.assertIn(f"HASH={JAMMY.digest}", build)
-            self.assertEqual(
-                [s[0] for s in recorder.steps()],
-                ["cabal", "cabal", "cabal", "cabal", "cp", "strip"] + [s.argv[0] for s in build_script.desktop_steps(JAMMY, "7.1.0")],
-            )
-            self.assertIn(["cp", "/project/dist-newstyle/build/simplex-chat", "/out/simplex-chat"], recorder.steps())
-            self.assertEqual(
-                {p.name: p.read_bytes() for p in out.iterdir()},
-                {
-                    "simplex-chat-ubuntu-22_04-x86_64": b"cli",
-                    "simplex-chat-ubuntu-22_04-x86_64.deb": b"cli deb",
-                    "simplex-desktop-ubuntu-22_04-x86_64.deb": b"desktop deb",
-                    "simplex-desktop-x86_64.AppImage": b"appimage",
-                },
-            )
+    def test_edit_lines_keeps_newlines_and_removes_none(self):
+        path = self.root / "f"
+        path.write_text("a\nb\nc")
+        build_script.edit_lines(path, lambda line: None if line == "b" else line + "!")
+        self.assertEqual(path.read_text(), "a!\nc!")
+
+    def test_desktop_entry_registers_the_url_schemes(self):
+        self.assertEqual(build_script.register_url_schemes("Exec=/opt/simplex/bin/simplex"), "Exec=/opt/simplex/bin/simplex %u")
+        self.assertEqual(build_script.register_url_schemes("Exec=simplex %U"), "Exec=simplex %U")
+        self.assertEqual(build_script.register_url_schemes("MimeType="), build_script.DESKTOP_MIME_TYPES)
+        self.assertEqual(build_script.register_url_schemes("Name=SimpleX"), "Name=SimpleX")
+
+    def test_cli_deb(self):
+        binary = self.root / "simplex-chat"
+        binary.write_bytes(b"x" * 2049)
+        work = self.root / "work"
+        work.mkdir()
+        runner = FakeRunner()
+        deb = build_script.build_cli_deb(runner, binary, "7.1.0", "aarch64", work)
+        package = work / "deb-build/simplex-chat"
+        control = (package / "DEBIAN/control").read_text()
+        self.assertIn("Version: 7.1.0\nSection: Messenger\n", control)
+        self.assertIn("Architecture: arm64\n", control)
+        self.assertTrue(control.endswith("Installed-Size: 3\n"))
+        self.assertEqual(stat.S_IMODE((package / "usr/bin/simplex-chat").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((package / "DEBIAN").stat().st_mode), 0o755)
+        self.assertEqual((package / "usr/bin/simplex-chat").stat().st_mtime, 1764547200)
+        self.assertEqual(runner.argvs()[0], ("dpkg-deb", "--build", "--root-owner-group", "--uniform-compression", "./simplex-chat"))
+        self.assertEqual([s.env for s in runner.steps], [{"SOURCE_DATE_EPOCH": "1764547200"}] * 2)
+        self.assertEqual(deb, work / "deb-build/simplex-chat.deb")
+
+    def test_installed_size_rounds_as_printf(self):
+        binary = self.root / "b"
+        for size, expected in ((0, "1"), (512, "1"), (513, "2"), (1024, "2"), (1536, "2"), (2049, "3")):
+            binary.write_bytes(b"x" * size)
+            work = self.root / f"w{size}"
+            work.mkdir()
+            build_script.build_cli_deb(FakeRunner(), binary, "1", "x86_64", work)
+            self.assertIn(f"Installed-Size: {expected}\n", (work / "deb-build/simplex-chat/DEBIAN/control").read_text())
+
+    def test_linux_lib_copies_libsimplex_and_its_ghc_libraries(self):
+        self.write_exports("chat_send_cmd\n", '"chat_send_cmd"\n')
+        build = self.source / "dist-newstyle/build/x86_64-linux/ghc-9.6.3/simplex-chat-7.1.0/build"
+        build.mkdir(parents=True)
+        (build / "libHSsimplex-chat-7.1.0-inplace-ghc9.6.3.so").write_bytes(b"lib")
+        (self.multiplatform / "desktop/build/cmake").mkdir(parents=True)
+
+        def copy_ghc_libs(step):
+            for name in step.argv[1:-1]:
+                (pathlib.Path(step.argv[-1]) / pathlib.Path(name).name).write_bytes(b"ghc")
+
+        ldd = "\tlibHSbase-4.18-ghc9.6.3.so => /ghc/lib/libHSbase-4.18-ghc9.6.3.so (0x1)\n\tlibc.so.6 => /lib/libc.so.6 (0x2)\n"
+        runner = FakeRunner(actions={"cp": copy_ghc_libs}, answers={"ldd": ldd})
+        libs = build_script.build_linux_lib(runner, self.source, "x86_64", build_script.Database.POSTGRES)
+        cabal = runner.argvs()[0]
+        self.assertIn("--builddir=dist-newstyle", cabal)
+        self.assertIn("simplexmq +client_library +client_postgres", cabal)
+        self.assertIn(("patchelf", "--replace-needed", "libffi.so.7", "libffi.so.8", "libsimplex.so"), runner.argvs())
+        self.assertEqual(runner.argvs()[-1], ("cp", "/ghc/lib/libHSbase-4.18-ghc9.6.3.so", str(build / "deps")))
+        self.assertEqual(libs, self.source / build_script.DESKTOP_LIBS_DIR / "linux-x86_64")
+        self.assertEqual(sorted(p.name for p in libs.iterdir()), ["libHSbase-4.18-ghc9.6.3.so", "libsimplex.so"])
+        self.assertFalse((self.multiplatform / "desktop/build/cmake").exists())
+
+    def test_vlc_is_extracted_once(self):
+        libs = self.root / "libs"
+        libs.mkdir()
+        work = self.root / "work"
+        work.mkdir()
+
+        def extract(step):
+            (work / "squashfs-root/usr/lib/vlc").mkdir(parents=True)
+            (work / "squashfs-root/usr/lib/libvlc.so").write_bytes(b"vlc")
+
+        runner = FakeRunner(actions={"vlc-linux-x86_64.appimage": extract})
+        with mock.patch.object(build_script, "fetch_pinned", lambda url, digest, target: target.write_bytes(b"") or target) as fetch:
+            build_script.add_vlc_linux(runner, libs, "x86_64", work)
+            build_script.add_vlc_linux(runner, libs, "x86_64", work)
+        self.assertEqual(len(runner.steps), 1)
+        self.assertEqual(runner.argvs()[0][1], "--appimage-extract")
+        self.assertTrue((libs / "vlc/libvlc.so").exists())
+        del fetch
+
+    def test_libs_are_linked_where_gradle_finds_them(self):
+        build_script.link_desktop_libs(self.source, "linux-aarch64", "linux-arm64")
+        build_script.link_desktop_libs(self.source, "linux-aarch64", "linux-arm64")
+        link = self.multiplatform / "build/links/linux-arm64"
+        self.assertEqual(os.readlink(link), "../../common/src/commonMain/cpp/desktop/libs/linux-aarch64/")
+
+    def test_desktop_deb_is_repacked_for_the_ubuntu_release(self):
+        release = self.multiplatform / "release/main/deb"
+
+        def gradle(step):
+            release.mkdir(parents=True)
+            (release / "simplex_7.1.0-1_amd64.deb").write_bytes(b"jpackage")
+
+        def dpkg(step):
+            if step.argv[1] == "-R":
+                app = self.multiplatform / "extracted/opt/simplex"
+                (app / "lib/app").mkdir(parents=True)
+                (self.multiplatform / "extracted/DEBIAN").mkdir()
+                (self.multiplatform / "extracted/DEBIAN/control").write_text("Package: simplex\nVersion: 7.1.0-1\n")
+                (app / "lib/app/skiko-awt-runtime-linux-x64-0.8.jar").write_bytes(b"jar")
+                cfg = "app.classpath=$APPDIR/a.jar\napp.classpath=$APPDIR/skiko-awt-runtime-linux-x64-0.8.jar\n"
+                (app / "lib/app/simplex.cfg").write_text(cfg)
+                (app / "lib/simplex-SimpleX.desktop").write_text("[Desktop Entry]\nExec=/opt/simplex/bin/simplex\nMimeType=\n")
+            else:
+                (release / "simplex_x86_64.deb").write_bytes(b"repacked")
+
+        runner = FakeRunner(actions={"gradlew": gradle, "dpkg-deb": dpkg})
+        captured = {}
+        original_touch = build_script.touch_tree
+
+        def touch(root, epoch):
+            captured["control"] = (root / "DEBIAN/control").read_text()
+            captured["cfg"] = (root / "opt/simplex/lib/app/simplex.cfg").read_text()
+            captured["entry"] = (root / "opt/simplex/lib/simplex-SimpleX.desktop").read_text()
+            captured["jars"] = sorted(p.name for p in (root / "opt/simplex/lib/app").iterdir())
+            original_touch(root, epoch)
+
+        with mock.patch.object(build_script, "touch_tree", touch):
+            deb = build_script.package_desktop_deb(runner, self.source, "x86_64", "jammy")
+        self.assertEqual(deb, release / "simplex_x86_64.deb")
+        self.assertEqual(captured["control"], "Package: simplex\nVersion: 7.1.0-1~jammy\n")
+        self.assertNotIn("skiko", captured["cfg"])
+        self.assertEqual(captured["jars"], ["simplex.cfg"])
+        self.assertIn("Exec=/opt/simplex/bin/simplex %u\n", captured["entry"])
+        self.assertIn(build_script.DESKTOP_MIME_TYPES, captured["entry"])
+        self.assertEqual(runner.argvs()[0], ("./gradlew", "-Psimplex.assets.dir=../../assets", "packageDeb"))
+        self.assertEqual(runner.steps[2].env, {"SOURCE_DATE_EPOCH": "1704067200"})
+        self.assertFalse((self.multiplatform / "extracted").exists())
+
+    def test_ubuntu_codename(self):
+        runner = FakeRunner(answers={"os-release": 'NAME="Ubuntu"\nVERSION_CODENAME=noble\n'})
+        self.assertEqual(build_script.ubuntu_codename(runner), "noble")
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.ubuntu_codename(FakeRunner())
+
+    def test_appimage(self):
+        libs = self.source / build_script.DESKTOP_LIBS_DIR / "linux-x86_64"
+        libs.mkdir(parents=True)
+        libcrypto = self.root / "libcrypto.so.3"
+        libcrypto.write_bytes(b"pinned")
+        distribute = self.multiplatform / "desktop/src/jvmMain/resources/distribute"
+        distribute.mkdir(parents=True)
+        (distribute / "chat.simplex.app.desktop").write_text("Exec=/opt/x/simplex %u\nIcon=chat.simplex.app\n")
+        (distribute / "chat.simplex.app.appdata.xml").write_text("<x/>")
+        app = self.multiplatform / "release/main/app"
+        bundled_during_gradle = []
+
+        def gradle(step):
+            bundled_during_gradle.append((libs / "libcrypto.so.3").read_bytes())
+            (app / "simplex/bin").mkdir(parents=True)
+            (app / "simplex/lib/app").mkdir(parents=True)
+            (app / "simplex/bin/simplex").write_bytes(b"launcher")
+            (app / "simplex/lib/simplex.png").write_bytes(b"png")
+            (app / "simplex/lib/app/skiko-awt-runtime-linux-x64.jar").write_bytes(b"jar")
+            (app / "simplex/lib/app/simplex.cfg").write_text("skiko-awt-runtime-linux-x64.jar\nother\n")
+
+        def appimagetool(step):
+            (app / "AppDir/SimpleX_Chat-x86_64.AppImage").write_bytes(b"appimage")
+
+        runner = FakeRunner(actions={"gradlew": gradle, "appimagetool-x86_64.AppImage": appimagetool})
+        work = self.root / "work"
+        work.mkdir()
+        with mock.patch.object(build_script, "fetch_pinned", lambda url, digest, target: target.write_bytes(b"") or target):
+            image = build_script.package_appimage(runner, self.source, "x86_64", libcrypto, work)
+        self.assertEqual(bundled_during_gradle, [b"pinned"])
+        self.assertFalse((libs / "libcrypto.so.3").exists())
+        appdir = app / "AppDir"
+        self.assertEqual(os.readlink(appdir / "AppRun"), "usr/bin/simplex")
+        self.assertEqual((appdir / "usr/share/applications/chat.simplex.app.desktop").read_text(), "Exec=simplex %u\nIcon=simplex\n")
+        self.assertTrue((appdir / "usr/share/metainfo/chat.simplex.app.appdata.xml").exists())
+        self.assertFalse((appdir / "usr/lib/app/skiko-awt-runtime-linux-x64.jar").exists())
+        self.assertEqual((appdir / "usr/lib/app/simplex.cfg").read_text(), "other\n")
+        tool_step = next(s for s in runner.steps if s.argv[0].endswith("appimagetool-x86_64.AppImage"))
+        self.assertEqual(tool_step.argv[1:4], ("--verbose", "--no-appstream", "--runtime-file"))
+        self.assertEqual(tool_step.env, {"SOURCE_DATE_EPOCH": "1704067200"})
+        self.assertEqual(image, self.multiplatform / "release/main/SimpleX_Chat-x86_64.AppImage")
+
+    def test_desktop_build_order_and_released_names(self):
+        out = self.root / "out"
+        out.mkdir()
+
+        def made(name):
+            def make(*args, **kwargs):
+                path = self.root / name
+                path.write_bytes(name.encode())
+                return path
+
+            return make
+
+        container = FakeRunner(answers={"list-bin": "/project/dist/simplex-chat\n", "os-release": "VERSION_CODENAME=jammy\n"})
+        container.__enter__ = lambda: container
+        calls = []
+
+        def record(name, result=None):
+            def call(*args, **kwargs):
+                calls.append(name)
+                return result(*args) if result else None
+
+            return call
+
+        def cp(step):
+            if step.argv[0] == "cp":
+                pathlib.Path(step.argv[2]).write_bytes(b"cli")
+
+        container.actions["cp"] = cp
+        with (
+            mock.patch.object(build_script, "linux_container", return_value=contextlib.nullcontext(container)),
+            mock.patch.object(build_script, "build_cli_deb", record("cli deb", made("cli.deb"))),
+            mock.patch.object(build_script, "build_linux_lib", record("lib", lambda *a: self.root)),
+            mock.patch.object(build_script, "add_vlc_linux", record("vlc")),
+            mock.patch.object(build_script, "link_desktop_libs", record("link")),
+            mock.patch.object(build_script, "package_desktop_deb", record("desktop deb", made("desktop.deb"))),
+            mock.patch.object(build_script, "zip_desktop_libs", record("libs zip")),
+            mock.patch.object(build_script, "fetch_openssl", record("openssl", lambda work: work)),
+            mock.patch.object(build_script, "package_appimage", record("appimage", made("app.AppImage"))),
+            mock.patch.object(build_script, "log"),
+        ):
+            build_script.build_desktop_linux(self.source, JAMMY, "7.1.0", out)
+        self.assertEqual(calls, ["cli deb", "lib", "vlc", "link", "desktop deb", "libs zip", "openssl", "appimage"])
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(build_script.desktop_files(JAMMY)))
+        configure = next(a for a in container.argvs() if a[:2] == ("perl", "Configure"))
+        self.assertIn("--openssldir=/etc/ssl", configure)
+        self.assertIn("flags: +openssl", (self.source / "cabal.project.local").read_text())
 
     def test_reproduce_reports_mismatches_and_writes_sums_only_when_all_match(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -693,6 +930,26 @@ class OpenSslTest(unittest.TestCase):
         self.assertIn(f'version = "{build_script.OPENSSL_VERSION}";', pin)
         self.assertIn(f'url = "{build_script.OPENSSL_URL}";', pin)
         self.assertIn(f'sha256 = "{build_script.OPENSSL_SHA256}";', pin)
+
+
+class LinuxLibsTest(unittest.TestCase):
+    def test_host_build_updates_cabal_and_zips_the_libraries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            libs = root / "libs"
+            libs.mkdir()
+            (libs / "libsimplex.so").write_bytes(b"lib")
+            (libs / "vlc").mkdir()
+            recorder = Recorder()
+            with (
+                mock.patch.object(build_script, "run", recorder),
+                mock.patch.object(build_script, "build_linux_lib", return_value=libs) as lib,
+            ):
+                build_script.build_linux_libs(root, JAMMY, build_script.Database.POSTGRES, root, on_host=True)
+            self.assertEqual(recorder.commands, [["cabal", "update"]])
+            self.assertIsInstance(lib.call_args.args[0], build_script.HostRunner)
+            with zipfile.ZipFile(root / "simplex-chat-libs-linux-x86_64-postgres.zip") as z:
+                self.assertEqual(z.namelist(), ["libs/libsimplex.so"])
 
 
 class HostDesktopTest(unittest.TestCase):

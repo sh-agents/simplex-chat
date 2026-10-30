@@ -9,6 +9,7 @@ Build one commit's release files, as CI does:
     simplex-chat-build.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
     simplex-chat-build.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
     simplex-chat-build.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
+    simplex-chat-build.py build linux-libs [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--host] --out <dir> [--source <dir>]
     simplex-chat-build.py build desktop-macos --out <dir> [--source <dir>] [--require-signing]
     simplex-chat-build.py build desktop-windows --out <dir> [--source <dir>]
     simplex-chat-build.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
@@ -30,6 +31,7 @@ import hashlib
 import os
 import platform
 import plistlib
+import re
 import shutil
 import stat
 import struct
@@ -40,8 +42,9 @@ import urllib.request
 import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import TracebackType
+from typing import Protocol
 
 REPO = "https://github.com/simplex-chat/simplex-chat"
 GHC = "9.6.3"
@@ -364,6 +367,13 @@ def download(url: str, target: Path) -> None:
         raise ReproduceError(f"cannot download {url}: {e}") from e
 
 
+def fetch_pinned(url: str, digest: str, target: Path) -> Path:
+    download(url, target)
+    if sha256(target) != digest:
+        raise ReproduceError(f"{url} doesn't match its pinned SHA-256 {digest}")
+    return target
+
+
 def release_url(tag: str, name: str) -> str:
     return f"{REPO}/releases/download/{tag}/{name}"
 
@@ -478,6 +488,30 @@ class Container:
     def copy_out(self, path: str, target: Path) -> None:
         # -L copies the targets of symlinks, such as Nix's out-links into the container's store
         run(["docker", "cp", "-L", f"{self.name}:{path}", target])
+
+    def path(self, host: Path) -> str:
+        """Where a host path under one of the mounts is in the container."""
+        for mount, target in self.mounts.items():
+            if host.is_relative_to(mount):
+                return str(PurePosixPath(target.removesuffix(":ro")) / host.relative_to(mount).as_posix())
+        raise ReproduceError(f"{host} is in no mount of the container")
+
+
+class HostRunner:
+    """Runs steps on this machine, with the build tools installed on it."""
+
+    def run(self, step: Step, capture: bool = False, secrets: Mapping[str, str] | None = None) -> str:
+        env = {**step.env, **(secrets or {})}
+        return run(step.argv, cwd=Path(step.workdir), env=env, input=step.input, capture=capture, title=" ".join(step.argv)).stdout or ""
+
+    def path(self, host: Path) -> str:
+        return str(host)
+
+
+class Runner(Protocol):
+    def run(self, step: Step, capture: bool = False, secrets: Mapping[str, str] | None = None) -> str: ...
+
+    def path(self, host: Path) -> str: ...
 
 
 def retry_once(action: Callable[[], object]) -> None:
@@ -673,10 +707,7 @@ def reproduce_android(tag: str, arches: Sequence[Arch], nix_cache: bool, source:
 
 def fetch_openssl(work: Path) -> Path:
     """The OpenSSL source tree, from the tarball checked against OPENSSL_SHA256."""
-    tarball = work / f"openssl-{OPENSSL_VERSION}.tar.gz"
-    download(OPENSSL_URL, tarball)
-    if sha256(tarball) != OPENSSL_SHA256:
-        raise ReproduceError(f"{OPENSSL_URL} doesn't match its pinned SHA-256 {OPENSSL_SHA256}")
+    tarball = fetch_pinned(OPENSSL_URL, OPENSSL_SHA256, work / f"openssl-{OPENSSL_VERSION}.tar.gz")
     with tarfile.open(tarball) as tar:
         tar.extractall(work, filter="data")
     return work / f"openssl-{OPENSSL_VERSION}"
@@ -696,22 +727,269 @@ def openssl_build(target: str, prefix: str, openssldir: str, install: bool) -> l
 # ---------------------------------------------------------------------------------------------------------------------
 # Desktop and CLI
 
-OPENSSL_CONTAINER_SOURCE = f"{OUT}/openssl-{OPENSSL_VERSION}"
+CLI_DEB_SOURCE_DATE_EPOCH = "1764547200"
+DEB_ARCHES = {"x86_64": "amd64", "aarch64": "arm64"}
+COMPOSE_ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
+# Android only: Mobile.hs exports them, the desktop library doesn't
+ANDROID_ONLY_EXPORTS = ("chat_migrate_init_key", "chat_reopen_store")
+LINUX_LIB_GHC_OPTIONS = "-optl-Wl,-rpath,$ORIGIN -optl-Wl,-soname,libsimplex.so -flink-rts -threaded"
+VLC_RELEASE = "https://github.com/simplex-chat/vlc/releases/download/v3.0.23-2"
+VLC_SHA256 = {
+    "vlc-linux-x86_64.appimage": "594fc3a603167a977cc0de519e1d5f785037df0db60c57518f88e46606d5bb98",
+    "vlc-linux-aarch64.appimage": "697e3d1d0eaad0729529826021fd78b10eee411ba413866c5ab24ac4ac754ba4",
+    "vlc-macos-aarch64.zip": "ee537e339b4b40546dc9374db4a2e74eeb46d4b76fb7f23b201e7beb144decb8",
+    "vlc-macos-x86_64.zip": "a4a782b8d2f5475ae7a7dda84a2ba4989d415cd4c0a7d19c68e75a90920a0d6b",
+    "vlc-win-x86_64.zip": "09993fc4e6bf8239cf847f943ae593dd62ba9abbe5f2f18c42bfca1bc9e94443",
+}
+# The builds of the continuous releases of simplex-chat/appimagetool and simplex-chat/type2-runtime of 2025-06-04
+APPIMAGE_TOOLS = {
+    "x86_64": (
+        ("appimagetool", "appimagetool-x86_64.AppImage", "ad30156bd2c0a364e742b13bd205021e2408399a9090bc2d76048dd504b23f66"),
+        ("type2-runtime", "runtime-x86_64", "df90eadfa40b83a4183bf7a7f6fdf9c293eebea83a614fe48ccd2f849a75ad58"),
+    ),
+    "aarch64": (
+        ("appimagetool", "appimagetool-aarch64.AppImage", "1401a0557ed979b32ca82fb136b2f328ff2fafbb024b2b61e155980605cb3ccb"),
+        ("type2-runtime", "runtime-aarch64", "75ad8a177eef47943328e541a57911a79a88446c3a1a0c7a172f2046eabebb9e"),
+    ),
+}
+# jpackage's desktop entry passes no URL and handles no MIME type; this registers the simplexchat: and simplex: schemes
+DESKTOP_MIME_TYPES = "MimeType=x-scheme-handler/simplexchat;x-scheme-handler/simplex;"
+# Compose extracts the skiko runtime jar's library at build time, with the build time as its timestamp; the app loads
+# the library without it (https://youtrack.jetbrains.com/issue/CMP-1971)
+SKIKO_RUNTIME = "skiko-awt-runtime-linux"
 
 
-def desktop_steps(image: UbuntuImage, version: str) -> list[Step]:
-    """After the CLI is built and copied to /out: its deb, the desktop deb and, on APPIMAGE_IMAGE, the AppImage with the
-    pinned OpenSSL, whose source fetch_openssl put in /out."""
-    steps = [
-        Step(("./scripts/desktop/build-cli-deb.sh", version, f"{OUT}/simplex-chat", f"{OUT}/deb-build")),
-        Step(("./scripts/desktop/make-deb-linux.sh",), env=DESKTOP_ENV),
-    ]
-    if image.version == APPIMAGE_IMAGE:
-        openssl = openssl_build(f"linux-{image.arch}", OPENSSL_UNIX_PREFIX, OPENSSL_UNIX_DIR, install=False)
-        steps += [Step(argv, OPENSSL_CONTAINER_SOURCE, env={"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}) for argv in openssl]
-        libcrypto = f"{OPENSSL_CONTAINER_SOURCE}/libcrypto.so.3"
-        steps.append(Step(("./scripts/desktop/make-appimage-linux.sh",), env={**DESKTOP_ENV, "LIBCRYPTO": libcrypto}))
-    return steps
+class Database(enum.StrEnum):
+    SQLITE = "sqlite"
+    POSTGRES = "postgres"
+
+
+def client_library_constraints(database: Database) -> tuple[str, ...]:
+    flags = "+client_library +client_postgres" if database == Database.POSTGRES else "+client_library"
+    return ("--constraint", f"simplexmq {flags}", "--constraint", f"simplex-chat {flags}")
+
+
+def check_exports(source: Path) -> None:
+    """Each function that Mobile.hs exports to the desktop library is in libsimplex.dll.def and flake.nix once."""
+    exports = re.findall(r'foreign export ccall "([^"]+)"', (source / "src/Simplex/Chat/Mobile.hs").read_text())
+    definitions = (source / "libsimplex.dll.def").read_text().splitlines()
+    flake = (source / "flake.nix").read_text().splitlines()
+    for name in exports:
+        if name in ANDROID_ONLY_EXPORTS:
+            continue
+        if sum(line.endswith(name) for line in definitions) != 1:
+            raise ReproduceError(f'wrong exports in libsimplex.dll.def: add "{name}" to it')
+        if sum(f'"{name}"' in line for line in flake) != 1:
+            raise ReproduceError(f'wrong exports in flake.nix: add "{name}" to aarch64-android:lib:simplex-chat')
+
+
+def single_dir(directory: Path, pattern: str) -> Path:
+    found = [p for p in sorted(directory.glob(pattern)) if p.is_dir()]
+    if len(found) != 1:
+        raise ReproduceError(f"expected one {pattern} directory in {directory}, found {len(found)}")
+    return found[0]
+
+
+def touch_tree(root: Path, epoch: str) -> None:
+    """Sets the times of root and everything in it, through symlinks as touch does, for deterministic archives."""
+    paths = [root]
+    for directory, dirs, files in os.walk(root):
+        paths += [Path(directory, name) for name in dirs + files]
+    for path in paths:
+        if path.exists():
+            os.utime(path, (int(epoch), int(epoch)))
+
+
+def edit_lines(path: Path, edit: Callable[[str], str | None]) -> None:
+    """Rewrites each line of path, without its newline, with edit; a line that edit maps to None is removed."""
+    lines = []
+    for line in path.read_text().splitlines(keepends=True):
+        text = line.rstrip("\n")
+        edited = edit(text)
+        if edited is not None:
+            lines.append(edited + line[len(text) :])
+    path.write_text("".join(lines))
+
+
+def desktop_libs(source: Path, platform_dir: str) -> Path:
+    return source / DESKTOP_LIBS_DIR / platform_dir
+
+
+def link_desktop_libs(source: Path, platform_dir: str, compose_dir: str) -> None:
+    """build/links/<compose_dir>, where the desktop app's Gradle build finds the libraries."""
+    links = source / "apps/multiplatform/build/links"
+    links.mkdir(parents=True, exist_ok=True)
+    link = links / compose_dir
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.is_dir():
+        shutil.rmtree(link)
+    target = f"../../common/src/commonMain/cpp/desktop/libs/{platform_dir}/"
+    if os.name == "nt":
+        # as MSYS2's ln -s, which copies unless Windows symlinks are enabled
+        shutil.copytree(desktop_libs(source, platform_dir), link)
+    else:
+        link.symlink_to(target)
+
+
+def build_linux_lib(runner: Runner, source: Path, arch: str, database: Database, dist_dir: str = "dist-newstyle") -> Path:
+    """libsimplex.so and the GHC libraries it loads, in the desktop app's libraries directory, which it returns."""
+    check_exports(source)
+    cabal = ("cabal", "build", f"--builddir={dist_dir}", "lib:simplex-chat", f"--ghc-options={LINUX_LIB_GHC_OPTIONS}")
+    runner.run(Step((*cabal, *client_library_constraints(database)), runner.path(source)))
+    build = single_dir(source / dist_dir / "build" / f"{arch}-linux" / f"ghc-{GHC}", "simplex-chat-*") / "build"
+    for lib in build.glob(f"libHSsimplex-chat-*-inplace-ghc{GHC}.so"):
+        lib.rename(build / "libsimplex.so")
+    # Ubuntu 20.04 runners linked libffi.so.7, which users' systems may lack; libffi.so.8 ships with the libraries
+    runner.run(Step(("patchelf", "--replace-needed", "libffi.so.7", "libffi.so.8", "libsimplex.so"), runner.path(build)))
+    ldd = runner.run(Step(("ldd", "libsimplex.so"), runner.path(build)), capture=True)
+    ghc_libs = [line.split()[2] for line in ldd.splitlines() if "ghc" in line]
+    deps = build / "deps"
+    deps.mkdir(exist_ok=True)
+    if ghc_libs:
+        runner.run(Step(("cp", *ghc_libs, runner.path(deps)), runner.path(build)))
+    libs = desktop_libs(source, f"linux-{arch}")
+    shutil.rmtree(libs, ignore_errors=True)
+    shutil.rmtree(source / "apps/multiplatform/desktop/build/cmake", ignore_errors=True)
+    libs.mkdir(parents=True)
+    for path in [*deps.iterdir(), build / "libsimplex.so"]:
+        shutil.copy(path, libs)
+    return libs
+
+
+def add_vlc_linux(runner: Runner, libs: Path, arch: str, work: Path) -> None:
+    vlc = libs / "vlc"
+    if vlc.exists():
+        return
+    name = f"vlc-linux-{arch}.appimage"
+    appimage = fetch_pinned(f"{VLC_RELEASE}/{name}", VLC_SHA256[name], work / name)
+    appimage.chmod(0o755)
+    runner.run(Step((runner.path(appimage), "--appimage-extract"), runner.path(work)))
+    shutil.copytree(work / "squashfs-root/usr/lib", vlc, symlinks=True)
+
+
+def build_cli_deb(runner: Runner, binary: Path, version: str, arch: str, work: Path) -> Path:
+    """The CLI's deb, with the release's control file and fixed timestamps."""
+    build = work / "deb-build"
+    package = build / "simplex-chat"
+    for directory in (build, package, package / "DEBIAN", package / "usr", package / "usr/bin"):
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+    size = f"{(binary.stat().st_size + 1023) / 1024:.0f}"
+    control = package / "DEBIAN/control"
+    control.write_text(
+        "Package: simplex-chat\n"
+        f"Version: {version}\n"
+        "Section: Messenger\n"
+        "Priority: optional\n"
+        f"Architecture: {DEB_ARCHES[arch]}\n"
+        "Maintainer: SimpleX Chat <chat@simplex.chat>\n"
+        "Description: SimpleX - the first messaging platform that has no user identifiers of any kind - 100% private by design! (CLI)\n"
+        f"Installed-Size: {size}\n"
+    )
+    control.chmod(0o644)
+    shutil.copy(binary, package / "usr/bin/simplex-chat")
+    (package / "usr/bin/simplex-chat").chmod(0o755)
+    touch_tree(package, CLI_DEB_SOURCE_DATE_EPOCH)
+    epoch = {"SOURCE_DATE_EPOCH": CLI_DEB_SOURCE_DATE_EPOCH}
+    runner.run(Step(("dpkg-deb", "--build", "--root-owner-group", "--uniform-compression", "./simplex-chat"), runner.path(build), epoch))
+    runner.run(Step(("strip-nondeterminism", "./simplex-chat.deb"), runner.path(build), epoch))
+    return build / "simplex-chat.deb"
+
+
+def remove_skiko_runtime(app: Path) -> None:
+    for jar in app.glob(f"lib/app/*{SKIKO_RUNTIME}*"):
+        jar.unlink()
+    edit_lines(app / "lib/app/simplex.cfg", lambda line: None if SKIKO_RUNTIME in line else line)
+
+
+def register_url_schemes(line: str) -> str:
+    if line.startswith("Exec=") and "%u" not in line and "%U" not in line:
+        return f"{line} %u"
+    return DESKTOP_MIME_TYPES if line.startswith("MimeType=") else line
+
+
+def package_desktop_deb(runner: Runner, source: Path, arch: str, codename: str) -> Path:
+    """jpackage's deb without the skiko runtime jar, versioned for the Ubuntu release and with fixed timestamps."""
+    multiplatform = source / "apps/multiplatform"
+    runner.run(Step(("./gradlew", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}", "packageDeb"), runner.path(multiplatform)))
+    release = multiplatform / "release/main/deb"
+    final = release / f"simplex_{arch}.deb"
+    jpackage_debs = [p for p in sorted(release.glob("simplex*.deb")) if p != final]
+    if len(jpackage_debs) != 1:
+        raise ReproduceError(f"expected one deb of jpackage in {release}, found {len(jpackage_debs)}")
+    extracted = multiplatform / "extracted"
+    shutil.rmtree(extracted, ignore_errors=True)
+    runner.run(Step(("dpkg-deb", "-R", runner.path(jpackage_debs[0]), "./extracted"), runner.path(multiplatform)))
+    app = single_dir(extracted / "opt", "*imple*")
+    remove_skiko_runtime(app)
+    edit_lines(extracted / "DEBIAN/control", lambda line: f"{line}~{codename}" if "Version" in line else line)
+    for entry in app.glob("lib/*.desktop"):
+        edit_lines(entry, register_url_schemes)
+        if DESKTOP_MIME_TYPES not in entry.read_text().splitlines():
+            raise ReproduceError(f"{entry.name} does not register simplexchat: and simplex:")
+    touch_tree(extracted, SOURCE_DATE_EPOCH)
+    epoch = {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}
+    build = ("dpkg-deb", "--build", "--root-owner-group", "--uniform-compression", "./extracted", runner.path(final))
+    runner.run(Step(build, runner.path(multiplatform), epoch))
+    runner.run(Step(("strip-nondeterminism", runner.path(final)), runner.path(multiplatform), epoch))
+    shutil.rmtree(extracted)
+    return final
+
+
+def ubuntu_codename(runner: Runner) -> str:
+    release = runner.run(Step(("cat", "/etc/os-release")), capture=True)
+    for line in release.splitlines():
+        if line.startswith("VERSION_CODENAME="):
+            return line.split("=", 1)[1].strip('"')
+    raise ReproduceError("VERSION_CODENAME is not in /etc/os-release")
+
+
+def package_appimage(runner: Runner, source: Path, arch: str, libcrypto: Path, work: Path) -> Path:
+    """The AppImage of the desktop app, with libcrypto bundled and fixed timestamps."""
+    multiplatform = source / "apps/multiplatform"
+    libs = desktop_libs(source, f"linux-{arch}")
+    bundled = libs / libcrypto.name
+    shutil.copy(libcrypto, bundled)
+    try:
+        runner.run(
+            Step(("./gradlew", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}", "createDistributable"), runner.path(multiplatform))
+        )
+    finally:
+        bundled.unlink()
+    app = multiplatform / "release/main/app"
+    appdir = app / "AppDir"
+    shutil.rmtree(appdir, ignore_errors=True)
+    (appdir / "usr").mkdir(parents=True)
+    distributable = single_dir(app, "*imple*")
+    for part in ("bin", "lib"):
+        shutil.copytree(distributable / part, appdir / "usr" / part, symlinks=True)
+    shutil.copy(appdir / "usr/lib/simplex.png", appdir)
+    for share in ("icons", "metainfo", "applications"):
+        (appdir / "usr/share" / share).mkdir(parents=True)
+    # AppImageLauncher shows this icon
+    shutil.copy(appdir / "usr/lib/simplex.png", appdir / "usr/share/icons")
+    (appdir / "AppRun").symlink_to(Path("usr/bin") / single_file(appdir / "usr/bin", "*imple*").name)
+    distribute = multiplatform / "desktop/src/jvmMain/resources/distribute"
+    entry = appdir / "chat.simplex.app.desktop"
+    shutil.copy(single_file(distribute, "*imple*.desktop"), entry)
+    edit_lines(entry, lambda line: re.sub(r"^Exec=[^ ]*", "Exec=simplex", re.sub(r"Icon=.*", "Icon=simplex", line)))
+    shutil.copy(entry, appdir / "usr/share/applications")
+    for appdata in distribute.glob("*.appdata.xml"):
+        shutil.copy(appdata, appdir / "usr/share/metainfo")
+    tool, runtime = (
+        fetch_pinned(f"https://github.com/simplex-chat/{repo}/releases/download/continuous/{name}", digest, work / name)
+        for repo, name, digest in APPIMAGE_TOOLS[arch]
+    )
+    tool.chmod(0o755)
+    remove_skiko_runtime(appdir / "usr")
+    touch_tree(appdir, SOURCE_DATE_EPOCH)
+    epoch = {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}
+    appimagetool = (runner.path(tool), "--verbose", "--no-appstream", "--runtime-file", runner.path(runtime), ".")
+    runner.run(Step(appimagetool, runner.path(appdir), epoch))
+    image = shutil.move(single_file(appdir, "*imple*.AppImage"), multiplatform / "release/main")
+    runner.run(Step(("strip-nondeterminism", runner.path(Path(image))), runner.path(multiplatform), epoch))
+    return Path(image)
 
 
 CLI_BUILD_STEPS = (Step(("cabal", "clean")), Step(("cabal", "update")), Step(("cabal", "build", "-j")))
@@ -725,6 +1003,10 @@ def desktop_files(image: UbuntuImage) -> list[str]:
     return files
 
 
+def linux_libs_zip(arch: str, database: Database) -> str:
+    return f"simplex-chat-libs-linux-{arch}{'-postgres' if database == Database.POSTGRES else ''}.zip"
+
+
 def linux_image(version: str, machine: str) -> UbuntuImage:
     """The image of an Ubuntu version for this machine: Docker runs images of the host's architecture."""
     for image in DESKTOP_IMAGES:
@@ -733,31 +1015,58 @@ def linux_image(version: str, machine: str) -> UbuntuImage:
     raise ReproduceError(f"no Ubuntu {version} image for {machine}")
 
 
+def linux_container(source: Path, image: UbuntuImage, work: Path) -> Container:
+    return Container(
+        source,
+        {source: PROJECT, work: OUT},
+        build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
+        run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
+    )
+
+
 def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Path) -> None:
-    """The Linux release files of an Ubuntu image, with their released names."""
+    """The Linux release files of an Ubuntu image, with their released names, and on APPIMAGE_IMAGE the libraries."""
     (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
     normalize_permissions(source)
-    log(f"building Ubuntu {image.version} CLI and desktop apps")
+    log(f"building Ubuntu {image.version} {image.arch} CLI and desktop apps")
     with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp)
-        if image.version == APPIMAGE_IMAGE:
-            fetch_openssl(work)
-        with Container(
-            source,
-            {source: PROJECT, work: OUT},
-            build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
-            run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
-        ) as container:
-            container.run_all(CLI_BUILD_STEPS)
-            cli = container.run(Step(("cabal", "list-bin", "exe:simplex-chat")), capture=True).strip()
-            container.run_all([Step(("cp", cli, f"{OUT}/simplex-chat")), Step(("strip", f"{OUT}/simplex-chat"))])
-            container.run_all(desktop_steps(image, version))
-        release = source / DESKTOP_RELEASE_DIR
-        built = [work / "simplex-chat", work / "deb-build/simplex-chat.deb", release / f"deb/simplex_{image.arch}.deb"]
-        if image.version == APPIMAGE_IMAGE:
-            built.append(single_file(release, "*imple*.AppImage"))
-        for path, name in zip(built, desktop_files(image), strict=True):
-            shutil.copy(path, out / name)
+        work = Path(tmp).resolve()
+        with linux_container(source, image, work) as container:
+            for step in CLI_BUILD_STEPS:
+                container.run(Step(step.argv, container.path(source)))
+            cli = container.run(Step(("cabal", "list-bin", "exe:simplex-chat"), container.path(source)), capture=True).strip()
+            container.run(Step(("cp", cli, container.path(work / "simplex-chat")), container.path(source)))
+            container.run(Step(("strip", container.path(work / "simplex-chat")), container.path(source)))
+            shutil.copy(work / "simplex-chat", out / desktop_files(image)[0])
+            shutil.copy(build_cli_deb(container, work / "simplex-chat", version, image.arch, work), out / desktop_files(image)[1])
+            libs = build_linux_lib(container, source, image.arch, Database.SQLITE)
+            add_vlc_linux(container, libs, image.arch, work)
+            link_desktop_libs(source, f"linux-{image.arch}", f"linux-{COMPOSE_ARCHES[image.arch]}")
+            deb = package_desktop_deb(container, source, image.arch, ubuntu_codename(container))
+            shutil.copy(deb, out / desktop_files(image)[2])
+            if image.version == APPIMAGE_IMAGE:
+                zip_desktop_libs(libs, [], out / linux_libs_zip(image.arch, Database.SQLITE))
+                openssl = fetch_openssl(work)
+                build = openssl_build(f"linux-{image.arch}", OPENSSL_UNIX_PREFIX, OPENSSL_UNIX_DIR, install=False)
+                for argv in build:
+                    container.run(Step(argv, container.path(openssl), {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}))
+                appimage = package_appimage(container, source, image.arch, openssl / "libcrypto.so.3", work)
+                shutil.copy(appimage, out / desktop_files(image)[3])
+
+
+def build_linux_libs(source: Path, image: UbuntuImage, database: Database, out: Path, on_host: bool) -> None:
+    """The library release: the desktop libraries without VLC, built in the image's container or on this machine."""
+    (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
+    if on_host:
+        host = HostRunner()
+        host.run(Step(("cabal", "update"), host.path(source)))
+        libs = build_linux_lib(host, source, image.arch, database)
+    else:
+        normalize_permissions(source)
+        with tempfile.TemporaryDirectory() as tmp, linux_container(source, image, Path(tmp).resolve()) as container:
+            container.run(Step(("cabal", "update"), container.path(source)))
+            libs = build_linux_lib(container, source, image.arch, database)
+    zip_desktop_libs(libs, [], out / linux_libs_zip(image.arch, database))
 
 
 def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
@@ -1117,6 +1426,15 @@ class BuildDesktopLinux:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildLinuxLibs:
+    image: UbuntuImage
+    database: Database
+    out: Path
+    source: Path
+    on_host: bool
+
+
+@dataclass(frozen=True, slots=True)
 class BuildDesktopMacos:
     out: Path
     source: Path
@@ -1138,7 +1456,7 @@ class BuildIosArchive:
 
 
 # An assignment rather than a type statement, so that older Pythons parse the file and print the version check
-Build = BuildApk | BuildBundle | BuildDesktopLinux | BuildDesktopMacos | BuildDesktopWindows | BuildIosArchive
+Build = BuildApk | BuildBundle | BuildDesktopLinux | BuildLinuxLibs | BuildDesktopMacos | BuildDesktopWindows | BuildIosArchive
 Command = Reproduce | Build
 
 
@@ -1182,6 +1500,9 @@ def build(command: Build) -> None:
         case BuildDesktopLinux(image=image, version=version):
             require_tools(["docker"])
             build_desktop_linux(source, image, version, out)
+        case BuildLinuxLibs(image=image, database=database, on_host=on_host):
+            require_tools(["cabal", "ghc", "patchelf", "ldd"] if on_host else ["docker"])
+            build_linux_libs(source, image, database, out, on_host)
         case BuildDesktopMacos(require_signing=require_signing):
             require_tools(["cabal", "ghc", "perl", "make", "otool"])
             build_desktop_macos(source, out, require_signing)
@@ -1215,13 +1536,17 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     desktop = kinds.add_parser("desktop-linux", help="the Linux CLI, its deb, the desktop deb and the AppImage")
     desktop.add_argument("image", choices=sorted({image.version for image in DESKTOP_IMAGES}), help="the Ubuntu version")
     desktop.add_argument("--version", required=True, help="the release version of the CLI deb, e.g. 7.1.0")
+    libs = kinds.add_parser("linux-libs", help="the Linux core library release, without VLC")
+    libs.add_argument("--ubuntu", choices=sorted({image.version for image in DESKTOP_IMAGES}), default=APPIMAGE_IMAGE)
+    libs.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
+    libs.add_argument("--host", action="store_true", help="build on this machine, with its GHC, rather than in Docker")
     macos = kinds.add_parser("desktop-macos", help="this Mac's CLI, dmg and core libraries, signed when APPLE_SIMPLEX_* are set")
     macos.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
     windows = kinds.add_parser("desktop-windows", help="the Windows CLI, msi and core libraries, in an MSYS2 UCRT64 shell")
     ios = kinds.add_parser("ios-archive", help="the iOS archive, its bundles signed ad hoc with their entitlements")
     ios.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
     ios.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
-    for sub in (apk, bundle, desktop, macos, windows, ios):
+    for sub in (apk, bundle, desktop, libs, macos, windows, ios):
         sub.add_argument("--out", type=Path, required=True)
         sub.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
     args = parser.parse_args(argv)
@@ -1233,6 +1558,8 @@ def parse_build_args(argv: Sequence[str]) -> Command:
         case "desktop-linux":
             image = linux_image(args.image, platform.machine())
             return BuildDesktopLinux(image, args.version, args.out, args.source)
+        case "linux-libs":
+            return BuildLinuxLibs(linux_image(args.ubuntu, platform.machine()), args.database, args.out, args.source, args.host)
         case "desktop-macos":
             return BuildDesktopMacos(args.out, args.source, args.require_signing)
         case "desktop-windows":
