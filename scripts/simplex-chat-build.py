@@ -25,9 +25,11 @@ if sys.version_info < (3, 12):  # noqa: UP036 # runs on the older Pythons it rej
     sys.exit("simplex-chat-build.py needs Python 3.12 or newer")
 
 import argparse
+import base64
 import contextlib
 import enum
 import hashlib
+import json
 import os
 import platform
 import plistlib
@@ -105,6 +107,10 @@ OPENSSL_WINDOWS_DIR = "C:/Program Files/Common Files/SSL"
 # The system libraries that the static libcrypto of a MinGW build needs (ex_libs of OpenSSL's mingw-common)
 OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
 DESKTOP_LIBS_DIR = "apps/multiplatform/common/src/commonMain/cpp/desktop/libs"
+APPLE_TEAM = "5NN7GUYB6T"
+APPLE_IDENTITY = f"Developer ID Application: SimpleX Chat Ltd ({APPLE_TEAM})"
+LIBFFI_URL = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3.5.2.tar.gz"
+LIBFFI_SHA256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
 APPLE_SIGNING_ENV = ("APPLE_SIMPLEX_SIGNING_KEYCHAIN", "APPLE_SIMPLEX_NOTARIZATION_APPLE_ID", "APPLE_SIMPLEX_NOTARIZATION_PASSWORD")
 
 # SHA-256 of the certificate that signs the released APKs
@@ -1120,6 +1126,7 @@ def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
 class HostDesktop:
     """The release files of a macOS or Windows machine, and the OpenSSL target that builds for it."""
 
+    arch: str
     openssl_target: str
     cli: str
     desktop: str
@@ -1129,6 +1136,7 @@ class HostDesktop:
 
 MACOS_DESKTOPS = {
     "arm64": HostDesktop(
+        "aarch64",
         "darwin64-arm64-cc",
         "simplex-chat-macos-aarch64",
         "simplex-desktop-macos-aarch64.dmg",
@@ -1136,6 +1144,7 @@ MACOS_DESKTOPS = {
         "mac-aarch64",
     ),
     "x86_64": HostDesktop(
+        "x86_64",
         "darwin64-x86_64-cc",
         "simplex-chat-macos-x86-64",
         "simplex-desktop-macos-x86_64.dmg",
@@ -1144,6 +1153,7 @@ MACOS_DESKTOPS = {
     ),
 }
 WINDOWS_DESKTOP = HostDesktop(
+    "x86_64",
     "mingw64",
     "simplex-chat-windows-x86-64",
     "simplex-desktop-windows-x86_64.msi",
@@ -1152,13 +1162,13 @@ WINDOWS_DESKTOP = HostDesktop(
 )
 
 
-def openssl_cabal_local(include: str, lib: str, cli_ghc_options: str = "") -> str:
+def openssl_cabal_local(include: str, lib: str, simplex_chat_ghc_options: str = "") -> str:
     """cabal.project.local that builds simplexmq and direct-sqlcipher with the OpenSSL in include and lib."""
     text = "ignore-project: False\n"
     for package, flags in (("simplexmq", ""), ("direct-sqlcipher", "    flags: +openssl\n")):
         text += f"package {package}\n    extra-include-dirs: {include}\n    extra-lib-dirs: {lib}\n{flags}"
-    if cli_ghc_options:
-        text += f"package simplex-chat\n    ghc-options: {cli_ghc_options}\n"
+    if simplex_chat_ghc_options:
+        text += f"package simplex-chat\n    ghc-options: {simplex_chat_ghc_options}\n"
     return text
 
 
@@ -1210,32 +1220,223 @@ def apple_signing(require: bool) -> bool:
     return False
 
 
+def otool(flag: str, lib: Path) -> list[str]:
+    return run(["otool", flag, lib], capture=True).stdout.splitlines()
+
+
+def rpath_dependencies(lib: Path) -> list[str]:
+    """The names of the libraries that lib loads from its rpaths; the first @rpath line is lib's own id."""
+    return [line.strip().split(" ")[0].split("/")[1] for line in otool("-L", lib) if "@rpath" in line][1:]
+
+
+def rpaths(lib: Path) -> list[str]:
+    return [line.split()[1] for line in otool("-l", lib) if "path " in line]
+
+
+def libcrypto_path(lib: Path) -> str | None:
+    return next((line.split()[1] for line in otool("-l", lib) if "libcrypto" in line), None)
+
+
+def build_libffi(work: Path) -> Path:
+    """libffi.dylib, which GHC's libraries load but macOS doesn't ship."""
+    with tarfile.open(fetch_pinned(LIBFFI_URL, LIBFFI_SHA256, work / "libffi.tar.gz")) as tar:
+        tar.extractall(work, filter="data")
+    source = work / "libffi-3.5.2"
+    run(["./configure"], cwd=source)
+    run(["make"], cwd=source)
+    return single_file(source, "*-apple-darwin*/.libs/libffi.dylib")
+
+
+def copy_mac_dependencies(lib: Path, deps: Path, ghc_libdir: Path, copied: set[Path]) -> None:
+    """lib and the libraries it loads from its rpaths, recursively; GHC's libraries find each other at @loader_path."""
+    if lib in copied:
+        return
+    copied.add(lib)
+    own_rpaths = rpaths(lib)
+    shutil.copy(lib, deps)
+    if any("@loader_path/.." in rpath for rpath in own_rpaths):
+        run(["install_name_tool", "-add_rpath", "@loader_path", deps / lib.name])
+    search = [Path(rpath.replace("@loader_path/..", str(ghc_libdir), 1)) for rpath in own_rpaths]
+    for name in rpath_dependencies(lib):
+        for directory in search:
+            dependency = directory / name
+            if dependency.is_file():
+                if not (deps / name).is_file():
+                    shutil.copy(dependency, deps)
+                copy_mac_dependencies(dependency, deps, ghc_libdir, copied)
+
+
+def bundle_mac_libcrypto(libs: Path, database: Database) -> None:
+    """Copies the libcrypto that the libraries link into libs, and points them at the copy and their rpaths at libs."""
+    smplxmq = single_file(libs, "libHSsmplxmq-*.dylib")
+    libcrypto = libcrypto_path(smplxmq)
+    if libcrypto is None:
+        raise ReproduceError(f"{smplxmq.name} doesn't load libcrypto")
+    bundled = "libcrypto.3.0.dylib"
+    shutil.copy(libcrypto, libs / bundled)
+    (libs / bundled).chmod(0o755)
+    run(["install_name_tool", "-id", bundled, libs / bundled])
+    run(["install_name_tool", "-id", "libffi.8.dylib", libs / "libffi.dylib"])
+    patterns = ["libHSsmplxmq-*.dylib", "libsimplex.dylib"]
+    if database == Database.SQLITE:
+        patterns += ["libHSdrct-*.dylib", "libHSsqlcphr-*.dylib"]
+    for lib in (lib for pattern in patterns for lib in libs.glob(pattern)):
+        linked = libcrypto_path(lib)
+        if linked:
+            run(["install_name_tool", "-change", linked, f"@rpath/{bundled}", lib])
+    dylibs = sorted(p for p in libs.rglob("*.dylib") if p.is_file())
+    for lib in dylibs:
+        for rpath in rpaths(lib):
+            if rpath.startswith(("/Users/", "/usr/local", "/opt/")):
+                run(["install_name_tool", "-delete_rpath", rpath, lib])
+    local = [lib.name for lib in dylibs if any(re.search("/Users|/opt/|/usr/local", line) for line in otool("-l", lib))]
+    if local:
+        message = f"these libraries still point to local directories: {', '.join(local)}"
+        # the postgres libraries are not distributed
+        if database == Database.SQLITE:
+            raise ReproduceError(message)
+        warn(message)
+
+
+def build_mac_lib(source: Path, arch: str, database: Database, work: Path) -> Path:
+    """libsimplex.dylib and the libraries it loads, in the desktop app's libraries directory, which it returns."""
+    check_exports(source)
+    ghc_libdir = Path(run(["ghc", "--print-libdir"], capture=True).stdout.strip())
+    rts_dir = ghc_libdir / f"{arch}-osx-ghc-{GHC}"
+    for old in source.glob(f"dist-newstyle/build/{arch}-*/ghc-*/simplex-chat-*"):
+        shutil.rmtree(old)
+    options = (
+        f"-optl-Wl,-rpath,@loader_path -optl-Wl,-install_name,@rpath/libsimplex.dylib -optl-Wl,-L{rts_dir} "
+        f"-optl-lHSrts_thr-ghc{GHC} -optl-lffi"
+    )
+    run(["cabal", "build", "lib:simplex-chat", f"--ghc-options={options}", *client_library_constraints(database)], cwd=source)
+    build = single_dir(source, f"dist-newstyle/build/{arch}-*/ghc-*/simplex-chat-*/build")
+    for lib in build.glob("libHSsimplex-chat-*-inplace-ghc*.dylib"):
+        lib.rename(build / "libsimplex.dylib")
+    deps = build / "deps"
+    deps.mkdir(exist_ok=True)
+    shutil.copy(build_libffi(work), deps / "libffi.dylib")
+    copy_mac_dependencies(build / "libsimplex.dylib", deps, ghc_libdir, set())
+    shutil.copy(rts_dir / f"libHSghc-boot-th-{GHC}-ghc{GHC}.dylib", deps)
+    (deps / "libsimplex.dylib").unlink()
+    libs = desktop_libs(source, f"mac-{arch}")
+    shutil.rmtree(libs, ignore_errors=True)
+    shutil.rmtree(source / "apps/multiplatform/desktop/build/cmake", ignore_errors=True)
+    libs.mkdir(parents=True)
+    for path in [*deps.iterdir(), build / "libsimplex.dylib"]:
+        shutil.copy(path, libs)
+    bundle_mac_libcrypto(libs, database)
+    return libs
+
+
+def add_vlc_mac(libs: Path, arch: str, work: Path) -> None:
+    vlc = libs / "vlc"
+    (vlc / "vlc").mkdir(parents=True, exist_ok=True)
+    name = f"vlc-macos-{arch}.zip"
+    extracted = work / "vlc"
+    extracted.mkdir()
+    run(["unzip", "-oqq", fetch_pinned(f"{VLC_RELEASE}/{name}", VLC_SHA256[name], work / name)], cwd=extracted)
+    run(["install_name_tool", "-add_rpath", "@loader_path/VLC.app/Contents/MacOS/lib", "vlc-cache-gen"], cwd=extracted)
+    macos = extracted / "VLC.app/Contents/MacOS"
+    for lib in sorted((macos / "lib").glob("*.dylib")):
+        run(["install_name_tool", "-add_rpath", "@loader_path", lib], check=False, capture=True)
+    for lib in sorted((macos / "plugins").glob("*.dylib")):
+        run(["install_name_tool", "-add_rpath", "@loader_path/../../", lib], check=False, capture=True)
+    run([extracted / "vlc-cache-gen", "plugins"], cwd=macos)
+    for path in (macos / "lib").iterdir():
+        shutil.copy(path, vlc)
+    shutil.copytree(macos / "plugins", vlc / "vlc/plugins", symlinks=True, dirs_exist_ok=True)
+
+
+@contextlib.contextmanager
+def apple_keychain(work: Path) -> Iterator[Path]:
+    """The keychain of APPLE_SIMPLEX_SIGNING_KEYCHAIN, unlocked and in the search list, removed on exit."""
+    keychain = work / "simplex.keychain"
+    keychain.write_bytes(base64.b64decode(os.environ["APPLE_SIMPLEX_SIGNING_KEYCHAIN"]))
+    searched = [line.strip().strip('"') for line in run(["security", "list-keychains"], capture=True).stdout.splitlines()]
+    run(["security", "unlock-keychain", "-p", "", keychain])
+    # codesign finds the certificate in a keychain outside the search list, then fails to sign with it
+    run(["security", "list-keychains", "-s", *searched, keychain])
+    try:
+        yield keychain
+    finally:
+        run(["security", "list-keychains", "-s", *searched])
+        keychain.unlink()
+
+
+def notarize(path: Path, work: Path) -> None:
+    """Submits a zip of path to Apple's notary service, and fails unless it is accepted."""
+    archive = work / f"{path.name}.zip"
+    run(["ditto", "-c", "-k", "--keepParent", path, archive])
+    credentials = [
+        "--apple-id",
+        os.environ["APPLE_SIMPLEX_NOTARIZATION_APPLE_ID"],
+        "--password",
+        os.environ["APPLE_SIMPLEX_NOTARIZATION_PASSWORD"],
+        "--team-id",
+        APPLE_TEAM,
+    ]
+    submit: list[str | Path] = ["xcrun", "notarytool", "submit", archive, "--wait", "--timeout", "1h", "--output-format", "json"]
+    result = json.loads(run([*submit, *credentials], capture=True, check=False, title=" ".join(map(str, submit))).stdout)
+    run(["xcrun", "notarytool", "log", result["id"], *credentials], title=f"xcrun notarytool log {result['id']}")
+    if result["status"] != "Accepted":
+        raise ReproduceError(f"notarization of {path.name} is {result['status']}")
+
+
+def sign_mac_libs(libs: Path, keychain: Path, work: Path) -> None:
+    for lib in sorted(libs.glob("*.dylib")):
+        run(["codesign", "--remove-signature", lib])
+        run(["codesign", "--timestamp", "--options", "runtime", "--force", "--sign", APPLE_IDENTITY, "--keychain", keychain, lib])
+    notarize(libs, work)
+
+
+def package_dmg(source: Path, keychain: Path | None) -> Path:
+    """The desktop app's dmg, signed and notarized by Gradle with the keychain."""
+    multiplatform = source / "apps/multiplatform"
+    properties = multiplatform / "local.properties"
+    tasks = ["packageDmg"]
+    if keychain:
+        properties.write_text(
+            f"desktop.mac.signing.identity={APPLE_IDENTITY}\n"
+            f"desktop.mac.signing.keychain={keychain}\n"
+            f"desktop.mac.notarization.apple_id={os.environ['APPLE_SIMPLEX_NOTARIZATION_APPLE_ID']}\n"
+            f"desktop.mac.notarization.password={os.environ['APPLE_SIMPLEX_NOTARIZATION_PASSWORD']}\n"
+            f"desktop.mac.notarization.team_id={APPLE_TEAM}\n"
+        )
+        tasks.append("notarizeDmg")
+    try:
+        for task in tasks:
+            run(["./gradlew", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}", task], cwd=multiplatform)
+    finally:
+        properties.unlink(missing_ok=True)
+    return single_file(source / DESKTOP_RELEASE_DIR / "dmg", "SimpleX-*.dmg")
+
+
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     host = MACOS_DESKTOPS.get(platform.machine())
     if host is None:
         raise ReproduceError(f"no macOS build for {platform.machine()}")
     signed = apple_signing(require_signing)
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
+        keychain = stack.enter_context(apple_keychain(work)) if signed else None
         prefix = work / "openssl"
         build_openssl(fetch_openssl(work), host.openssl_target, str(prefix), OPENSSL_UNIX_DIR, install=True)
         include = str(prefix / "include")
         cli = build_host_cli(source, openssl_cabal_local(include, str(static_libcrypto(prefix / "lib", work))))
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        # build-lib-mac.sh copies the libcrypto that the libraries link into the app, and points them at the copy
+        # bundle_mac_libcrypto copies the libcrypto that the libraries link into the app
         (source / "cabal.project.local").write_text(openssl_cabal_local(include, str(prefix / "lib")))
-        if signed:
-            run(["scripts/ci/build-desktop-mac.sh"], cwd=source, env=DESKTOP_ENV)
-        else:
-            run(["scripts/desktop/build-lib-mac.sh"], cwd=source)
-            run(["./gradlew", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}", "packageDmg"], cwd=source / "apps/multiplatform")
-        shutil.copy(single_file(source / DESKTOP_RELEASE_DIR / "dmg", "SimpleX-*.dmg"), out / host.desktop)
-        libs = work / "libs"
-        shutil.copytree(source / DESKTOP_LIBS_DIR / host.libs_dir, libs, ignore=shutil.ignore_patterns("vlc"))
-        if signed:
-            run(["scripts/ci/sign-libs-mac.sh", libs], cwd=source)
-        zip_desktop_libs(libs, [], out / host.libs)
+        libs = build_mac_lib(source, host.arch, Database.SQLITE, work)
+        released_libs = work / "libs"
+        shutil.copytree(libs, released_libs)
+        add_vlc_mac(libs, host.arch, work)
+        link_desktop_libs(source, host.libs_dir, f"macos-{COMPOSE_ARCHES[host.arch]}")
+        shutil.copy(package_dmg(source, keychain), out / host.desktop)
+        if keychain:
+            sign_mac_libs(released_libs, keychain, work)
+        zip_desktop_libs(released_libs, [], out / host.libs)
 
 
 def remove_cabal_sources(source: Path) -> None:
@@ -1251,6 +1452,50 @@ def remove_cabal_sources(source: Path) -> None:
         shutil.rmtree(path, onexc=make_writable)
 
 
+def disable_ghc_lld() -> None:
+    """With GHC's lld, linking libsimplex.dll can't find the exported symbols; a missing linker makes GHC use ld."""
+    settings = Path(run(["ghc", "--print-libdir"], capture=True).stdout.strip()) / "settings"
+    edit_lines(settings, lambda line: line.replace("ld.lld.exe", "abracadabra.exe", 1))
+
+
+def build_windows_lib(source: Path, openssl: Path) -> Path:
+    """libsimplex.dll and the libcrypto it loads, in the desktop app's libraries directory, which it returns."""
+    check_exports(source)
+    for old in source.glob("dist-newstyle/build/x86_64-windows/ghc-*/simplex-chat-*"):
+        shutil.rmtree(old)
+    remove_cabal_sources(source)
+    o = openssl.as_posix()
+    options = f"-shared -threaded -optl-L{o} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
+    (source / "cabal.project.local").write_text(openssl_cabal_local(f"{o}/include", o, options))
+    disable_ghc_lld()
+    run(["cabal", "build", "lib:simplex-chat", *client_library_constraints(Database.SQLITE)], cwd=source)
+    libs = desktop_libs(source, WINDOWS_DESKTOP.libs_dir)
+    shutil.rmtree(libs, ignore_errors=True)
+    shutil.rmtree(source / "apps/multiplatform/desktop/build/cmake", ignore_errors=True)
+    libs.mkdir(parents=True)
+    shutil.copy(openssl / "libcrypto-3-x64.dll", libs)
+    shutil.copy(source / "libsimplex.dll", libs)
+    return libs
+
+
+def add_vlc_windows(libs: Path, work: Path) -> None:
+    vlc = libs / "vlc"
+    shutil.rmtree(vlc, ignore_errors=True)
+    (vlc / "vlc").mkdir(parents=True)
+    name = "vlc-win-x86_64.zip"
+    extracted = work / "vlc"
+    with zipfile.ZipFile(fetch_pinned(f"{VLC_RELEASE}/{name}", VLC_SHA256[name], work / name)) as z:
+        z.extractall(extracted)
+    root = single_dir(extracted, "vlc-*")
+    # the plugin cache must hold the time the plugins get when the app extracts them from its jar
+    for plugin in (p for p in (root / "plugins").rglob("*") if ".dll" in p.name):
+        os.utime(plugin, (plugin.stat().st_atime, 0))
+    run([root / "vlc-cache-gen.exe", "plugins"], cwd=root)
+    for dll in root.glob("*.dll"):
+        shutil.copy(dll, vlc)
+    shutil.copytree(root / "plugins", vlc / "vlc/plugins", dirs_exist_ok=True)
+
+
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
     with tempfile.TemporaryDirectory() as tmp:
@@ -1264,12 +1509,14 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         remove_cabal_sources(source)
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        run(["bash", "scripts/desktop/build-lib-windows.sh"], cwd=source, env={"OPENSSL_DIR": openssl.as_posix()})
+        libs = build_windows_lib(source, openssl)
+        run(["dlltool", "-d", "libsimplex.dll.def", "-l", "libsimplex.lib", "-D", "libsimplex.dll"], cwd=source)
+        zip_desktop_libs(libs, [source / "libsimplex.lib"], out / host.libs)
+        add_vlc_windows(libs, work)
+        link_desktop_libs(source, host.libs_dir, "windows-x64")
         assets = f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"
         run(["bash", "./gradlew", assets, "packageMsi"], cwd=source / "apps/multiplatform")
         shutil.copy(single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi"), out / host.desktop)
-        run(["dlltool", "-d", "libsimplex.dll.def", "-l", "libsimplex.lib", "-D", "libsimplex.dll"], cwd=source)
-        zip_desktop_libs(source / DESKTOP_LIBS_DIR / host.libs_dir, [source / "libsimplex.lib"], out / host.libs)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

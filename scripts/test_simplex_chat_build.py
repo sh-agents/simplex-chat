@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import base64
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import pathlib
 import platform
@@ -1009,31 +1011,6 @@ class HostDesktopTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def fake_build(self, libs_dir, desktop_dir, desktop_name, dependencies):
-        """Stands in for the commands: OpenSSL's build, cabal, the desktop scripts and gradle write what they would."""
-        recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat\n", "otool": dependencies, "objdump": dependencies})
-
-        def fake_run(args, **kwargs):
-            args = [str(a) for a in args]
-            if args[:2] == ["make", "install_sw"]:
-                lib = self.root / "work-openssl"
-                (lib / "lib").mkdir(parents=True, exist_ok=True)
-                (lib / "lib/libcrypto.a").write_bytes(b"static")
-            if "build-lib" in " ".join(args) or "build-desktop-mac.sh" in " ".join(args):
-                libs = self.source / build_script.DESKTOP_LIBS_DIR / libs_dir
-                (libs / "vlc").mkdir(parents=True)
-                (libs / "libsimplex.so").write_bytes(b"lib")
-                (libs / "vlc/libvlc").write_bytes(b"vlc")
-                (self.source / build_script.DESKTOP_RELEASE_DIR / desktop_dir).mkdir(parents=True)
-                (self.source / build_script.DESKTOP_RELEASE_DIR / desktop_dir / desktop_name).write_bytes(b"desktop")
-            if args[0] == "dlltool":
-                (self.source / "libsimplex.lib").write_bytes(b"import lib")
-            return recorder(args, **kwargs)
-
-        (self.root / "dist").mkdir()
-        (self.root / "dist/simplex-chat").write_bytes(b"cli")
-        return recorder, fake_run
-
     def fetch(self, work):
         source = work / f"openssl-{build_script.OPENSSL_VERSION}"
         source.mkdir()
@@ -1071,42 +1048,48 @@ class HostDesktopTest(unittest.TestCase):
         self.assertIn("unsigned", warn.call_args.args[0])
 
     def test_macos_unsigned_build(self):
-        recorder, fake_run = self.fake_build("mac-aarch64", "dmg", "SimpleX-7.1.0.dmg", "\t/usr/lib/libSystem.B.dylib\n")
-
-        def fetch(work):
-            source = self.fetch(work)
-            (self.root / "work-openssl").mkdir(exist_ok=True)
-            return source
-
+        libs = self.root / "libs-app"
+        libs.mkdir()
+        (libs / "libsimplex.dylib").write_bytes(b"lib")
+        dmg = self.root / "SimpleX-7.1.0.dmg"
+        dmg.write_bytes(b"dmg")
+        work = self.root / "work"
+        (work / "openssl/lib").mkdir(parents=True)
+        (work / "openssl/lib/libcrypto.a").write_bytes(b"static")
+        recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat\n", "otool -L": "\t/usr/lib/libSystem.B.dylib\n"})
+        (self.root / "dist").mkdir()
+        (self.root / "dist/simplex-chat").write_bytes(b"cli")
+        calls = []
         with (
-            mock.patch.object(build_script, "run", fake_run),
-            mock.patch.object(build_script, "fetch_openssl", fetch),
+            mock.patch.object(build_script, "run", recorder),
+            mock.patch.object(build_script, "fetch_openssl", self.fetch),
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
-            mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch.object(build_script, "warn"),
-            mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(self.root / "work"))),
+            mock.patch.object(build_script, "apple_signing", return_value=False),
+            mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(work))),
+            mock.patch.object(build_script, "build_mac_lib", lambda source, arch, database, work: calls.append(("lib", arch)) or libs),
+            mock.patch.object(build_script, "add_vlc_mac", lambda libs, arch, work: (libs / "vlc").mkdir()),
+            mock.patch.object(build_script, "link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
+            mock.patch.object(build_script, "package_dmg", lambda source, keychain: calls.append(("dmg", keychain)) or dmg),
+            mock.patch.object(build_script, "sign_mac_libs") as sign,
         ):
-            (self.root / "work").mkdir()
-            (self.root / "work/openssl/lib").mkdir(parents=True)
-            (self.root / "work/openssl/lib/libcrypto.a").write_bytes(b"static")
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
         configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
         self.assertIn("darwin64-arm64-cc", configure)
         self.assertIn("--openssldir=/etc/ssl", configure)
         self.assertIn(["make", "install_sw"], recorder.commands)
-        scripts = [c[0] for c in recorder.commands if c[0].startswith(("scripts/", "./gradlew"))]
-        self.assertEqual(scripts, ["scripts/desktop/build-lib-mac.sh", "./gradlew"])
-        self.assertIn(f"extra-lib-dirs: {self.root / 'work/openssl/lib'}", (self.source / "cabal.project.local").read_text())
+        self.assertEqual(calls, [("lib", "aarch64"), ("link", "mac-aarch64", "macos-arm64"), ("dmg", None)])
+        sign.assert_not_called()
+        self.assertIn(f"extra-lib-dirs: {work / 'openssl/lib'}", (self.source / "cabal.project.local").read_text())
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-macos-aarch64.zip", "simplex-chat-macos-aarch64", "simplex-desktop-macos-aarch64.dmg"],
         )
-        self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.so"])
+        self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.dylib"])
 
     def test_macos_cli_linking_libcrypto_fails(self):
-        _, fake_run = self.fake_build("mac-aarch64", "dmg", "SimpleX-7.1.0.dmg", "\t@rpath/libcrypto.3.dylib\n")
+        recorder = Recorder(answers={"list-bin": f"{self.root}/cli\n", "otool -L": "\t@rpath/libcrypto.3.dylib\n"})
         with (
-            mock.patch.object(build_script, "run", fake_run),
+            mock.patch.object(build_script, "run", recorder),
             mock.patch.object(build_script, "fetch_openssl", self.fetch),
             mock.patch.object(build_script.platform, "machine", return_value="x86_64"),
             mock.patch.object(build_script, "apple_signing", return_value=False),
@@ -1116,21 +1099,44 @@ class HostDesktopTest(unittest.TestCase):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
 
     def test_windows_build(self):
-        recorder, fake_run = self.fake_build("windows-x86_64", "msi", "SimpleX-7.1.0.msi", "\tDLL Name: KERNEL32.dll\n")
-        with mock.patch.object(build_script, "run", fake_run), mock.patch.object(build_script, "fetch_openssl", self.fetch):
+        libs = self.root / "libs-app"
+        libs.mkdir()
+        (libs / "libsimplex.dll").write_bytes(b"lib")
+        (self.root / "dist").mkdir()
+        (self.root / "dist/simplex-chat.exe").write_bytes(b"cli")
+        msi = self.source / build_script.DESKTOP_RELEASE_DIR / "msi"
+        recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat.exe\n", "objdump": "\tDLL Name: KERNEL32.dll\n"})
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            if args[0] == "dlltool":
+                (self.source / "libsimplex.lib").write_bytes(b"import lib")
+            if "packageMsi" in args:
+                msi.mkdir(parents=True)
+                (msi / "SimpleX-7.1.0.msi").write_bytes(b"msi")
+            return recorder(args, **kwargs)
+
+        calls = []
+        with (
+            mock.patch.object(build_script, "run", fake_run),
+            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(build_script, "build_windows_lib", lambda source, openssl: calls.append(("lib", openssl.name)) or libs),
+            mock.patch.object(build_script, "add_vlc_windows", lambda libs, work: (libs / "vlc").mkdir()),
+            mock.patch.object(build_script, "link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
+        ):
             build_script.build_desktop_windows(self.source, self.out)
         configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
         self.assertIn("mingw64", configure)
         self.assertIn("--prefix=C:/Program Files/OpenSSL", configure)
         self.assertIn("--openssldir=C:/Program Files/Common Files/SSL", configure)
         self.assertNotIn(["make", "install_sw"], recorder.commands)
-        lib_build = recorder.commands.index(["bash", "scripts/desktop/build-lib-windows.sh"])
-        self.assertTrue(recorder.envs[lib_build]["OPENSSL_DIR"].endswith(f"/openssl-{build_script.OPENSSL_VERSION}"))
+        self.assertEqual(calls, [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64")])
+        self.assertIn(["bash", "./gradlew", "-Psimplex.assets.dir=../../assets", "packageMsi"], recorder.commands)
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-windows-x86_64.zip", "simplex-chat-windows-x86-64", "simplex-desktop-windows-x86_64.msi"],
         )
-        self.assertEqual(self.zip_names("simplex-chat-libs-windows-x86_64.zip"), ["libs/libsimplex.lib", "libs/libsimplex.so"])
+        self.assertEqual(self.zip_names("simplex-chat-libs-windows-x86_64.zip"), ["libs/libsimplex.dll", "libs/libsimplex.lib"])
 
     def test_cli_cabal_local_is_static_on_windows(self):
         cabal_locals = []
@@ -1160,6 +1166,273 @@ class HostDesktopTest(unittest.TestCase):
         build_script.remove_cabal_sources(self.source)
         self.assertFalse((self.source / "dist-newstyle/src/simplexmq-abc").exists())
         self.assertTrue(keep.exists())
+
+
+def otool_l(rpaths=(), loads=()):
+    lines = ["lib.dylib:", "Load command 0", "      cmd LC_ID_DYLIB"]
+    for path in loads:
+        lines += ["          cmd LC_LOAD_DYLIB", f"         name {path} (offset 24)"]
+    for path in rpaths:
+        lines += ["          cmd LC_RPATH", f"         path {path} (offset 12)"]
+    return "\n".join(lines) + "\n"
+
+
+def otool_big_l(own, deps):
+    lines = ["lib.dylib:", f"\t{own} (compatibility version 0.0.0, current version 0.0.0)"]
+    return "\n".join(lines + [f"\t{d} (compatibility version 0.0.0)" for d in deps]) + "\n"
+
+
+class FakeOtool:
+    """Stands in for run(): answers otool for each library from tables that install_name_tool edits, records commands."""
+
+    def __init__(self, big_l=None, small_l=None, answers=None):
+        self.big_l, self.small_l = big_l or {}, small_l or {}
+        self.answers = answers or {}
+        self.commands = []
+
+    def __call__(self, args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
+        args = [str(a) for a in args]
+        self.commands.append(args)
+        if args[0] == "otool":
+            table = self.big_l if args[1] == "-L" else self.small_l
+            return mock.Mock(returncode=0, stdout=table.get(pathlib.Path(args[2]).name, ""))
+        if args[:2] == ["install_name_tool", "-delete_rpath"]:
+            name = pathlib.Path(args[3]).name
+            self.small_l[name] = "".join(line for line in self.small_l[name].splitlines(keepends=True) if f"path {args[2]} " not in line)
+        if args[:2] == ["install_name_tool", "-change"]:
+            name = pathlib.Path(args[4]).name
+            self.small_l[name] = self.small_l[name].replace(args[2], args[3])
+        stdout = next((answer for pattern, answer in self.answers.items() if pattern in " ".join(args)), "")
+        return mock.Mock(returncode=0, stdout=stdout)
+
+
+class MacLibTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_otool_parsing(self):
+        fake = FakeOtool(
+            big_l={"lib.dylib": otool_big_l("@rpath/lib.dylib", ["@rpath/libHSbase.dylib", "/usr/lib/libSystem.B.dylib"])},
+            small_l={"lib.dylib": otool_l(["@loader_path/../lib/x", "/Users/runner/ghc"], ["/w/openssl/lib/libcrypto.3.dylib"])},
+        )
+        lib = pathlib.Path("lib.dylib")
+        with mock.patch.object(build_script, "run", fake):
+            self.assertEqual(build_script.rpath_dependencies(lib), ["libHSbase.dylib"])
+            self.assertEqual(build_script.rpaths(lib), ["@loader_path/../lib/x", "/Users/runner/ghc"])
+            self.assertEqual(build_script.libcrypto_path(lib), "/w/openssl/lib/libcrypto.3.dylib")
+
+    def test_dependencies_are_copied_once_with_loader_path_rpaths(self):
+        ghc = self.root / "ghc"
+        (ghc / "lib").mkdir(parents=True)
+        build = self.root / "build"
+        deps = build / "deps"
+        deps.mkdir(parents=True)
+        (build / "libsimplex.dylib").write_bytes(b"simplex")
+        (ghc / "lib/libHSbase.dylib").write_bytes(b"base")
+        (ghc / "lib/libHSrts.dylib").write_bytes(b"rts")
+        fake = FakeOtool(
+            big_l={
+                "libsimplex.dylib": otool_big_l("@rpath/libsimplex.dylib", ["@rpath/libHSbase.dylib", "@rpath/libHSrts.dylib"]),
+                "libHSbase.dylib": otool_big_l("@rpath/libHSbase.dylib", ["@rpath/libHSrts.dylib"]),
+                "libHSrts.dylib": otool_big_l("@rpath/libHSrts.dylib", []),
+            },
+            small_l={
+                "libsimplex.dylib": otool_l([str(ghc / "lib")]),
+                "libHSbase.dylib": otool_l(["@loader_path/../lib"]),
+                "libHSrts.dylib": otool_l([]),
+            },
+        )
+        with mock.patch.object(build_script, "run", fake):
+            build_script.copy_mac_dependencies(build / "libsimplex.dylib", deps, ghc, set())
+        self.assertEqual(sorted(p.name for p in deps.iterdir()), ["libHSbase.dylib", "libHSrts.dylib", "libsimplex.dylib"])
+        add_rpath = [c for c in fake.commands if c[:2] == ["install_name_tool", "-add_rpath"]]
+        self.assertEqual(add_rpath, [["install_name_tool", "-add_rpath", "@loader_path", str(deps / "libHSbase.dylib")]])
+
+    def test_libcrypto_is_bundled_and_local_rpaths_deleted(self):
+        libs = self.root / "libs"
+        libs.mkdir()
+        openssl = self.root / "openssl/lib"
+        openssl.mkdir(parents=True)
+        (openssl / "libcrypto.3.dylib").write_bytes(b"crypto")
+        for name in ("libHSsmplxmq-6.5.dylib", "libsimplex.dylib", "libHSdrct-2.3.dylib", "libffi.dylib"):
+            (libs / name).write_bytes(b"x")
+        linked = str(openssl / "libcrypto.3.dylib")
+        fake = FakeOtool(
+            small_l={
+                "libHSsmplxmq-6.5.dylib": otool_l(["/Users/runner/ghc/lib"], [linked]),
+                "libHSdrct-2.3.dylib": otool_l([], [linked]),
+                "libsimplex.dylib": otool_l(["@loader_path"]),
+            }
+        )
+        with mock.patch.object(build_script, "run", fake):
+            build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
+        self.assertEqual((libs / "libcrypto.3.0.dylib").read_bytes(), b"crypto")
+        changes = [c[-1] for c in fake.commands if c[:2] == ["install_name_tool", "-change"]]
+        self.assertEqual(sorted(pathlib.Path(c).name for c in changes), ["libHSdrct-2.3.dylib", "libHSsmplxmq-6.5.dylib"])
+        self.assertIn(["install_name_tool", "-id", "libcrypto.3.0.dylib", str(libs / "libcrypto.3.0.dylib")], fake.commands)
+        self.assertIn(["install_name_tool", "-delete_rpath", "/Users/runner/ghc/lib", str(libs / "libHSsmplxmq-6.5.dylib")], fake.commands)
+
+    def test_libraries_still_pointing_to_local_directories_fail(self):
+        libs = self.root / "libs"
+        libs.mkdir()
+        (libs / "libHSsmplxmq-6.5.dylib").write_bytes(b"x")
+        (libs / "libffi.dylib").write_bytes(b"x")
+        crypto = self.root / "libcrypto.3.dylib"
+        crypto.write_bytes(b"c")
+        fake = FakeOtool(small_l={"libHSsmplxmq-6.5.dylib": otool_l([], [str(crypto), "/opt/homebrew/lib/libgmp.dylib"])})
+        with mock.patch.object(build_script, "run", fake), self.assertRaises(build_script.ReproduceError) as raised:
+            build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
+        self.assertIn("libHSsmplxmq-6.5.dylib", str(raised.exception))
+
+    def test_vlc_gets_rpaths_and_its_plugin_cache(self):
+        libs, work = self.root / "libs", self.root / "work"
+        libs.mkdir()
+        work.mkdir()
+        macos = work / "vlc/VLC.app/Contents/MacOS"
+
+        def fake_run(args, **kwargs):
+            if args[0] == "unzip":
+                (macos / "lib").mkdir(parents=True)
+                (macos / "plugins").mkdir()
+                (macos / "lib/libvlc.dylib").write_bytes(b"vlc")
+                (macos / "plugins/libaudio_plugin.dylib").write_bytes(b"p")
+            return recorder(args, **kwargs)
+
+        recorder = Recorder()
+        with mock.patch.object(build_script, "run", fake_run), mock.patch.object(build_script, "fetch_pinned", lambda u, d, t: t):
+            build_script.add_vlc_mac(libs, "aarch64", work)
+        plugin = str(macos / "plugins/libaudio_plugin.dylib")
+        self.assertIn(["install_name_tool", "-add_rpath", "@loader_path/../../", plugin], recorder.commands)
+        self.assertIn([str(work / "vlc/vlc-cache-gen"), "plugins"], recorder.commands)
+        self.assertTrue((libs / "vlc/libvlc.dylib").exists())
+        self.assertTrue((libs / "vlc/vlc/plugins/libaudio_plugin.dylib").exists())
+
+    def test_keychain_is_searched_while_signing_and_removed_after(self):
+        work = self.root
+        recorder = Recorder(answers={"list-keychains": '    "/Users/r/login.keychain-db"\n'})
+        environ = {"APPLE_SIMPLEX_SIGNING_KEYCHAIN": base64.b64encode(b"keychain").decode()}
+        with mock.patch.object(build_script, "run", recorder), mock.patch.dict(os.environ, environ):
+            with build_script.apple_keychain(work) as keychain:
+                self.assertEqual(keychain.read_bytes(), b"keychain")
+            self.assertFalse(keychain.exists())
+        searches = [c for c in recorder.commands if c[:3] == ["security", "list-keychains", "-s"]]
+        self.assertEqual(searches, [["security", "list-keychains", "-s", "/Users/r/login.keychain-db", str(keychain)], searches[1]])
+        self.assertEqual(searches[1], ["security", "list-keychains", "-s", "/Users/r/login.keychain-db"])
+
+    def notarize(self, status):
+        """notarize with the service answering status; returns the log titles of its commands."""
+        titles = []
+
+        def fake_run(args, **kwargs):
+            titles.append(kwargs.get("title"))
+            stdout = json.dumps({"id": "abc", "status": status}) if "submit" in [str(a) for a in args] else ""
+            return mock.Mock(returncode=0, stdout=stdout)
+
+        environ = {"APPLE_SIMPLEX_NOTARIZATION_APPLE_ID": "id@x", "APPLE_SIMPLEX_NOTARIZATION_PASSWORD": "secret"}
+        with mock.patch.object(build_script, "run", fake_run), mock.patch.dict(os.environ, environ):
+            build_script.notarize(self.root / "libs", self.root)
+        return titles
+
+    def test_notarization_must_be_accepted_and_hides_the_password(self):
+        titles = self.notarize("Accepted")
+        self.assertFalse(any(t and "secret" in t for t in titles))
+        with self.assertRaises(build_script.ReproduceError):
+            self.notarize("Invalid")
+
+    def test_dmg_signing_properties_are_written_and_removed(self):
+        source = self.root / "src"
+        multiplatform = source / "apps/multiplatform"
+        multiplatform.mkdir(parents=True)
+        dmg_dir = source / build_script.DESKTOP_RELEASE_DIR / "dmg"
+        seen = []
+
+        def fake_run(args, **kwargs):
+            seen.append(([str(a) for a in args], (multiplatform / "local.properties").read_text()))
+            dmg_dir.mkdir(parents=True, exist_ok=True)
+            (dmg_dir / "SimpleX-7.1.0.dmg").write_bytes(b"dmg")
+            return mock.Mock(returncode=0, stdout="")
+
+        environ = {"APPLE_SIMPLEX_NOTARIZATION_APPLE_ID": "id@x", "APPLE_SIMPLEX_NOTARIZATION_PASSWORD": "secret"}
+        with mock.patch.object(build_script, "run", fake_run), mock.patch.dict(os.environ, environ):
+            dmg = build_script.package_dmg(source, self.root / "k.keychain")
+        self.assertEqual([args[-1] for args, _ in seen], ["packageDmg", "notarizeDmg"])
+        self.assertIn("desktop.mac.notarization.team_id=5NN7GUYB6T\n", seen[0][1])
+        self.assertIn(f"desktop.mac.signing.keychain={self.root / 'k.keychain'}\n", seen[0][1])
+        self.assertFalse((multiplatform / "local.properties").exists())
+        self.assertEqual(dmg.name, "SimpleX-7.1.0.dmg")
+
+    def test_unsigned_dmg_is_only_packaged(self):
+        source = self.root / "src"
+        (source / "apps/multiplatform").mkdir(parents=True)
+        dmg_dir = source / build_script.DESKTOP_RELEASE_DIR / "dmg"
+        dmg_dir.mkdir(parents=True)
+        (dmg_dir / "SimpleX-7.1.0.dmg").write_bytes(b"dmg")
+        recorder = Recorder()
+        with mock.patch.object(build_script, "run", recorder):
+            build_script.package_dmg(source, None)
+        self.assertEqual([c[-1] for c in recorder.commands], ["packageDmg"])
+
+
+class WindowsLibTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.source = self.root / "src"
+        (self.source / "src/Simplex/Chat").mkdir(parents=True)
+        (self.source / "src/Simplex/Chat/Mobile.hs").write_text('foreign export ccall "chat_send_cmd" c :: X\n')
+        (self.source / "libsimplex.dll.def").write_text("chat_send_cmd\n")
+        (self.source / "flake.nix").write_text('"chat_send_cmd"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_ghc_settings_stop_using_lld(self):
+        libdir = self.root / "ghc-lib"
+        libdir.mkdir()
+        (libdir / "settings").write_text('[("ld command", "ld.lld.exe"), ("x", "ld.lld.exe")]\n')
+        with mock.patch.object(build_script, "run", Recorder(answers={"print-libdir": f"{libdir}\n"})):
+            build_script.disable_ghc_lld()
+        self.assertEqual((libdir / "settings").read_text(), '[("ld command", "abracadabra.exe"), ("x", "ld.lld.exe")]\n')
+
+    def test_library_links_the_pinned_openssl(self):
+        openssl = self.root / "openssl-3.5.9"
+        openssl.mkdir()
+        (openssl / "libcrypto-3-x64.dll").write_bytes(b"crypto")
+        (self.source / "libsimplex.dll").write_bytes(b"simplex")
+        recorder = Recorder()
+        with mock.patch.object(build_script, "run", recorder), mock.patch.object(build_script, "disable_ghc_lld") as disable:
+            libs = build_script.build_windows_lib(self.source, openssl)
+        disable.assert_called_once()
+        cabal_local = (self.source / "cabal.project.local").read_text()
+        self.assertIn(f"extra-include-dirs: {openssl.as_posix()}/include", cabal_local)
+        options = f"-shared -threaded -optl-L{openssl.as_posix()} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
+        self.assertIn(f"ghc-options: {options}", cabal_local)
+        self.assertIn("simplex-chat +client_library", recorder.commands[-1])
+        self.assertEqual(sorted(p.name for p in libs.iterdir()), ["libcrypto-3-x64.dll", "libsimplex.dll"])
+
+    def test_vlc_plugins_get_the_jar_time_before_the_cache(self):
+        libs, work = self.root / "libs", self.root / "work"
+        libs.mkdir()
+        work.mkdir()
+        archive = work / "vlc-win-x86_64.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("vlc-3.0.23/libvlc.dll", b"vlc")
+            z.writestr("vlc-3.0.23/plugins/audio/libplugin.dll", b"p")
+        times = []
+
+        def cache_gen(args, **kwargs):
+            times.append((work / "vlc/vlc-3.0.23/plugins/audio/libplugin.dll").stat().st_mtime)
+            return mock.Mock(returncode=0, stdout="")
+
+        with mock.patch.object(build_script, "run", cache_gen), mock.patch.object(build_script, "fetch_pinned", lambda u, d, t: t):
+            build_script.add_vlc_windows(libs, work)
+        self.assertEqual(times, [0])
+        self.assertTrue((libs / "vlc/libvlc.dll").exists())
+        self.assertEqual((libs / "vlc/vlc/plugins/audio/libplugin.dll").stat().st_mtime, 0)
 
 
 OTOOL = """Archive : libffi.a(closures.o)
