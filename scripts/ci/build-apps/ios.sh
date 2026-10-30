@@ -48,10 +48,10 @@ build_setting() {
 check_minimum_versions() {
   local target=$1 lib newest
   for lib in apps/ios/Libraries/ios/*.a; do
-    newest=$(otool -l "$lib" | awk '$1 == "minos" {print $2}' | sort -V | tail -1)
+    # LC_BUILD_VERSION states it as minos, the older LC_VERSION_MIN_* as version; objects without either set no minimum
+    newest=$(otool -l "$lib" | awk '$1 == "minos" {print $2} $2 ~ /^LC_VERSION_MIN_/ {min = 1} min && $1 == "version" {print $2; min = 0}' | sort -V | tail -1)
     echo "$lib: newest minimum version ${newest:-none}"
-    [ -n "$newest" ] || { echo "$lib has no object with a minimum version" >&2; exit 1; }
-    if [ "$(printf '%s\n%s\n' "$newest" "$target" | sort -V | tail -1)" != "$target" ]; then
+    if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$newest" "$target" | sort -V | tail -1)" != "$target" ]; then
       echo "$lib has objects for iOS $newest, newer than the deployment target $target" >&2
       exit 1
     fi
