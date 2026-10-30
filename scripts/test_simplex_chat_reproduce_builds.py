@@ -517,6 +517,64 @@ class IosArchiveTest(unittest.TestCase):
             reproduce.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
 
 
+class DesktopTest(unittest.TestCase):
+    def test_files_of_each_image(self):
+        jammy, noble = reproduce.DESKTOP_IMAGES
+        self.assertEqual(
+            sorted(reproduce.desktop_files(jammy)),
+            [
+                "simplex-chat-ubuntu-22_04-x86_64",
+                "simplex-chat-ubuntu-22_04-x86_64.deb",
+                "simplex-desktop-ubuntu-22_04-x86_64.deb",
+                "simplex-desktop-x86_64.AppImage",
+            ],
+        )
+        self.assertNotIn("simplex-desktop-x86_64.AppImage", reproduce.desktop_files(noble))
+
+    def test_parse_desktop_linux(self):
+        self.assertEqual(
+            reproduce.parse_args(["build", "desktop-linux", "24.04", "--version", "7.1.0", "--out", "o"]),
+            reproduce.BuildDesktopLinux(reproduce.DESKTOP_IMAGES[1], "7.1.0", pathlib.Path("o"), pathlib.Path(".")),
+        )
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            reproduce.parse_args(["build", "desktop-linux", "20.04", "--version", "7.1.0", "--out", "o"])
+
+    def test_build_copies_every_released_file_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, out = pathlib.Path(tmp) / "src", pathlib.Path(tmp) / "out"
+            source.mkdir()
+            recorder = Recorder()
+            with mock.patch.object(reproduce, "run", recorder), mock.patch.object(reproduce, "log"):
+                reproduce.build_desktop_linux(source, reproduce.DESKTOP_IMAGES[0], "7.1.0", out)
+            self.assertIn("flags: +openssl", (source / "cabal.project.local").read_text())
+            build = next(c for c in recorder.commands if c[:2] == ["docker", "build"])
+            self.assertIn("TAG=22.04", build)
+            self.assertIn(f"HASH={reproduce.DESKTOP_IMAGES[0].digest}", build)
+            scripts = [c[-1] for c in recorder.commands if c[:2] == ["docker", "exec"]]
+            self.assertIn('./scripts/desktop/build-cli-deb.sh "7.1.0"', scripts[0])
+            self.assertIn("make-appimage-linux.sh", scripts[1])
+            copied = [pathlib.Path(c[-1]).name for c in recorder.commands if c[:2] == ["docker", "cp"]]
+            self.assertEqual(sorted(copied), sorted(reproduce.desktop_files(reproduce.DESKTOP_IMAGES[0])))
+
+    def test_reproduce_reports_mismatches_and_writes_sums_only_when_all_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = pathlib.Path(tmp) / "v7.1.0-simplex-chat"
+
+            def fake_build(source, image, version, out):
+                for name in reproduce.desktop_files(image):
+                    (out / name).write_bytes(name.encode())
+
+            def fake_download(url, target):
+                target.write_bytes(b"other" if target.name.endswith(".AppImage") else target.name.encode())
+
+            with mock.patch.object(reproduce, "checkout"), mock.patch.object(
+                reproduce, "build_desktop_linux", fake_build
+            ), mock.patch.object(reproduce, "download", fake_download), mock.patch.object(reproduce, "log"):
+                mismatched = reproduce.reproduce_desktop("v7.1.0", pathlib.Path(tmp), results)
+            self.assertEqual(mismatched, ["simplex-desktop-x86_64.AppImage"])
+            self.assertFalse((results / "_sha256sums").exists())
+
+
 class MainTest(unittest.TestCase):
     def test_errors_exit_with_1(self):
         with mock.patch.object(reproduce, "reproduce", side_effect=reproduce.ReproduceError("boom")), mock.patch(

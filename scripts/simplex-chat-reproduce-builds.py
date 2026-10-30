@@ -8,6 +8,7 @@ Reproduce a release (desktop is the default target):
 Build one commit's apps unsigned, as CI's build-apps workflow does:
     simplex-chat-reproduce-builds.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
     simplex-chat-reproduce-builds.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
+    simplex-chat-reproduce-builds.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
     simplex-chat-reproduce-builds.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
 
 Needs Python 3.9+, git and Docker; ios-archive needs macOS with Xcode and Nix. Results go to ./<tag>-simplex-chat.
@@ -621,6 +622,39 @@ def desktop_files(image: UbuntuImage) -> dict[str, str]:
     return files
 
 
+def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Path) -> None:
+    """The Linux CLI, its deb, the desktop deb and, on APPIMAGE_IMAGE, the AppImage, with their released names."""
+    (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
+    log(f"building Ubuntu {image.version} CLI and desktop apps")
+    with Container(
+        source,
+        {source: "/project"},
+        build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
+        run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
+    ) as container:
+        container.exec(
+            "find /project -type d -exec chmod 755 {} +\n"
+            "find /project -type f -perm /111 -exec chmod 755 {} +\n"
+            "find /project -type f ! -perm /111 -exec chmod 644 {} +\n"
+            "cabal clean && cabal update && cabal build -j\n"
+            "mkdir -p /out\n"
+            "bin=$(find /project/dist-newstyle -name simplex-chat -type f -executable)\n"
+            'mv "$bin" /out/simplex-chat && strip /out/simplex-chat\n'
+            f'./scripts/desktop/build-cli-deb.sh "{version}"\n'
+            "export ASSETS_DIR=../../assets\n"
+            "./scripts/desktop/make-deb-linux.sh\n"
+        )
+        if image.version == APPIMAGE_IMAGE:
+            container.exec(
+                "export ASSETS_DIR=../../assets\n"
+                "./scripts/desktop/make-appimage-linux.sh\n"
+                "mv ./apps/multiplatform/release/main/*imple*.AppImage ./apps/multiplatform/release/main/simplex.appimage\n"
+            )
+        for name, path in desktop_files(image).items():
+            container.copy_out(path, out / name)
+        container.exec("rm -rf ./dist-newstyle ./apps/multiplatform")
+
+
 def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
     built = results / "from-source"
     released = results / "prebuilt"
@@ -628,36 +662,9 @@ def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
     released.mkdir(parents=True, exist_ok=True)
     for image in DESKTOP_IMAGES:
         checkout(source, tag)
-        (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
-        log(f"building Ubuntu {image.version} CLI and desktop apps")
-        with Container(
-            source,
-            {source: "/project"},
-            build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
-            run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
-        ) as container:
-            container.exec(
-                "find /project -type d -exec chmod 755 {} +\n"
-                "find /project -type f -perm /111 -exec chmod 755 {} +\n"
-                "find /project -type f ! -perm /111 -exec chmod 644 {} +\n"
-                "cabal clean && cabal update && cabal build -j\n"
-                "mkdir -p /out\n"
-                "bin=$(find /project/dist-newstyle -name simplex-chat -type f -executable)\n"
-                'mv "$bin" /out/simplex-chat && strip /out/simplex-chat\n'
-                f'./scripts/desktop/build-cli-deb.sh "{tag_version(tag)}"\n'
-                "export ASSETS_DIR=../../assets\n"
-                "./scripts/desktop/make-deb-linux.sh\n"
-            )
-            if image.version == APPIMAGE_IMAGE:
-                container.exec(
-                    "export ASSETS_DIR=../../assets\n"
-                    "./scripts/desktop/make-appimage-linux.sh\n"
-                    "mv ./apps/multiplatform/release/main/*imple*.AppImage ./apps/multiplatform/release/main/simplex.appimage\n"
-                )
-            for name, path in desktop_files(image).items():
-                container.copy_out(path, built / name)
-                download(release_url(tag, name), released / name)
-            container.exec("rm -rf ./dist-newstyle ./apps/multiplatform")
+        build_desktop_linux(source, image, tag_version(tag), built)
+        for name in desktop_files(image):
+            download(release_url(tag, name), released / name)
     mismatched = compare_dirs(built, released)
     for name in mismatched:
         log(f"{name}: sha256 doesn't match")
@@ -695,6 +702,14 @@ class BuildBundle:
 
 
 @dataclass(frozen=True)
+class BuildDesktopLinux:
+    image: UbuntuImage
+    version: str
+    out: Path
+    source: Path
+
+
+@dataclass(frozen=True)
 class BuildIosArchive:
     art: Path
     out: Path
@@ -702,7 +717,7 @@ class BuildIosArchive:
     install_nix: bool
 
 
-Command = Union[Reproduce, BuildApk, BuildBundle, BuildIosArchive]
+Command = Union[Reproduce, BuildApk, BuildBundle, BuildDesktopLinux, BuildIosArchive]
 
 
 def reproduce(command: Reproduce) -> int:
@@ -747,11 +762,22 @@ def build_ios(command: BuildIosArchive) -> int:
     return 0
 
 
+def build_desktop(command: BuildDesktopLinux) -> int:
+    require_tools(["docker"])
+    out = command.out.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    build_desktop_linux(command.source.resolve(), command.image, command.version, out)
+    write_sha256sums(out)
+    return 0
+
+
 def execute(command: Command) -> int:
     if isinstance(command, Reproduce):
         return reproduce(command)
     if isinstance(command, BuildIosArchive):
         return build_ios(command)
+    if isinstance(command, BuildDesktopLinux):
+        return build_desktop(command)
     return build_android(command)
 
 
@@ -763,10 +789,13 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     apk.add_argument("--nix-cache", action="store_true", help="substitute from zw3rk's and IOG's caches")
     bundle = kinds.add_parser("android-bundle", help="the unsigned Play bundle, from both arches' core libraries")
     bundle.add_argument("--libs", type=Path, required=True, help="directory with the pkg-<arch>-android-*.zip files")
+    desktop = kinds.add_parser("desktop-linux", help="the Linux CLI, its deb, the desktop deb and the AppImage")
+    desktop.add_argument("image", choices=[image.version for image in DESKTOP_IMAGES], help="the Ubuntu version")
+    desktop.add_argument("--version", required=True, help="the release version of the CLI deb, e.g. 7.1.0")
     ios = kinds.add_parser("ios-archive", help="the iOS archive, its bundles signed ad hoc with their entitlements")
     ios.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
     ios.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
-    for sub in (apk, bundle, ios):
+    for sub in (apk, bundle, desktop, ios):
         sub.add_argument("--out", type=Path, required=True)
         sub.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
     args = parser.parse_args(argv)
@@ -774,6 +803,9 @@ def parse_build_args(argv: Sequence[str]) -> Command:
         return BuildApk(args.arch, args.out, args.source, args.nix_cache)
     if args.kind == "android-bundle":
         return BuildBundle(args.libs, args.out, args.source)
+    if args.kind == "desktop-linux":
+        image = next(image for image in DESKTOP_IMAGES if image.version == args.image)
+        return BuildDesktopLinux(image, args.version, args.out, args.source)
     return BuildIosArchive(args.art, args.out, args.source, args.install_nix)
 
 
