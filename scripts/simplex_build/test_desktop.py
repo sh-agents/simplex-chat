@@ -199,6 +199,18 @@ class HostDesktopTest(unittest.TestCase):
         self.assertIn("/openssl-static\n", cabal_locals[0])
         self.assertIn("ghc-options: -optl-lws2_32 -optl-lgdi32 -optl-lcrypt32", cabal_locals[0])
 
+    def test_host_cli_build_removes_dist_newstyle_instead_of_cabal_clean(self):
+        pack = self.source / "dist-newstyle/src/zip-8e3e/.git/objects/pack/p.rev"
+        pack.parent.mkdir(parents=True)
+        pack.write_bytes(b"rev")
+        pack.chmod(0o444)
+        recorder = Recorder(answers={"list-bin": "/dist/simplex-chat\n"})
+        with patch_all("run", recorder):
+            cli = build_script.build_host_cli(self.source, "ignore-project: False\n")
+        self.assertFalse((self.source / "dist-newstyle").exists())
+        self.assertEqual(recorder.commands, [["cabal", "update"], ["cabal", "build", "-j"], ["cabal", "list-bin", "exe:simplex-chat"]])
+        self.assertEqual(cli, pathlib.Path("/dist/simplex-chat"))
+
     def test_read_only_cabal_checkouts_are_removed(self):
         pack = self.source / "dist-newstyle/src/simplexmq-abc/.git/objects/pack/p.pack"
         pack.parent.mkdir(parents=True)

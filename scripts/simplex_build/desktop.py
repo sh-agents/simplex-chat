@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import BuildError, run
+from .common import BuildError, remove_tree, run
 from .docker import Step
 
 DESKTOP_ENV = {"ASSETS_DIR": "../../assets"}
@@ -143,7 +143,9 @@ def macos_desktop() -> HostDesktop:
 
 def build_host_cli(source: Path, cabal_local: str) -> Path:
     (source / "cabal.project.local").write_text(cabal_local)
-    for step in CLI_BUILD_STEPS:
+    # in place of cabal clean, which can't delete the read-only git pack files of its checkouts on Windows
+    remove_tree(source / "dist-newstyle")
+    for step in CLI_BUILD_STEPS[1:]:
         run(step.argv, cwd=source)
     return Path(run(["cabal", "list-bin", "exe:simplex-chat"], cwd=source, capture=True).stdout.strip().splitlines()[-1])
 

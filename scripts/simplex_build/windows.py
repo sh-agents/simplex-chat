@@ -2,13 +2,11 @@
 
 import os
 import shutil
-import stat
 import tempfile
 import zipfile
-from collections.abc import Callable
 from pathlib import Path
 
-from .common import edit_lines, fetch_pinned, run, single_dir, single_file
+from .common import edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file
 from .desktop import (
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
@@ -31,18 +29,8 @@ OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
 
 def remove_cabal_sources(source: Path) -> None:
     """cabal fails on Windows when these checkouts exist, and can't delete simplexmq's read-only git pack files."""
-
-    def make_writable(function: Callable[[str], object], path: str, error: BaseException) -> None:
-        # Windows refuses to delete read-only files, POSIX to delete entries of read-only directories
-        os.chmod(os.path.dirname(path), stat.S_IRWXU)
-        os.chmod(path, stat.S_IRWXU)
-        function(path)
-
     for path in [*source.glob("dist-newstyle/src/direct-sq*"), *source.glob("dist-newstyle/src/simplexmq*")]:
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, onexc=make_writable)
-        else:
-            path.unlink()
+        remove_tree(path)
 
 
 def disable_ghc_lld() -> None:

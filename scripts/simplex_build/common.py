@@ -5,6 +5,7 @@ import enum
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -158,6 +159,21 @@ def normalize_permissions(root: Path) -> None:
             path = Path(directory, name)
             if not path.is_symlink():
                 path.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
+
+
+def remove_tree(path: Path) -> None:
+    """A file or directory tree, with its read-only files, which cabal's git checkouts have."""
+
+    def make_writable(function: Callable[[str], object], name: str, error: BaseException) -> None:
+        # Windows refuses to delete read-only files, POSIX to delete entries of read-only directories
+        os.chmod(os.path.dirname(name), stat.S_IRWXU)
+        os.chmod(name, stat.S_IRWXU)
+        function(name)
+
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, onexc=make_writable)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
 
 
 def single_file(directory: Path, pattern: str) -> Path:
