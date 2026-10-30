@@ -1678,7 +1678,7 @@ class IosArchiveTest(unittest.TestCase):
     def test_build_flow(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            source, art, out, home = root / "src", root / "art", root / "out", root / "home"
+            source, art, out = root / "src", root / "art", root / "out"
             (art / "ios/Assets.xcassets/logo.imageset").mkdir(parents=True)
             for name in ("SimpleX NSE", "SimpleX SE"):
                 (source / f"apps/ios/{name}").mkdir(parents=True)
@@ -1690,7 +1690,7 @@ class IosArchiveTest(unittest.TestCase):
             out.mkdir()
             apple = FakeApple()
 
-            def fake_run(args, cwd=None, env=None, input=None, check=True, capture=False):
+            def fake_run(args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
                 args = [str(a) for a in args]
                 if args[:2] == ["nix", "build"]:
                     self.assertIn("NIX_SSL_CERT_FILE", env)
@@ -1713,26 +1713,19 @@ class IosArchiveTest(unittest.TestCase):
             with (
                 mock.patch.object(build_script, "run", fake_run),
                 mock.patch("builtins.print"),
-                mock.patch.object(build_script.Path, "home", return_value=home),
                 mock.patch.object(build_script, "nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
+                mock.patch.object(build_script, "install_ios_libs") as install_libs,
             ):
                 build_script.build_ios_archive(source, art, out, install=False)
 
-            self.assertEqual((home / "Downloads" / build_script.IOS_CORE_ZIP).read_bytes(), b"core")
+            installed = install_libs.call_args.args[1]
+            self.assertEqual(installed.name, build_script.IOS_CORE_ZIP)
             xcconfig = (source / "apps/ios/Local.xcconfig").read_text()
             self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", xcconfig)
             self.assertIn(f"SIMPLEX_ASSETS_DIR = {art}", xcconfig)
             self.assertEqual(
-                [c[0] for c in apple.commands][:7],
-                [
-                    "nix",
-                    "scripts/ci/ios-sim/prepare-libs.sh",
-                    "scripts/ios/update-pbxproj.sh",
-                    "scripts/ios/copy-assets.sh",
-                    "xcodebuild",
-                    "otool",
-                    "xcodebuild",
-                ],
+                [c[0] for c in apple.commands][:5],
+                ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "xcodebuild"],
             )
             archive = next(c for c in apple.commands if c[:2] == ["xcodebuild", "archive"])
             self.assertIn("CODE_SIGNING_ALLOWED=NO", archive)
@@ -1744,6 +1737,177 @@ class IosArchiveTest(unittest.TestCase):
     def test_needs_the_art_assets(self):
         with tempfile.TemporaryDirectory() as tmp, self.assertRaises(build_script.ReproduceError):
             build_script.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
+
+
+PBXPROJ = """
+    A1 /* libHSsimplex-chat-6.5.0.0-Old.a */ = {isa = PBXBuildFile; fileRef = B1 /* libHSsimplex-chat-6.5.0.0-Old.a */; };
+    A2 /* libHSsimplex-chat-6.5.0.0-Old-ghc9.6.3.a */ = {isa = PBXBuildFile; fileRef = B2 /* libHSsimplex-chat-6.5.0.0-Old-ghc9.6.3.a */; };
+    B1 /* libHSsimplex-chat-6.5.0.0-Old.a */ = {path = "libHSsimplex-chat-6.5.0.0-Old.a"; };
+    B2 /* libHSsimplex-chat-6.5.0.0-Old-ghc9.6.3.a */ = {path = "libHSsimplex-chat-6.5.0.0-Old-ghc9.6.3.a"; };
+    C1 /* libHSsimplex-chat-6.5.0.0-Old.a in Frameworks */,
+    C2 /* libHSsimplex-chat-6.5.0.0-Old-ghc9.6.3.a in Frameworks */,
+    D1 /* libHSsimplex-chat-6.5.0.0-Old.a */,
+    D2 /* libHSsimplex-chat-6.5.0.0-Old-ghc9.6.3.a */,
+"""
+
+
+class IosLibsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.source = self.root / "src"
+        (self.source / "apps/ios/SimpleX.xcodeproj").mkdir(parents=True)
+        (self.source / build_script.IOS_PBXPROJ).write_text(PBXPROJ)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def install_libraries(self, *names):
+        ios = self.source / build_script.IOS_LIBRARIES / "ios"
+        ios.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (ios / name).write_bytes(b"")
+
+    def test_pbxproj_points_at_the_installed_libraries(self):
+        self.install_libraries("libHSsimplex-chat-6.5.1.0-New.a", "libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a", "libffi.a")
+        with mock.patch.object(build_script, "log"):
+            build_script.update_pbxproj(self.source)
+        text = (self.source / build_script.IOS_PBXPROJ).read_text()
+        self.assertNotIn("Old", text)
+        self.assertEqual(text.count("libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a"), 6)
+        self.assertEqual(text.count("libHSsimplex-chat-6.5.1.0-New.a"), 6)
+
+    def test_pbxproj_without_four_references_each_is_not_changed(self):
+        (self.source / build_script.IOS_PBXPROJ).write_text(PBXPROJ.replace("    D1 /* libHSsimplex-chat-6.5.0.0-Old.a */,\n", ""))
+        self.install_libraries("libHSsimplex-chat-6.5.1.0-New.a", "libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a")
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.update_pbxproj(self.source)
+        self.assertIn("Old", (self.source / build_script.IOS_PBXPROJ).read_text())
+
+    def test_pbxproj_needs_both_libraries(self):
+        self.install_libraries("libHSsimplex-chat-6.5.1.0-New.a")
+        with self.assertRaises(build_script.ReproduceError):
+            build_script.update_pbxproj(self.source)
+
+    def test_simulator_libraries_must_be_marked_for_the_simulator(self):
+        sim = self.root / "sim"
+        sim.mkdir()
+        (sim / "libffi.a").write_bytes(b"")
+        for platform_line, rejected in (("platform 7", False), ("platform IOSSIMULATOR", False), ("platform 2", True)):
+            with mock.patch.object(build_script, "run", Recorder(answers={"otool": f"Load command 1\n {platform_line}\n"})):
+                if rejected:
+                    with self.assertRaises(build_script.ReproduceError):
+                        build_script.check_simulator_libs(sim)
+                else:
+                    build_script.check_simulator_libs(sim)
+
+    def test_install_relabels_copies_for_ios_and_the_simulator(self):
+        package = self.root / build_script.IOS_CORE_ZIP
+        with zipfile.ZipFile(package, "w") as z:
+            z.writestr("libHSsimplex-chat-6.5.1.0-New.a", b"a")
+            z.writestr("libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a", b"g")
+        recorder = Recorder(answers={"otool": " platform 7\n"})
+        work = self.root / "work"
+        work.mkdir()
+        with (
+            mock.patch.object(build_script, "run", recorder),
+            mock.patch.object(build_script, "fetch_pinned", lambda url, digest, target: target),
+            mock.patch.object(build_script, "log"),
+        ):
+            build_script.install_ios_libs(self.source, package, work)
+        libraries = self.source / build_script.IOS_LIBRARIES
+        for name in ("mac", "ios", "sim"):
+            self.assertEqual(len(list((libraries / name).iterdir())), 2)
+        relabels = [c for c in recorder.commands if c[0].endswith("mac2ios")]
+        self.assertEqual(sum(c[1] == "-s" for c in relabels), 2)
+        self.assertEqual(len(relabels), 4)
+        self.assertIn("libHSsimplex-chat-6.5.1.0-New.a", (self.source / build_script.IOS_PBXPROJ).read_text())
+
+    def test_simulator_package_has_the_libraries_of_the_nix_package(self):
+        source = self.root / "src"
+        (source / "simplex-chat.cabal").write_text("name: simplex-chat\nversion:        6.5.1.0\n")
+        build = source / "dist-newstyle/build/aarch64-osx/ghc-9.6.3/simplex-chat-6.5.1.0/build"
+        build.mkdir(parents=True)
+        (build / "libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a").write_bytes(b"lib")
+        brew = self.root / "brew"
+        (brew / "lib").mkdir(parents=True)
+        for name in ("libffi.a", "libgmp.a", "libgmpxx.a"):
+            (brew / "lib" / name).write_bytes(b"x")
+        recorder = Recorder(answers={"numeric-version": "9.6.3\n", "brew --prefix": f"{brew}\n"})
+        openssl = build_script.OpenSsl(self.root / "o/include", self.root / "o/lib")
+        with mock.patch.object(build_script, "run", recorder), mock.patch.object(build_script, "host_openssl", return_value=openssl):
+            build_script.build_ios_sim_libs(source, self.root)
+        self.assertIn(f"extra-lib-dirs: {self.root / 'o/lib'}", (source / "cabal.project.local").read_text())
+        self.assertIn(["cabal", "build", "-j", "lib:simplex-chat"], recorder.commands)
+        with zipfile.ZipFile(self.root / build_script.IOS_CORE_ZIP) as z:
+            self.assertEqual(sorted(z.namelist()), ["libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a", "libffi.a", "libgmp.a", "libgmpxx.a"])
+
+
+class PrebuiltLibsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_android_libs_are_built_with_nix_on_this_machine(self):
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            link = pathlib.Path(args[args.index("--out-link") + 1])
+            link.mkdir()
+            lib = "libsimplex" if "lib:simplex-chat" in args[-1] else "libsupport"
+            (link / f"pkg-aarch64-android-{lib}.zip").write_bytes(lib.encode())
+            return recorder(args, **kwargs)
+
+        recorder = Recorder()
+        with mock.patch.object(build_script, "run", fake_run), mock.patch.object(build_script, "install_nix") as install:
+            build_script.build_android_libs(self.root, Arch.AARCH64, self.root, install=False)
+        install.assert_not_called()
+        self.assertEqual(
+            [c[-1] for c in recorder.commands],
+            [".#hydraJobs.x86_64-linux.aarch64-android:lib:simplex-chat", ".#hydraJobs.x86_64-linux.aarch64-android:lib:support"],
+        )
+        self.assertEqual(
+            sorted(p.name for p in self.root.glob("*.zip")), ["pkg-aarch64-android-libsimplex.zip", "pkg-aarch64-android-libsupport.zip"]
+        )
+
+    def test_android_libs_are_installed_for_their_abi(self):
+        for lib in build_script.ANDROID_LIBS:
+            with zipfile.ZipFile(self.root / f"pkg-aarch64-android-{lib}.zip", "w") as z:
+                z.writestr(f"{lib}.so", lib)
+        build_script.install_android_libs(self.root, Arch.AARCH64, self.root)
+        libs = self.root / build_script.ANDROID_LIBS_DIR / "arm64-v8a"
+        self.assertEqual(sorted(p.name for p in libs.iterdir()), ["libsimplex.so", "libsupport.so"])
+
+    def test_linux_libs_are_installed_and_linked(self):
+        package = self.root / "simplex-chat-libs-linux-x86_64.zip"
+        with zipfile.ZipFile(package, "w") as z:
+            z.writestr("libs/libsimplex.so", "lib")
+            z.writestr("other/readme", "x")
+        with mock.patch.object(build_script.platform, "machine", return_value="x86_64"):
+            build_script.install_linux_libs(self.root, package)
+        libs = self.root / build_script.DESKTOP_LIBS_DIR / "linux-x86_64"
+        self.assertEqual([p.name for p in libs.iterdir()], ["libsimplex.so"])
+        self.assertTrue((self.root / "apps/multiplatform/build/links/linux-x64").is_symlink())
+
+    def test_install_commands(self):
+        here = pathlib.Path(".")
+        self.assertEqual(
+            build_script.parse_args(["install", "libs", "android", "core", "--arch", "armv7a"]),
+            build_script.InstallLibs("android", pathlib.Path("core"), Arch.ARMV7A, here),
+        )
+        self.assertEqual(
+            build_script.parse_args(["install", "libs", "ios", "pkg.zip"]),
+            build_script.InstallLibs("ios", pathlib.Path("pkg.zip"), Arch.AARCH64, here),
+        )
+        self.assertEqual(
+            build_script.parse_args(["build", "libs", "android", "--install-nix", "--out", "o"]),
+            build_script.BuildAndroidLibs(Arch.AARCH64, pathlib.Path("o"), here, True),
+        )
+        self.assertEqual(
+            build_script.parse_args(["build", "libs", "ios-sim", "--out", "o"]), build_script.BuildIosSimLibs(pathlib.Path("o"), here)
+        )
 
 
 class GitHubLogTest(unittest.TestCase):

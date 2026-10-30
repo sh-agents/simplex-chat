@@ -79,7 +79,7 @@ jobs:
       - name: Artifact names
         id: names
         run: |
-          echo "core=ios-sim-core-${{ hashFiles('src/**', 'cabal.project', 'simplex-chat.cabal', 'scripts/ci/ios-sim/build-core.sh') }}" >> "$GITHUB_OUTPUT"
+          echo "core=ios-sim-core-${{ hashFiles('src/**', 'cabal.project', 'simplex-chat.cabal', 'scripts/simplex-chat-build.py') }}" >> "$GITHUB_OUTPUT"
           echo "backend=ios-sim-backend-${{ hashFiles('src/**', 'apps/simplex-chat/**', 'apps/simplex-directory-service/Main.hs', 'apps/simplex-directory-service/src/**', 'cabal.project', 'simplex-chat.cabal', 'scripts/ci/ios-sim/build-backend.sh') }}" >> "$GITHUB_OUTPUT"
 
       - name: Find core library
@@ -124,14 +124,14 @@ jobs:
           cabal-version: ${{ env.CABAL_VER }}
 
       - name: Install libraries
-        run: brew install openssl@3 libffi gmp
+        run: brew install libffi gmp
 
       - name: Build core library
         id: build
-        run: scripts/ci/ios-sim/build-core.sh ~/Downloads/${{ env.CORE_PKG }}
+        run: scripts/simplex-chat-build.py build libs ios-sim --out ~/Downloads
 
       - name: Patch core library for the simulator
-        run: scripts/ci/ios-sim/prepare-libs.sh
+        run: scripts/simplex-chat-build.py install libs ios ~/Downloads/${{ env.CORE_PKG }}
 
       - name: Upload core library
         uses: actions/upload-artifact@v7
@@ -214,9 +214,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Prepare libraries
-        run: |
-          scripts/ci/ios-sim/prepare-libs.sh
-          scripts/ios/update-pbxproj.sh
+        run: scripts/simplex-chat-build.py install libs ios ~/Downloads/${{ env.CORE_PKG }}
 
       - name: Download backend
         if: env.START_BACKEND == 'true'

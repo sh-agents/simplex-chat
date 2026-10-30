@@ -13,7 +13,7 @@ Every run builds the core library, and the backend when it's asked for, from the
 | Job | Does | Time |
 |---|---|---|
 | `plan` | chooses the jobs, finds earlier core and backend builds | 10 s |
-| `core` | `scripts/simplex-chat-build.py build libs linux --host` via `build-core.sh` | skipped when reused, about 24 min not |
+| `core` | `scripts/simplex-chat-build.py build libs linux --host`, then `install libs linux` in the app job | skipped when reused, about 24 min not |
 | `app` | the app (`:desktop:createDistributable`), desktopTest with the snapshots, `smoke-test.sh` | about 12 min: build 4.5, desktopTest 0.7, smoke test 3.5 |
 | `claude` (opt-in) | after `app` passed: its distributable at the first screen, then Claude Code drives it | about 4 min, Claude 3 |
 | `backend` (opt-in) | `build-backend.sh`: `simplex-chat`, `simplex-directory-service`, and `smp-server` from the simplexmq commit `cabal.project` pins | about 30 min, skipped when reused |
@@ -27,7 +27,7 @@ Queueing for a runner adds from under a minute to 20 minutes. Results are artifa
 - `smoke-test.sh <app dir> <out dir> [start|onboarding|setup|backend]`: the scripted cases; the default is onboarding and both layouts. `setup` also creates a local group and makes the test SMP server the app's only names server; `backend` does that, connects to the seeded name, and checks both layouts.
 - `backend.sh start <tar.gz> <dir>` / `stop <dir>`: the test backend, below.
 - `claude-test.sh`, `claude-test.md` (the prompt), `claude-scope` (whether the prompt uses the test backend, and optionally the session's turns and budget), `claude-guard.py`, `claude-usage.py`: the Claude job.
-- `build-core.sh`, `install-core.sh`, `build-backend.sh`, `earlier-run.sh`, `release-app.sh`, `test-summary.py`: builds, reuse and reports.
+- `build-backend.sh`, `earlier-run.sh`, `release-app.sh`, `test-summary.py`: builds, reuse and reports.
 
 ## Snapshots
 

@@ -13,11 +13,18 @@ Build one commit's release files, as CI does; desktop, libs and openssl build fo
         [--host | --container <name>] --out <dir>
     simplex-chat-build.py build libs macos [--database <sqlite|postgres>] [--require-signing] --out <dir>
     simplex-chat-build.py build libs windows --out <dir>
+    simplex-chat-build.py build libs android [--arch <aarch64|armv7a>] [--install-nix] --out <dir>
+    simplex-chat-build.py build libs ios-sim --out <dir>
     simplex-chat-build.py build openssl <macos|windows> --out <dir>
     simplex-chat-build.py build apk <aarch64|armv7a> [--nix-cache] --out <dir>
     simplex-chat-build.py build aab --libs <dir> --out <dir>
     simplex-chat-build.py build xcarchive --art <simplex-chat-art> [--install-nix] --out <dir>
 Each build takes --source <dir>, the simplex-chat checkout, by default the current directory.
+
+Install prebuilt core libraries where the apps' builds take them, as the test workflows do:
+    simplex-chat-build.py install libs linux <libs zip>
+    simplex-chat-build.py install libs android <dir> [--arch <aarch64|armv7a>]
+    simplex-chat-build.py install libs ios <pkg-ios-aarch64-swift-json.zip>
 
 Needs Python 3.12+; the Linux and Android builds need Docker, xcarchive macOS with Xcode and Nix, and reproduce git.
 reproduce writes its results to ./<tag>-simplex-chat.
@@ -140,6 +147,8 @@ APPLE_SIGNING_ENV = ("APPLE_SIMPLEX_SIGNING_KEYCHAIN", "APPLE_SIMPLEX_NOTARIZATI
 SIMPLEX_KEY = "3C:52:C4:FD:3C:AD:1C:07:C9:B0:0A:70:80:E3:58:FA:B9:FE:FC:B8:AF:5A:EC:14:77:65:F1:6D:0F:21:AD:85"
 ANDROID_LIBS_DIR = "apps/multiplatform/common/src/commonMain/cpp/android/libs"
 ANDROID_LIBS = ("libsimplex", "libsupport")
+# The flake.nix jobs of the Android core libraries
+ANDROID_LIB_JOBS = {"libsimplex": "lib:simplex-chat", "libsupport": "lib:support"}
 ANDROID_BUNDLE_DIR = "apps/multiplatform/android/build/outputs/bundle/googleRelease"
 # The release key that android/build.gradle.kts signs with: the keystore's path and its passwords and alias
 ANDROID_SIGNING_ENV = ("ANDROID_KEYSTORE", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD")
@@ -176,6 +185,36 @@ IOS_CORE_ZIP = "pkg-ios-aarch64-swift-json.zip"
 IOS_PROJECT = "apps/ios/SimpleX.xcodeproj"
 IOS_SCHEME = "SimpleX (iOS)"
 IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "ditto")
+IOS_LIBRARIES = "apps/ios/Libraries"
+IOS_PBXPROJ = "apps/ios/SimpleX.xcodeproj/project.pbxproj"
+# LC_BUILD_VERSION platforms of the iOS simulator, as otool prints them
+IOS_SIMULATOR_PLATFORMS = ("7", "IOSSIMULATOR")
+MAC2IOS_SOURCE = "https://raw.githubusercontent.com/zw3rk/mobile-core-tools/4dcb77d5ea896d749381806dfab5358851b08951"
+MAC2IOS_SHA256 = {
+    "mac2ios.c": "2e55f956eb255ac2b523698d69cb9822ace4df357182e70df97107075b27f934",
+    "ar.h": "fe0451cc7c5b92c59662db81cf6519576f5bc7b29c0cc34077e540cd293c5a3f",
+    "macho.h": "1d49fd7f0c8d40f4cf3d26d83b7f391ae8f270173fba06e43c2cd55ed09860fd",
+}
+# The iOS core as flake.nix's aarch64-darwin-ios:lib:simplex-chat builds it, built with cabal for the simulator tests
+IOS_SIM_CABAL_LOCAL = """ignore-project: False
+
+package simplex-chat
+    flags: +swift +client_library
+    static: True
+    shared: False
+    ghc-options: -threaded -DIOS
+
+package simplexmq
+    flags: +swift +client_library +commoncrypto
+    extra-include-dirs: {include}
+    extra-lib-dirs: {lib}
+
+package direct-sqlcipher
+    flags: +commoncrypto
+
+package entropy
+    flags: +DoNotGetEntropy
+"""
 IOS_LOCAL_XCCONFIG = "SIMPLEX_ASSETS_DIR = {art}\nSWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS\n"
 
 LOCAL_HEADER = b"PK\x03\x04"
@@ -690,6 +729,38 @@ def build_bundle(container: Container, source: Path, libs: Path, out: Path, sign
     )
     retry_once(lambda: container.run(build, secrets=signing.secrets if signing else None))
     shutil.copy(single_file(source / ANDROID_BUNDLE_DIR, "*.aab"), out / "simplex.aab")
+
+
+def build_android_libs(source: Path, arch: Arch, out: Path, install: bool) -> None:
+    """The core libraries of the APK, built with Nix on this machine, as the emulator tests use them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        if install:
+            install_nix(work)
+        for lib, job in ANDROID_LIB_JOBS.items():
+            result = work / f"result-{lib}"
+            run(["nix", "build", "-L", "--out-link", result, f".#hydraJobs.x86_64-linux.{arch}-android:{job}"], cwd=source, env=nix_env())
+            shutil.copy(result / f"pkg-{arch}-android-{lib}.zip", out)
+
+
+def extract_flat(package: Path, target: Path, prefix: str = "") -> None:
+    """The files of a zip under prefix, in target without their directories."""
+    target.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(package) as z:
+        for member in z.infolist():
+            if not member.is_dir() and member.filename.startswith(prefix):
+                (target / Path(member.filename).name).write_bytes(z.read(member))
+
+
+def install_android_libs(source: Path, arch: Arch, packages: Path) -> None:
+    for lib in ANDROID_LIBS:
+        extract_flat(packages / f"pkg-{arch}-android-{lib}.zip", source / ANDROID_LIBS_DIR / arch.abi)
+
+
+def install_linux_libs(source: Path, package: Path) -> None:
+    arch = platform.machine()
+    extract_flat(package, desktop_libs(source, f"linux-{arch}"), "libs/")
+    link_desktop_libs(source, f"linux-{arch}", f"linux-{COMPOSE_ARCHES[arch]}")
 
 
 def release_signer(container: Container, apk_name: str) -> str:
@@ -1717,6 +1788,105 @@ def sign_bundle(bundle: Path, entitlements: Path, team: str, work: Path) -> None
     print(f"== {bundle.name}\n{resolved.read_text()}")
 
 
+def build_mac2ios(work: Path) -> Path:
+    """zw3rk's mac2ios, which relabels the objects of macOS libraries as iOS or iOS simulator ones."""
+    for name, digest in MAC2IOS_SHA256.items():
+        fetch_pinned(f"{MAC2IOS_SOURCE}/{name}", digest, work / name)
+    run(["cc", "-O2", "-o", work / "mac2ios", work / "mac2ios.c"])
+    return work / "mac2ios"
+
+
+def check_simulator_libs(sim: Path) -> None:
+    for lib in sorted(sim.glob("*.a")):
+        output = run(["otool", "-l", lib], capture=True, check=False).stdout
+        platforms = {line.split()[1] for line in output.splitlines() if line.split()[:1] == ["platform"]}
+        if platforms - set(IOS_SIMULATOR_PLATFORMS):
+            raise ReproduceError(f"{lib.name} has objects for platforms {sorted(platforms)}, not only the iOS simulator")
+
+
+def library_names(names: Sequence[str]) -> tuple[str, str] | None:
+    """The plain and the -ghc library of libHSsimplex-chat among names."""
+    plain = sorted({name for name in names if "-ghc" not in name})
+    ghc = sorted({name for name in names if "-ghc" in name})
+    return (plain[-1], ghc[-1]) if plain and ghc else None
+
+
+def update_pbxproj(source: Path) -> None:
+    """Points project.pbxproj, which names the libHSsimplex-chat libraries with their versions, at the installed ones."""
+    pbxproj = source / IOS_PBXPROJ
+    text = pbxproj.read_text()
+    new = library_names([lib.name for lib in (source / IOS_LIBRARIES / "ios").glob("libHSsimplex-chat-*.a")])
+    old = library_names(re.findall(r'libHSsimplex-chat-[^ "/]+\.a', text))
+    if new is None or old is None:
+        raise ReproduceError(f"no libHSsimplex-chat libraries in {IOS_LIBRARIES}/ios or in {IOS_PBXPROJ}")
+    if old == new:
+        return
+
+    def references(name: str, text: str) -> int:
+        return sum(name in line for line in text.splitlines())
+
+    if [references(name, text) for name in old] != [4, 4]:
+        raise ReproduceError(f"expected 4 references to each of {', '.join(old)} in {IOS_PBXPROJ}")
+    # the -ghc name contains the plain one's version, so it is replaced first
+    text = text.replace(old[1], new[1]).replace(old[0], new[0])
+    if [references(name, text) for name in new] != [4, 4]:
+        raise ReproduceError(f"expected 4 references to each of {', '.join(new)} after updating {IOS_PBXPROJ}")
+    pbxproj.write_text(text)
+    log(f"{IOS_PBXPROJ}: {old[0]} -> {new[0]}")
+
+
+def install_ios_libs(source: Path, package: Path, work: Path) -> None:
+    """The libraries of an iOS core package for macOS, iOS and the iOS simulator, where the Xcode project links them."""
+    libraries = source / IOS_LIBRARIES
+    mac2ios = build_mac2ios(work)
+    mac, ios, sim = (libraries / name for name in ("mac", "ios", "sim"))
+    for directory in (mac, ios, sim):
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+    with zipfile.ZipFile(package) as z:
+        z.extractall(mac)
+    for lib in sorted(mac.iterdir()):
+        lib.chmod(lib.stat().st_mode | stat.S_IWUSR)
+        shutil.copy(lib, ios)
+        shutil.copy(lib, sim)
+    for lib in sorted(ios.iterdir()):
+        run([mac2ios, lib], capture=True)
+    for lib in sorted(sim.iterdir()):
+        run([mac2ios, "-s", lib], capture=True)
+    check_simulator_libs(sim)
+    update_pbxproj(source)
+
+
+def cabal_version(source: Path) -> str:
+    match = re.search(r"^version:\s*(\S+)", (source / "simplex-chat.cabal").read_text(), re.MULTILINE)
+    if match is None:
+        raise ReproduceError("no version in simplex-chat.cabal")
+    return match.group(1)
+
+
+def build_ios_sim_libs(source: Path, out: Path) -> None:
+    """The iOS core package built with cabal, which the simulator tests use instead of the slower Nix build."""
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp).resolve()
+        openssl = host_openssl(work)
+        cabal_local = IOS_SIM_CABAL_LOCAL.format(include=openssl.include, lib=openssl.lib)
+        (source / "cabal.project.local").write_text(cabal_local)
+        run(["cabal", "build", "-j", "lib:simplex-chat"], cwd=source)
+        ghc = run(["ghc", "--numeric-version"], capture=True).stdout.strip()
+        build = source / f"dist-newstyle/build/aarch64-osx/ghc-{ghc}/simplex-chat-{cabal_version(source)}/build"
+        ffi, gmp = (Path(run(["brew", "--prefix", name], capture=True).stdout.strip()) / "lib" for name in ("libffi", "gmp"))
+        package = work / "package"
+        package.mkdir()
+        for lib in [*build.glob("libHSsimplex-chat-*.a"), ffi / "libffi.a", gmp / "libgmp.a", gmp / "libgmpxx.a"]:
+            shutil.copy(lib, package)
+            (package / lib.name).chmod(0o644)
+        for lib in package.glob("libHSsimplex-chat-*.a"):
+            run(["strip", "-x", lib])
+        with zipfile.ZipFile(out / IOS_CORE_ZIP, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for lib in sorted(package.iterdir()):
+                z.write(lib, lib.name)
+
+
 def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None:
     if not (art / "ios/Assets.xcassets").is_dir():
         raise ReproduceError(f"no ios/Assets.xcassets in {art}")
@@ -1725,11 +1895,7 @@ def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None
         if install:
             install_nix(work)
         run(["nix", "build", "-L", "--out-link", work / "core", IOS_CORE_JOB], cwd=source, env=nix_env())
-        downloads = Path.home() / "Downloads"
-        downloads.mkdir(parents=True, exist_ok=True)
-        shutil.copy(work / "core" / IOS_CORE_ZIP, downloads / IOS_CORE_ZIP)
-        run(["scripts/ci/ios-sim/prepare-libs.sh"], cwd=source)
-        run(["scripts/ios/update-pbxproj.sh"], cwd=source)
+        install_ios_libs(source, work / "core" / IOS_CORE_ZIP, work)
 
         # The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on
         # SIMPLEX_ASSETS. copy-assets.sh runs first, as its build phase runs after the extensions' catalogs are built.
@@ -1836,6 +2002,30 @@ class BuildOpenssl:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildAndroidLibs:
+    arch: Arch
+    out: Path
+    source: Path
+    install_nix: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BuildIosSimLibs:
+    out: Path
+    source: Path
+
+
+@dataclass(frozen=True, slots=True)
+class InstallLibs:
+    """Prebuilt core libraries put where the apps' builds take them."""
+
+    platform: str
+    package: Path
+    arch: Arch
+    source: Path
+
+
+@dataclass(frozen=True, slots=True)
 class BuildDesktopMacos:
     out: Path
     source: Path
@@ -1865,11 +2055,13 @@ Build = (
     | BuildMacosLibs
     | BuildWindowsLibs
     | BuildOpenssl
+    | BuildAndroidLibs
+    | BuildIosSimLibs
     | BuildDesktopMacos
     | BuildDesktopWindows
     | BuildIosArchive
 )
-Command = Reproduce | Build
+Command = Reproduce | Build | InstallLibs
 
 
 def reproduce(command: Reproduce) -> None:
@@ -1925,6 +2117,15 @@ def build(command: Build) -> None:
             require_platform(Platform.WINDOWS)
             require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "dlltool"])
             build_windows_libs(source, out)
+        case BuildAndroidLibs(arch=arch, install_nix=install):
+            require_platform(Platform.LINUX)
+            if not install:
+                require_tools(["nix"])
+            build_android_libs(source, arch, out, install)
+        case BuildIosSimLibs():
+            require_platform(Platform.MACOS)
+            require_tools(["cabal", "ghc", "brew", "perl", "make", "strip"])
+            build_ios_sim_libs(source, out)
         case BuildOpenssl(platform=openssl_platform):
             require_platform(openssl_platform)
             require_tools(["perl", "make"])
@@ -1946,10 +2147,27 @@ def build(command: Build) -> None:
     write_sha256sums(out)
 
 
+def install(command: InstallLibs) -> None:
+    source = command.source.resolve()
+    package = command.package.resolve()
+    match command.platform:
+        case "linux":
+            install_linux_libs(source, package)
+        case "android":
+            install_android_libs(source, command.arch, package)
+        case _:
+            require_platform(Platform.MACOS)
+            require_tools(["cc", "otool"])
+            with tempfile.TemporaryDirectory() as tmp:
+                install_ios_libs(source, package, Path(tmp))
+
+
 def execute(command: Command) -> None:
     match command:
         case Reproduce():
             reproduce(command)
+        case InstallLibs():
+            install(command)
         case _:
             build(command)
 
@@ -1984,6 +2202,10 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     for platform_libs in (libs_linux, libs_macos):
         platform_libs.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
     libs.add_parser("windows", parents=[common], help="in an MSYS2 UCRT64 shell")
+    libs_android = libs.add_parser("android", parents=[common], help="the APK's core libraries, built with Nix on this machine")
+    libs_android.add_argument("--arch", type=Arch, choices=list(Arch), default=Arch.AARCH64)
+    libs_android.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
+    libs.add_parser("ios-sim", parents=[common], help="the iOS core package built with cabal, for the simulator tests")
     for signed in (desktop_macos, libs_macos):
         signed.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
 
@@ -2003,7 +2225,7 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     xcarchive.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
 
     args = parser.parse_args(argv)
-    match args.kind, Platform(args.platform) if "platform" in args else None:
+    match args.kind, getattr(args, "platform", None):
         case "desktop", Platform.LINUX:
             return BuildDesktopLinux(linux_image(args.image, platform.machine()), args.version, args.out, args.source)
         case "desktop", Platform.MACOS:
@@ -2018,14 +2240,38 @@ def parse_build_args(argv: Sequence[str]) -> Command:
             return BuildMacosLibs(args.database, args.out, args.source, args.require_signing)
         case "libs", Platform.WINDOWS:
             return BuildWindowsLibs(args.out, args.source)
-        case "openssl", Platform() as openssl_platform:
-            return BuildOpenssl(openssl_platform, args.out, args.source)
+        case "libs", "android":
+            return BuildAndroidLibs(args.arch, args.out, args.source, args.install_nix)
+        case "libs", "ios-sim":
+            return BuildIosSimLibs(args.out, args.source)
+        case "openssl", str(openssl_platform):
+            return BuildOpenssl(Platform(openssl_platform), args.out, args.source)
         case "apk", _:
             return BuildApk(args.arch, args.out, args.source, args.nix_cache)
         case "aab", _:
             return BuildBundle(args.libs, args.out, args.source)
         case _:
             return BuildIosArchive(args.art, args.out, args.source, args.install_nix)
+
+
+def parse_install_args(argv: Sequence[str]) -> InstallLibs:
+    parser = argparse.ArgumentParser(prog="simplex-chat-build.py install", description="Install prebuilt core libraries.")
+    kinds = parser.add_subparsers(dest="kind", required=True)
+    libs = kinds.add_parser("libs", help="the core libraries, where the apps' builds take them").add_subparsers(
+        dest="platform", required=True
+    )
+    for name, package, help in (
+        ("linux", "the library zip of build libs linux", "the desktop app's libraries, linked for its Gradle build"),
+        ("android", "the directory with the pkg-<arch>-android-*.zip of build libs android", "the APK's libraries"),
+        ("ios", "the iOS core package", "for macOS, iOS and the simulator, with project.pbxproj pointing at them"),
+    ):
+        sub = libs.add_parser(name, help=help)
+        sub.add_argument("package", type=Path, help=package)
+        sub.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
+        if name == "android":
+            sub.add_argument("--arch", type=Arch, choices=list(Arch), default=Arch.AARCH64)
+    args = parser.parse_args(argv)
+    return InstallLibs(args.platform, args.package, getattr(args, "arch", Arch.AARCH64), args.source)
 
 
 def parse_arches(value: str) -> tuple[Arch, ...]:
@@ -2041,8 +2287,10 @@ def parse_args(argv: Sequence[str]) -> Command:
             return parse_build_args(argv[1:])
         case ["reproduce"]:
             return parse_reproduce_args(argv[1:])
-    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,reproduce} ...", description=__doc__)
-    parser.error("the first argument is build or reproduce")
+        case ["install"]:
+            return parse_install_args(argv[1:])
+    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,install,reproduce} ...", description=__doc__)
+    parser.error("the first argument is build, install or reproduce")
 
 
 def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:
