@@ -4,6 +4,7 @@ import importlib.util
 import io
 import os
 import pathlib
+import platform
 import shutil
 import struct
 import subprocess
@@ -23,7 +24,7 @@ sys.modules[spec.name] = reproduce
 spec.loader.exec_module(reproduce)
 
 Arch, Step, Target = reproduce.Arch, reproduce.Step, reproduce.Target
-JAMMY, NOBLE = reproduce.DESKTOP_IMAGES
+JAMMY, NOBLE, JAMMY_ARM, NOBLE_ARM = reproduce.DESKTOP_IMAGES
 UTF8_FLAG = 0x800
 GITHUB = {"GITHUB_ACTIONS": "true"}
 APKSIGNER_PADDING = struct.pack("<HHH", 0xD935, 2, 4)
@@ -258,7 +259,7 @@ class ParseArgsTest(unittest.TestCase):
         )
         self.assertEqual(
             reproduce.parse_args(["build", "desktop-linux", "24.04", "--version", "7.1.0", "--out", "o"]),
-            reproduce.BuildDesktopLinux(NOBLE, "7.1.0", out, here),
+            reproduce.BuildDesktopLinux(reproduce.linux_image("24.04", platform.machine()), "7.1.0", out, here),
         )
         self.assertEqual(
             reproduce.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
@@ -543,6 +544,21 @@ class DesktopTest(unittest.TestCase):
             ],
         )
         self.assertNotIn("simplex-desktop-x86_64.AppImage", reproduce.desktop_files(NOBLE))
+
+    def test_aarch64_files_and_image(self):
+        self.assertEqual(reproduce.linux_image("22.04", "aarch64"), JAMMY_ARM)
+        self.assertEqual(
+            reproduce.desktop_files(JAMMY_ARM),
+            [
+                "simplex-chat-ubuntu-22_04-aarch64",
+                "simplex-chat-ubuntu-22_04-aarch64.deb",
+                "simplex-desktop-ubuntu-22_04-aarch64.deb",
+                "simplex-desktop-aarch64.AppImage",
+            ],
+        )
+        self.assertIn("linux-aarch64", reproduce.desktop_steps(JAMMY_ARM, "7.1.0")[2].argv)
+        with self.assertRaises(reproduce.ReproduceError):
+            reproduce.linux_image("24.04", "riscv64")
 
     def test_steps_of_each_image(self):
         steps = reproduce.desktop_steps(JAMMY, "7.1.0")

@@ -65,6 +65,7 @@ class Arch(enum.StrEnum):
 @dataclass(frozen=True, slots=True)
 class UbuntuImage:
     version: str
+    arch: str
     digest: str
 
     @property
@@ -72,10 +73,12 @@ class UbuntuImage:
         return self.version.replace(".", "_")
 
 
-# The Ubuntu images of build.yml's release builds
+# The Ubuntu images of build.yml's release builds, for each version and machine
 DESKTOP_IMAGES = (
-    UbuntuImage("22.04", "sha256:5c8b2c0a6c745bc177669abfaa716b4bc57d58e2ea3882fb5da67f4d59e3dda5"),
-    UbuntuImage("24.04", "sha256:98ff7968124952e719a8a69bb3cccdd217f5fe758108ac4f21ad22e1df44d237"),
+    UbuntuImage("22.04", "x86_64", "sha256:5c8b2c0a6c745bc177669abfaa716b4bc57d58e2ea3882fb5da67f4d59e3dda5"),
+    UbuntuImage("24.04", "x86_64", "sha256:98ff7968124952e719a8a69bb3cccdd217f5fe758108ac4f21ad22e1df44d237"),
+    UbuntuImage("22.04", "aarch64", "sha256:6a62a4157b8775eaf4959cb629e757d32d39d1f4c8ac1b0ddc2510b555cf72f3"),
+    UbuntuImage("24.04", "aarch64", "sha256:68434214381cb38287104e629fe8ee720167dd98cbb36ab1cbbab342515fa6ab"),
 )
 APPIMAGE_IMAGE = "22.04"
 DESKTOP_CABAL_LOCAL = "ignore-project: False\npackage direct-sqlcipher\n    flags: +openssl"
@@ -697,7 +700,7 @@ def desktop_steps(image: UbuntuImage, version: str) -> list[Step]:
         Step(("./scripts/desktop/make-deb-linux.sh",), env=DESKTOP_ENV),
     ]
     if image.version == APPIMAGE_IMAGE:
-        openssl = openssl_build(f"linux-{platform.machine()}", OPENSSL_UNIX_PREFIX, OPENSSL_UNIX_DIR, install=False)
+        openssl = openssl_build(f"linux-{image.arch}", OPENSSL_UNIX_PREFIX, OPENSSL_UNIX_DIR, install=False)
         steps += [Step(argv, OPENSSL_CONTAINER_SOURCE, env={"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}) for argv in openssl]
         libcrypto = f"{OPENSSL_CONTAINER_SOURCE}/libcrypto.so.3"
         steps.append(Step(("./scripts/desktop/make-appimage-linux.sh",), env={**DESKTOP_ENV, "LIBCRYPTO": libcrypto}))
@@ -708,11 +711,19 @@ CLI_BUILD_STEPS = (Step(("cabal", "clean")), Step(("cabal", "update")), Step(("c
 
 
 def desktop_files(image: UbuntuImage) -> list[str]:
-    cli = f"simplex-chat-ubuntu-{image.suffix}-x86_64"
-    files = [cli, f"{cli}.deb", f"simplex-desktop-ubuntu-{image.suffix}-x86_64.deb"]
+    cli = f"simplex-chat-ubuntu-{image.suffix}-{image.arch}"
+    files = [cli, f"{cli}.deb", f"simplex-desktop-ubuntu-{image.suffix}-{image.arch}.deb"]
     if image.version == APPIMAGE_IMAGE:
-        files.append("simplex-desktop-x86_64.AppImage")
+        files.append(f"simplex-desktop-{image.arch}.AppImage")
     return files
+
+
+def linux_image(version: str, machine: str) -> UbuntuImage:
+    """The image of an Ubuntu version for this machine: Docker runs images of the host's architecture."""
+    for image in DESKTOP_IMAGES:
+        if (image.version, image.arch) == (version, machine):
+            return image
+    raise ReproduceError(f"no Ubuntu {version} image for {machine}")
 
 
 def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Path) -> None:
@@ -735,7 +746,7 @@ def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Pat
             container.run_all([Step(("cp", cli, f"{OUT}/simplex-chat")), Step(("strip", f"{OUT}/simplex-chat"))])
             container.run_all(desktop_steps(image, version))
         release = source / DESKTOP_RELEASE_DIR
-        built = [work / "simplex-chat", work / "deb-build/simplex-chat.deb", release / "deb/simplex_x86_64.deb"]
+        built = [work / "simplex-chat", work / "deb-build/simplex-chat.deb", release / f"deb/simplex_{image.arch}.deb"]
         if image.version == APPIMAGE_IMAGE:
             built.append(single_file(release, "*imple*.AppImage"))
         for path, name in zip(built, desktop_files(image), strict=True):
@@ -747,7 +758,7 @@ def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
     released = results / "prebuilt"
     built.mkdir(parents=True, exist_ok=True)
     released.mkdir(parents=True, exist_ok=True)
-    for image in DESKTOP_IMAGES:
+    for image in (image for image in DESKTOP_IMAGES if image.arch == platform.machine()):
         checkout(source, tag)
         build_desktop_linux(source, image, tag_version(tag), built)
         for name in desktop_files(image):
@@ -1015,7 +1026,7 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     bundle = kinds.add_parser("android-bundle", help="the unsigned Play bundle, from both arches' core libraries")
     bundle.add_argument("--libs", type=Path, required=True, help="directory with the pkg-<arch>-android-*.zip files")
     desktop = kinds.add_parser("desktop-linux", help="the Linux CLI, its deb, the desktop deb and the AppImage")
-    desktop.add_argument("image", choices=[image.version for image in DESKTOP_IMAGES], help="the Ubuntu version")
+    desktop.add_argument("image", choices=sorted({image.version for image in DESKTOP_IMAGES}), help="the Ubuntu version")
     desktop.add_argument("--version", required=True, help="the release version of the CLI deb, e.g. 7.1.0")
     ios = kinds.add_parser("ios-archive", help="the iOS archive, its bundles signed ad hoc with their entitlements")
     ios.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
@@ -1030,7 +1041,7 @@ def parse_build_args(argv: Sequence[str]) -> Command:
         case "android-bundle":
             return BuildBundle(args.libs, args.out, args.source)
         case "desktop-linux":
-            image = next(image for image in DESKTOP_IMAGES if image.version == args.image)
+            image = linux_image(args.image, platform.machine())
             return BuildDesktopLinux(image, args.version, args.out, args.source)
         case _:
             return BuildIosArchive(args.art, args.out, args.source, args.install_nix)
