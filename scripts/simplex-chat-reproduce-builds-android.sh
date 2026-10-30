@@ -17,6 +17,8 @@ SIMPLEX_REPO='simplex-chat/simplex-chat'
 CMDS="curl git docker"
 
 INIT_DIR="$PWD"
+# The helper is read from beside this script: the container has the release's checkout, which may predate it.
+APK_ZIP="$(cd "$(dirname "$0")" && pwd)/android/apk-zip.py"
 TEMPDIR="$(mktemp -d)"
 PID_MAX_ORIGINAL="$(sysctl -n kernel.pid_max)"
 
@@ -118,13 +120,17 @@ check_apk() {
 verify_apk() {
   apk_name="$1"
 
-  # Release APKs are packaged by AGP (gradle :android:assembleFossRelease; AGP version is
-  # gradle.plugin.version in apps/multiplatform/gradle.properties), which zero-pads ZIP
-  # alignment. Do NOT add --pad-like-apksigner (standalone apksigner >= 35.0.0-rc1 uses
-  # the 0xd935 extra-field padding) unless AGP is bumped to a packager that uses it —
-  # otherwise apksigcopier aborts with "APK Signing Block offset < central directory offset".
+  # The rebuilt APK is padded as the release is: apksigner >= 35.0.0-rc1 pads with its 0xd935 extra field,
+  # AGP and older apksigner with zeros.
   # https://github.com/obfusk/apksigcopier?tab=readme-ov-file#what-about-signatures-made-by-apksigner-from-build-tools--3500-rc1
-  docker exec "${CONTAINER_NAME}" repro-apk zipalign --page-size 16 --replace "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT}" \
+  padding=$(docker exec -i "${CONTAINER_NAME}" python3 - padding "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_DOWNLOADED}" < "$APK_ZIP")
+  if [ "$padding" = apksigner ]; then
+    pad_like_apksigner='--pad-like-apksigner'
+  else
+    pad_like_apksigner=''
+  fi
+  # shellcheck disable=SC2086 # pad_like_apksigner is one option or none
+  docker exec "${CONTAINER_NAME}" repro-apk zipalign --page-size 16 $pad_like_apksigner --replace "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT}" \
                                                                               "${DOCKER_PATH_VERIFY}/${apk_name}.aligned"
   docker exec "${CONTAINER_NAME}" mv "${DOCKER_PATH_VERIFY}/${apk_name}.aligned" \
                                      "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT}"
@@ -132,6 +138,8 @@ verify_apk() {
   docker exec "${CONTAINER_NAME}" apksigcopier copy "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_DOWNLOADED}" \
                                                     "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT}" \
                                                     "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT_WITH_SIGNATURE}"
+  docker exec -i "${CONTAINER_NAME}" python3 - copy-v1-flags "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_DOWNLOADED}" \
+                                                            "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT_WITH_SIGNATURE}" < "$APK_ZIP"
 
   downloaded_apk_hash=$(docker exec "${CONTAINER_NAME}" sha256sum "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_DOWNLOADED}" | awk '{print $1}')
   built_apk_hash=$(docker exec "${CONTAINER_NAME}" sha256sum "${DOCKER_PATH_VERIFY}/${apk_name}.${SUFFIX_BUILT_WITH_SIGNATURE}" | awk '{print $1}')
