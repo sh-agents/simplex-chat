@@ -268,8 +268,17 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(
             build_script.parse_args(["build", "linux-libs", "--database", "postgres", "--host", "--out", "o"]),
             build_script.BuildLinuxLibs(
-                build_script.linux_image("22.04", platform.machine()), build_script.Database.POSTGRES, out, here, True
+                build_script.linux_image("22.04", platform.machine()),
+                build_script.Database.POSTGRES,
+                "dist-newstyle",
+                build_script.LibsBuilder(on_host=True),
+                out,
+                here,
             ),
+        )
+        self.assertEqual(
+            build_script.parse_args(["build", "linux-libs", "--container", "builder", "--dist-dir", "dist-lib", "--out", "o"]).builder,
+            build_script.LibsBuilder(container="builder"),
         )
         self.assertEqual(
             build_script.parse_args(["build", "desktop-macos", "--require-signing", "--out", "o"]),
@@ -993,11 +1002,29 @@ class LinuxLibsTest(unittest.TestCase):
                 mock.patch.object(build_script, "run", recorder),
                 mock.patch.object(build_script, "build_linux_lib", return_value=libs) as lib,
             ):
-                build_script.build_linux_libs(root, JAMMY, build_script.Database.POSTGRES, root, on_host=True)
+                build_script.build_linux_libs(
+                    root, JAMMY, build_script.Database.POSTGRES, "dist-newstyle", build_script.LibsBuilder(on_host=True), root
+                )
             self.assertEqual(recorder.commands, [["cabal", "update"]])
             self.assertIsInstance(lib.call_args.args[0], build_script.HostRunner)
             with zipfile.ZipFile(root / "simplex-chat-libs-linux-x86_64-postgres.zip") as z:
                 self.assertEqual(z.namelist(), ["libs/libsimplex.so"])
+
+
+    def test_running_container_is_used_and_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            libs = root / "libs"
+            libs.mkdir()
+            recorder = Recorder()
+            with (
+                mock.patch.object(build_script, "run", recorder),
+                mock.patch.object(build_script, "build_linux_lib", return_value=libs) as lib,
+            ):
+                builder = build_script.LibsBuilder(container="builder")
+                build_script.build_linux_libs(root, JAMMY, build_script.Database.SQLITE, "dist-lib", builder, root)
+            self.assertEqual(recorder.commands, [["docker", "exec", "-w", "/project", "builder", "cabal", "update"]])
+            self.assertEqual(lib.call_args.args[4], "dist-lib")
 
 
 class HostDesktopTest(unittest.TestCase):

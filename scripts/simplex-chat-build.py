@@ -9,7 +9,8 @@ Build one commit's release files, as CI does:
     simplex-chat-build.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
     simplex-chat-build.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
     simplex-chat-build.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
-    simplex-chat-build.py build linux-libs [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--host] --out <dir> [--source <dir>]
+    simplex-chat-build.py build linux-libs [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--dist-dir <dir>]
+        [--host | --container <name>] --out <dir> [--source <dir>]
     simplex-chat-build.py build desktop-macos --out <dir> [--source <dir>] [--require-signing]
     simplex-chat-build.py build desktop-windows --out <dir> [--source <dir>]
     simplex-chat-build.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
@@ -444,12 +445,23 @@ class Container:
         run_args: Sequence[str] = (),
     ) -> None:
         self.name = f"simplex-reproduce-{os.getpid()}-{id(self)}"
+        self.owned = True
         self.source = source
         self.mounts = dict(mounts)
         self.build_args = {"USER_UID": str(os.getuid()), "USER_GID": str(os.getgid()), **(build_args or {})}
         self.run_args = list(run_args)
 
+    @classmethod
+    def running(cls, name: str, source: Path) -> "Container":
+        """A container that runs already, such as CI's builder, with source at /project; kept on exit."""
+        container = cls(source, {source: PROJECT})
+        container.name = name
+        container.owned = False
+        return container
+
     def __enter__(self) -> "Container":
+        if not self.owned:
+            return self
         build: list[str | Path] = ["docker", "build", "--no-cache", "-f", self.source / "Dockerfile.build", "-t", self.name]
         for key, value in self.build_args.items():
             build += ["--build-arg", f"{key}={value}"]
@@ -467,7 +479,8 @@ class Container:
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
     ) -> None:
-        self.remove()
+        if self.owned:
+            self.remove()
 
     def remove(self) -> None:
         run(["docker", "rm", "--force", self.name], check=False, capture=True)
@@ -1084,18 +1097,29 @@ def build_desktop_linux_with_tag_scripts(
         shutil.copy(single_file(release, "*imple*.AppImage"), out / files[3])
 
 
-def build_linux_libs(source: Path, image: UbuntuImage, database: Database, out: Path, on_host: bool) -> None:
-    """The library release: the desktop libraries without VLC, built in the image's container or on this machine."""
+@dataclass(frozen=True, slots=True)
+class LibsBuilder:
+    """Where the library release is built: this machine, a running container, or else a new one of the image."""
+
+    on_host: bool = False
+    container: str | None = None
+
+
+def build_linux_libs(source: Path, image: UbuntuImage, database: Database, dist_dir: str, builder: LibsBuilder, out: Path) -> None:
+    """The library release: the desktop libraries without VLC."""
     (source / "cabal.project.local").write_text(DESKTOP_CABAL_LOCAL)
-    if on_host:
-        host = HostRunner()
-        host.run(Step(("cabal", "update"), host.path(source)))
-        libs = build_linux_lib(host, source, image.arch, database)
-    else:
-        normalize_permissions(source)
-        with tempfile.TemporaryDirectory() as tmp, linux_container(source, image, Path(tmp).resolve()) as container:
-            container.run(Step(("cabal", "update"), container.path(source)))
-            libs = build_linux_lib(container, source, image.arch, database)
+    with contextlib.ExitStack() as stack:
+        runner: Runner
+        if builder.on_host:
+            runner = HostRunner()
+        elif builder.container:
+            runner = Container.running(builder.container, source)
+        else:
+            normalize_permissions(source)
+            work = Path(stack.enter_context(tempfile.TemporaryDirectory())).resolve()
+            runner = stack.enter_context(linux_container(source, image, work))
+        runner.run(Step(("cabal", "update"), runner.path(source)))
+        libs = build_linux_lib(runner, source, image.arch, database, dist_dir)
     zip_desktop_libs(libs, [], out / linux_libs_zip(image.arch, database))
 
 
@@ -1700,9 +1724,10 @@ class BuildDesktopLinux:
 class BuildLinuxLibs:
     image: UbuntuImage
     database: Database
+    dist_dir: str
+    builder: LibsBuilder
     out: Path
     source: Path
-    on_host: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1771,9 +1796,9 @@ def build(command: Build) -> None:
         case BuildDesktopLinux(image=image, version=version):
             require_tools(["docker"])
             build_desktop_linux(source, image, version, out)
-        case BuildLinuxLibs(image=image, database=database, on_host=on_host):
-            require_tools(["cabal", "ghc", "patchelf", "ldd"] if on_host else ["docker"])
-            build_linux_libs(source, image, database, out, on_host)
+        case BuildLinuxLibs(image=image, database=database, dist_dir=dist_dir, builder=builder):
+            require_tools(["cabal", "ghc", "patchelf", "ldd"] if builder.on_host else ["docker"])
+            build_linux_libs(source, image, database, dist_dir, builder, out)
         case BuildDesktopMacos(require_signing=require_signing):
             require_tools(["cabal", "ghc", "perl", "make", "otool"])
             build_desktop_macos(source, out, require_signing)
@@ -1810,7 +1835,10 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     libs = kinds.add_parser("linux-libs", help="the Linux core library release, without VLC")
     libs.add_argument("--ubuntu", choices=sorted({image.version for image in DESKTOP_IMAGES}), default=APPIMAGE_IMAGE)
     libs.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
-    libs.add_argument("--host", action="store_true", help="build on this machine, with its GHC, rather than in Docker")
+    libs.add_argument("--dist-dir", default="dist-newstyle", help="cabal's build directory")
+    where = libs.add_mutually_exclusive_group()
+    where.add_argument("--host", action="store_true", help="build on this machine, with its GHC, rather than in Docker")
+    where.add_argument("--container", help="build in this running container, which has the source at /project")
     macos = kinds.add_parser("desktop-macos", help="this Mac's CLI, dmg and core libraries, signed when APPLE_SIMPLEX_* are set")
     macos.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
     windows = kinds.add_parser("desktop-windows", help="the Windows CLI, msi and core libraries, in an MSYS2 UCRT64 shell")
@@ -1830,7 +1858,9 @@ def parse_build_args(argv: Sequence[str]) -> Command:
             image = linux_image(args.image, platform.machine())
             return BuildDesktopLinux(image, args.version, args.out, args.source)
         case "linux-libs":
-            return BuildLinuxLibs(linux_image(args.ubuntu, platform.machine()), args.database, args.out, args.source, args.host)
+            image = linux_image(args.ubuntu, platform.machine())
+            builder = LibsBuilder(args.host, args.container)
+            return BuildLinuxLibs(image, args.database, args.dist_dir, builder, args.out, args.source)
         case "desktop-macos":
             return BuildDesktopMacos(args.out, args.source, args.require_signing)
         case "desktop-windows":
