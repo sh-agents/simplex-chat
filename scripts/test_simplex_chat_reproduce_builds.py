@@ -4,6 +4,7 @@ import importlib.util
 import io
 import pathlib
 import struct
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -13,6 +14,8 @@ spec = importlib.util.spec_from_file_location(
     "reproduce", pathlib.Path(__file__).with_name("simplex-chat-reproduce-builds.py")
 )
 reproduce = importlib.util.module_from_spec(spec)
+# dataclasses look the module up by name to resolve its postponed annotations
+sys.modules[spec.name] = reproduce
 spec.loader.exec_module(reproduce)
 
 UTF8_FLAG = 0x800
@@ -118,19 +121,23 @@ class ReleaseDetailsTest(unittest.TestCase):
 
     def test_android_build_tag(self):
         tags = ["v6.4.0", "v6.4.0-armv7a", "v7.1.0"]
-        self.assertEqual(reproduce.android_build_tag("v6.4.0", tags, "armv7a"), "v6.4.0-armv7a")
-        self.assertEqual(reproduce.android_build_tag("v6.4.0", tags, "aarch64"), "v6.4.0")
-        self.assertEqual(reproduce.android_build_tag("v7.1.0", tags, "armv7a"), "v7.1.0")
+        self.assertEqual(reproduce.android_build_tag("v6.4.0", tags, reproduce.Arch.ARMV7A), "v6.4.0-armv7a")
+        self.assertEqual(reproduce.android_build_tag("v6.4.0", tags, reproduce.Arch.AARCH64), "v6.4.0")
+        self.assertEqual(reproduce.android_build_tag("v7.1.0", tags, reproduce.Arch.ARMV7A), "v7.1.0")
+
+    def test_arch_abis(self):
+        self.assertEqual([a.abi for a in reproduce.Arch], ["arm64-v8a", "armeabi-v7a"])
+        self.assertEqual(str(reproduce.Arch.ARMV7A), "armv7a")
 
     def test_android_vercode(self):
         with tempfile.TemporaryDirectory() as tmp:
             props = pathlib.Path(tmp) / "apps/multiplatform/gradle.properties"
             props.parent.mkdir(parents=True)
             props.write_text("android.version_name=7.1-beta.7\nandroid.version_code=387\n")
-            self.assertEqual(reproduce.android_vercode(tmp), "387")
+            self.assertEqual(reproduce.android_vercode(pathlib.Path(tmp)), "387")
             props.write_text("android.version_name=7.1\n")
             with self.assertRaises(reproduce.ReproduceError):
-                reproduce.android_vercode(tmp)
+                reproduce.android_vercode(pathlib.Path(tmp))
 
 
 class ChecksumsTest(unittest.TestCase):
@@ -153,33 +160,46 @@ class ChecksumsTest(unittest.TestCase):
                 (pathlib.Path(built) / name).write_bytes(data)
             (pathlib.Path(released) / "same").write_bytes(b"1")
             (pathlib.Path(released) / "differs").write_bytes(b"x")
-            self.assertEqual(reproduce.compare_dirs(built, released), ["differs", "missing"])
+            self.assertEqual(reproduce.compare_dirs(pathlib.Path(built), pathlib.Path(released)), ["differs", "missing"])
 
 
 class ParseArgsTest(unittest.TestCase):
     def test_reproduce_defaults_to_desktop_and_both_arches(self):
-        args = reproduce.parse_args(["v7.1.0"])
-        self.assertIs(args.command, reproduce.reproduce)
-        self.assertEqual((args.tag, args.targets, args.arches, args.nix_cache), ("v7.1.0", [], ["aarch64", "armv7a"], False))
+        self.assertEqual(
+            reproduce.parse_args(["v7.1.0"]),
+            reproduce.Reproduce("v7.1.0", (reproduce.Target.DESKTOP,), (reproduce.Arch.AARCH64, reproduce.Arch.ARMV7A), False),
+        )
 
     def test_reproduce_android_with_options(self):
-        args = reproduce.parse_args(["v7.1.0", "android", "--arches", "armv7a", "--nix-cache"])
-        self.assertEqual((args.targets, args.arches, args.nix_cache), (["android"], ["armv7a"], True))
+        self.assertEqual(
+            reproduce.parse_args(["v7.1.0", "android", "--arches", "armv7a", "--nix-cache"]),
+            reproduce.Reproduce("v7.1.0", (reproduce.Target.ANDROID,), (reproduce.Arch.ARMV7A,), True),
+        )
 
-    def test_reproduce_rejects_unknown_arch(self):
-        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
-            reproduce.parse_args(["v7.1.0", "android", "--arches", "x86"])
+    def test_reproduce_rejects_unknown_arch_and_target(self):
+        for argv in (["v7.1.0", "android", "--arches", "x86"], ["v7.1.0", "ios"]):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                reproduce.parse_args(argv)
 
     def test_build_apk(self):
-        args = reproduce.parse_args(["build", "android-apk", "armv7a", "--out", "o", "--nix-cache"])
-        self.assertIs(args.command, reproduce.build)
-        self.assertEqual((args.kind, args.arch, args.out, args.source, args.nix_cache), ("android-apk", "armv7a", "o", ".", True))
+        self.assertEqual(
+            reproduce.parse_args(["build", "android-apk", "armv7a", "--out", "o", "--nix-cache"]),
+            reproduce.BuildApk(reproduce.Arch.ARMV7A, pathlib.Path("o"), pathlib.Path("."), True),
+        )
 
     def test_build_bundle_needs_libs(self):
-        args = reproduce.parse_args(["build", "android-bundle", "--libs", "l", "--out", "o", "--source", "s"])
-        self.assertEqual((args.kind, args.libs, args.out, args.source), ("android-bundle", "l", "o", "s"))
+        self.assertEqual(
+            reproduce.parse_args(["build", "android-bundle", "--libs", "l", "--out", "o", "--source", "s"]),
+            reproduce.BuildBundle(pathlib.Path("l"), pathlib.Path("o"), pathlib.Path("s")),
+        )
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             reproduce.parse_args(["build", "android-bundle", "--out", "o"])
+
+    def test_build_ios_archive(self):
+        self.assertEqual(
+            reproduce.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
+            reproduce.BuildIosArchive(pathlib.Path("a"), pathlib.Path("o"), pathlib.Path("."), True),
+        )
 
 
 class Recorder:
@@ -204,7 +224,8 @@ class ContainerTest(unittest.TestCase):
     def test_lifecycle_and_exec(self):
         recorder = Recorder()
         with mock.patch.object(reproduce, "run", recorder):
-            with reproduce.Container("/src", {"/src": "/project"}, {"TAG": "22.04"}, ["--cap-add", "SYS_ADMIN"]) as c:
+            src = pathlib.Path("/src")
+            with reproduce.Container(src, {src: "/project"}, {"TAG": "22.04"}, ["--cap-add", "SYS_ADMIN"]) as c:
                 c.exec("echo hi", env={"A": "1"}, user="root")
         build, start, exec_, rm, rmi = recorder.commands
         self.assertEqual(build[:4], ["docker", "build", "--no-cache", "-f"])
@@ -218,7 +239,7 @@ class ContainerTest(unittest.TestCase):
     def test_image_is_removed_when_the_container_fails_to_start(self):
         recorder = Recorder(fail_once=["docker run"])
         with mock.patch.object(reproduce, "run", recorder), self.assertRaises(reproduce.ReproduceError):
-            with reproduce.Container("/src", {}):
+            with reproduce.Container(pathlib.Path("/src"), {}):
                 pass
         self.assertEqual(recorder.commands[-1][:3], ["docker", "image", "rm"])
 
@@ -237,7 +258,7 @@ class AndroidBuildTest(unittest.TestCase):
     def test_armv7a_container_sets_pid_max_in_its_namespace(self):
         recorder = Recorder()
         with mock.patch.object(reproduce, "run", recorder):
-            with reproduce.android_container(self.source, self.tmp.name, set_pid_max=True):
+            with reproduce.android_container(self.source, pathlib.Path(self.tmp.name), set_pid_max=True):
                 pass
         start = next(c for c in recorder.commands if c[1] == "run")
         self.assertIn("systempaths=unconfined", start)
@@ -248,7 +269,7 @@ class AndroidBuildTest(unittest.TestCase):
         recorder = Recorder(fail_once=["build-android.sh"])
         with mock.patch.object(reproduce, "run", recorder), mock.patch.object(reproduce, "log"):
             container = reproduce.Container(self.source, {})
-            reproduce.build_apk(container, self.source, "armv7a", "simplex-armv7a.apk", nix_cache=True, keep_libs=True)
+            reproduce.build_apk(container, self.source, reproduce.Arch.ARMV7A, "simplex-armv7a.apk", nix_cache=True, keep_libs=True)
         builds = [c for c in recorder.commands if "build-android.sh" in c[-1]]
         self.assertEqual(len(builds), 2)
         self.assertIn("VERCODE=387", builds[0])
@@ -259,29 +280,30 @@ class AndroidBuildTest(unittest.TestCase):
     def test_apk_build_without_cache_or_libraries(self):
         recorder = Recorder()
         with mock.patch.object(reproduce, "run", recorder):
-            reproduce.build_apk(reproduce.Container(self.source, {}), self.source, "aarch64", "x.apk", False, False)
+            reproduce.build_apk(reproduce.Container(self.source, {}), self.source, reproduce.Arch.AARCH64, "x.apk", False, False)
         self.assertEqual(len(recorder.commands), 1)
         self.assertFalse(any(a.startswith("NIX_CONFIG") for a in recorder.commands[0]))
 
-    def test_bundle_unzips_both_arches_from_any_subdirectory(self):
+    def test_bundle_extracts_both_arches_from_any_subdirectory(self):
         libs = pathlib.Path(self.tmp.name) / "libs"
-        for arch in ("aarch64", "armv7a"):
-            (libs / f"android-{arch}-unsigned").mkdir(parents=True)
-            for lib in ("libsimplex", "libsupport"):
-                (libs / f"android-{arch}-unsigned" / f"pkg-{arch}-android-{lib}.zip").write_bytes(b"zip")
+        for arch in reproduce.Arch:
+            directory = libs / f"android-{arch}-unsigned"
+            directory.mkdir(parents=True)
+            for lib in reproduce.ANDROID_LIBS:
+                with zipfile.ZipFile(directory / f"pkg-{arch}-android-{lib}.zip", "w") as z:
+                    z.writestr(f"{lib}.so", f"{arch} {lib}")
         recorder = Recorder()
         with mock.patch.object(reproduce, "run", recorder):
             reproduce.build_bundle(reproduce.Container(self.source, {}), self.source, libs)
-        unzips = [c for c in recorder.commands if c[0] == "unzip"]
-        self.assertEqual(len(unzips), 4)
-        self.assertTrue(unzips[2][-1].endswith("libs/armeabi-v7a"))
+        extracted = self.source / reproduce.ANDROID_LIBS_DIR / "armeabi-v7a/libsupport.so"
+        self.assertEqual(extracted.read_text(), "armv7a libsupport")
         self.assertIn(":android:bundleGoogleRelease", recorder.commands[-1][-1])
         local_properties = (self.source / "apps/multiplatform/local.properties").read_text()
         self.assertEqual(local_properties, "compression.level=5\nsimplex.assets.dir=../../assets\n")
 
     def test_bundle_fails_without_a_library(self):
         with self.assertRaises(reproduce.ReproduceError):
-            reproduce.build_bundle(reproduce.Container(self.source, {}), self.source, pathlib.Path(self.tmp.name))
+            reproduce.build_bundle(reproduce.Container(self.source, {}), self.source, pathlib.Path(self.tmp.name) / "none")
 
 
 class VerifyApkTest(unittest.TestCase):
@@ -295,7 +317,7 @@ class VerifyApkTest(unittest.TestCase):
                 return recorder(args, **kwargs)
 
             with mock.patch.object(reproduce, "run", fake_run):
-                result = reproduce.verify_apk(reproduce.Container(out, {}), out, "rel.apk", "built.apk")
+                result = reproduce.verify_apk(reproduce.Container(pathlib.Path(out), {}), pathlib.Path(out), "rel.apk", "built.apk")
             self.assertEqual("--pad-like-apksigner" in recorder.commands[0][-1], expect_pad)
             return result
 
@@ -500,11 +522,37 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(reproduce, "reproduce", side_effect=reproduce.ReproduceError("boom")), mock.patch(
             "sys.stderr", new_callable=io.StringIO
         ) as err:
-            args = reproduce.parse_args(["v7.1.0"])
-            with mock.patch.object(reproduce, "parse_args", return_value=args):
-                args.command = reproduce.reproduce
-                self.assertEqual(reproduce.main(["v7.1.0"]), 1)
+            self.assertEqual(reproduce.main(["v7.1.0"]), 1)
         self.assertIn("error: boom", err.getvalue())
+
+    def test_commands_dispatch(self):
+        with mock.patch.object(reproduce, "build_android", return_value=0) as android, mock.patch.object(
+            reproduce, "build_ios", return_value=0
+        ) as ios:
+            self.assertEqual(reproduce.main(["build", "android-bundle", "--libs", "l", "--out", "o"]), 0)
+            self.assertEqual(reproduce.main(["build", "ios-archive", "--art", "a", "--out", "o"]), 0)
+        self.assertIsInstance(android.call_args.args[0], reproduce.BuildBundle)
+        self.assertIsInstance(ios.call_args.args[0], reproduce.BuildIosArchive)
+
+    def test_missing_tools_are_named(self):
+        with mock.patch.object(reproduce.shutil, "which", return_value=None), self.assertRaises(reproduce.ReproduceError) as e:
+            reproduce.require_tools(["git", "docker"])
+        self.assertIn("git, docker", str(e.exception))
+
+    def test_unreachable_docker_daemon(self):
+        with mock.patch.object(reproduce.shutil, "which", return_value="/usr/bin/docker"), mock.patch.object(
+            reproduce.subprocess, "run", return_value=mock.Mock(returncode=1)
+        ), self.assertRaises(reproduce.ReproduceError) as e:
+            reproduce.require_tools(["docker"])
+        self.assertIn("daemon", str(e.exception))
+
+    def test_ios_needs_nix_unless_installing_it(self):
+        command = reproduce.BuildIosArchive(pathlib.Path("a"), pathlib.Path("o"), pathlib.Path("."), False)
+        with mock.patch.object(reproduce, "require_tools"), mock.patch.object(
+            reproduce, "NIX_PROFILE", "/nonexistent/nix-daemon.sh"
+        ), self.assertRaises(reproduce.ReproduceError) as e:
+            reproduce.build_ios(command)
+        self.assertIn("--install-nix", str(e.exception))
 
 
 if __name__ == "__main__":
