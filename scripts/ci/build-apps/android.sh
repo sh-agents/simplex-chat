@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/ci/build-apps/android.sh apk <aarch64|armv7a> <output dir>
 #     the deterministic APK of scripts/android/build-android.sh, as simplex-<arch>.apk, and the two core library zips
-#   scripts/ci/build-apps/android.sh bundle <dir with both arches' core library zips> <output dir>
+#   scripts/ci/build-apps/android.sh bundle <dir with both arches' core library zips, in any subdirectory> <output dir>
 #     the Play bundle (google flavor) as simplex.aab
 # Each output dir also gets SHA256SUMS.
 
@@ -63,12 +63,15 @@ build_apk() {
 }
 
 build_bundle() {
-  local libs=$1 arch android_abi
+  local libs=$1 arch android_abi lib zip
   for arch in aarch64 armv7a; do
     android_abi=$(abi "$arch")
     mkdir -p "$libs_dir/$android_abi"
-    unzip -o "$libs/pkg-$arch-android-libsimplex.zip" -d "$libs_dir/$android_abi"
-    unzip -o "$libs/pkg-$arch-android-libsupport.zip" -d "$libs_dir/$android_abi"
+    for lib in libsimplex libsupport; do
+      zip=$(find "$libs" -name "pkg-$arch-android-$lib.zip" -print -quit)
+      [ -n "$zip" ] || { echo "pkg-$arch-android-$lib.zip not found in $libs" >&2; exit 1; }
+      unzip -o "$zip" -d "$libs_dir/$android_abi"
+    done
   done
   start_container
   docker exec "$container" sh -eu -c '

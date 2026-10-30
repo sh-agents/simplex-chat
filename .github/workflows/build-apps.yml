@@ -85,7 +85,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: android-*-unsigned
-          merge-multiple: true
           path: ${{ runner.temp }}/libs
 
       - name: Build bundle
