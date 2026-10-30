@@ -11,7 +11,7 @@ Build one commit's release files, as CI does; desktop, libs and openssl build fo
     simplex-chat-build.py build desktop windows --out <dir>
     simplex-chat-build.py build libs linux [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--dist-dir <dir>]
         [--host | --container <name>] --out <dir>
-    simplex-chat-build.py build libs macos [--require-signing] --out <dir>
+    simplex-chat-build.py build libs macos [--database <sqlite|postgres>] [--require-signing] --out <dir>
     simplex-chat-build.py build libs windows --out <dir>
     simplex-chat-build.py build openssl <macos|windows> --out <dir>
     simplex-chat-build.py build apk <aarch64|armv7a> [--nix-cache] --out <dir>
@@ -115,7 +115,7 @@ APPIMAGE_IMAGE = "22.04"
 DESKTOP_CABAL_LOCAL = "ignore-project: False\npackage direct-sqlcipher\n    flags: +openssl"
 DESKTOP_ENV = {"ASSETS_DIR": "../../assets"}
 DESKTOP_RELEASE_DIR = "apps/multiplatform/release/main"
-SOURCE_DATE_EPOCH = "1704067200"  # as make-deb-linux.sh and make-appimage-linux.sh set it
+SOURCE_DATE_EPOCH = "1704067200"  # the desktop releases' timestamps since v5.4
 
 # The OpenSSL bundled with the apps; pinOpenssl in flake.nix pins the same for the Android and iOS core libraries
 OPENSSL_VERSION = "3.5.9"
@@ -1286,7 +1286,7 @@ def zip_desktop_libs(libs: Path, extra: Sequence[Path], target: Path) -> None:
 
 
 def apple_signing(require: bool) -> bool:
-    """Whether the APPLE_SIGNING_ENV variables, which build-desktop-mac.sh and sign-libs-mac.sh read, are all set."""
+    """Whether the APPLE_SIGNING_ENV variables, which the keychain, signing and notarization read, are all set."""
     present = [name for name in APPLE_SIGNING_ENV if os.environ.get(name)]
     if len(present) == len(APPLE_SIGNING_ENV):
         return True
@@ -1491,26 +1491,31 @@ def package_dmg(source: Path, keychain: Path | None) -> Path:
     return single_file(source / DESKTOP_RELEASE_DIR / "dmg", "SimpleX-*.dmg")
 
 
-def release_macos_libs(source: Path, openssl: OpenSsl, keychain: Path | None, work: Path, out: Path) -> Path:
-    """The library release, signed and notarized with the keychain; returns the libraries directory of the app."""
+def release_macos_libs(
+    source: Path, openssl: OpenSsl, database: Database, keychain: Path | None, work: Path, out: Path
+) -> Path:
+    """The library release, signed and notarized with the keychain; returns the libraries directory of the app,
+    linked for its Gradle build."""
     host = macos_desktop()
     # bundle_mac_libcrypto copies the libcrypto that the libraries link into the app
     (source / "cabal.project.local").write_text(openssl.cabal_local())
-    libs = build_mac_lib(source, host.arch, Database.SQLITE, work)
+    libs = build_mac_lib(source, host.arch, database, work)
+    link_desktop_libs(source, host.libs_dir, f"macos-{COMPOSE_ARCHES[host.arch]}")
     released = work / "libs"
     shutil.copytree(libs, released)
     if keychain:
         sign_mac_libs(released, keychain, work)
-    zip_desktop_libs(released, [], out / host.libs)
+    name = host.libs.replace(".zip", "-postgres.zip") if database == Database.POSTGRES else host.libs
+    zip_desktop_libs(released, [], out / name)
     return libs
 
 
-def build_macos_libs(source: Path, out: Path, require_signing: bool) -> None:
+def build_macos_libs(source: Path, database: Database, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
-        release_macos_libs(source, host_openssl(work), keychain, work, out)
+        release_macos_libs(source, host_openssl(work), database, keychain, work, out)
 
 
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
@@ -1524,9 +1529,8 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         cli = build_host_cli(source, static.cabal_local())
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        libs = release_macos_libs(source, openssl, keychain, work, out)
+        libs = release_macos_libs(source, openssl, Database.SQLITE, keychain, work, out)
         add_vlc_mac(libs, host.arch, work)
-        link_desktop_libs(source, host.libs_dir, f"macos-{COMPOSE_ARCHES[host.arch]}")
         shutil.copy(package_dmg(source, keychain), out / host.desktop)
 
 
@@ -1812,6 +1816,7 @@ class BuildLinuxLibs:
 
 @dataclass(frozen=True, slots=True)
 class BuildMacosLibs:
+    database: Database
     out: Path
     source: Path
     require_signing: bool
@@ -1912,10 +1917,10 @@ def build(command: Build) -> None:
             require_platform(Platform.LINUX)
             require_tools(["cabal", "ghc", "patchelf", "ldd"] if builder.on_host else ["docker"])
             build_linux_libs(source, image, database, dist_dir, builder, out)
-        case BuildMacosLibs(require_signing=require_signing):
+        case BuildMacosLibs(database=database, require_signing=require_signing):
             require_platform(Platform.MACOS)
             require_tools(["cabal", "ghc", "perl", "make", "otool", "install_name_tool"])
-            build_macos_libs(source, out, require_signing)
+            build_macos_libs(source, database, out, require_signing)
         case BuildWindowsLibs():
             require_platform(Platform.WINDOWS)
             require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "dlltool"])
@@ -1971,12 +1976,13 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     )
     libs_linux = libs.add_parser("linux", parents=[common], help="without VLC, in Docker unless --host or --container")
     libs_linux.add_argument("--ubuntu", choices=ubuntu_versions, default=APPIMAGE_IMAGE)
-    libs_linux.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
     libs_linux.add_argument("--dist-dir", default="dist-newstyle", help="cabal's build directory")
     where = libs_linux.add_mutually_exclusive_group()
     where.add_argument("--host", action="store_true", help="build on this machine, with its GHC, rather than in Docker")
     where.add_argument("--container", help="build in this running container, which has the source at /project")
-    libs_macos = libs.add_parser("macos", parents=[common], help="signed when APPLE_SIMPLEX_* are set")
+    libs_macos = libs.add_parser("macos", parents=[common], help="signed when APPLE_SIMPLEX_* are set, and linked for the app")
+    for platform_libs in (libs_linux, libs_macos):
+        platform_libs.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
     libs.add_parser("windows", parents=[common], help="in an MSYS2 UCRT64 shell")
     for signed in (desktop_macos, libs_macos):
         signed.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
@@ -2009,7 +2015,7 @@ def parse_build_args(argv: Sequence[str]) -> Command:
             builder = LibsBuilder(args.host, args.container)
             return BuildLinuxLibs(image, args.database, args.dist_dir, builder, args.out, args.source)
         case "libs", Platform.MACOS:
-            return BuildMacosLibs(args.out, args.source, args.require_signing)
+            return BuildMacosLibs(args.database, args.out, args.source, args.require_signing)
         case "libs", Platform.WINDOWS:
             return BuildWindowsLibs(args.out, args.source)
         case "openssl", Platform() as openssl_platform:

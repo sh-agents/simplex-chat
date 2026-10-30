@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Unpacks the core package from build-core.sh where scripts/desktop/build-lib-linux.sh leaves the libraries,
+# Unpacks the core package from build-core.sh where scripts/simplex-chat-build.py leaves the libraries,
 # and links them as the desktop app's resources, as that script does.
 # Usage: scripts/ci/desktop-linux/install-core.sh <core .tar.gz>
 

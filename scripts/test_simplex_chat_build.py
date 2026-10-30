@@ -287,7 +287,7 @@ class ParseArgsTest(unittest.TestCase):
         )
         self.assertEqual(
             build_script.parse_args(["build", "libs", "macos", "--require-signing", "--out", "o"]),
-            build_script.BuildMacosLibs(out, here, True),
+            build_script.BuildMacosLibs(build_script.Database.SQLITE, out, here, True),
         )
         self.assertEqual(build_script.parse_args(["build", "libs", "windows", "--out", "o"]), build_script.BuildWindowsLibs(out, here))
         self.assertEqual(

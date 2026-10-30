@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates curl git libgmp3-dev libnuma-dev \
-        libsqlite3-dev libssl-dev llvm patchelf pkg-config zlib1g-dev && \
+        libsqlite3-dev libssl-dev llvm patchelf pkg-config unzip zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 
 ENV BOOTSTRAP_HASKELL_NONINTERACTIVE=1 \
@@ -26,33 +26,30 @@ ENV BOOTSTRAP_HASKELL_NONINTERACTIVE=1 \
     BOOTSTRAP_HASKELL_INSTALL_NO_STACK=true \
     BOOTSTRAP_HASKELL_INSTALL_NO_STACK_HOOK=true
 RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
-ENV PATH="/root/.ghcup/bin:/root/.cabal/bin:$PATH"
+ENV PATH="/root/.ghcup/bin:/root/.cabal/bin:/root/.local/bin:$PATH"
 ENV CABAL_DIR=/root/.cabal
+# simplex-chat-build.py needs Python 3.12, newer than this Ubuntu's
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.12
 
 WORKDIR /src
 COPY cabal.project simplex-chat.cabal README.md PRIVACY.md ./
 COPY scripts/cabal.project.local.linux ./cabal.project.local
 # The build script checks the export lists in these.
 COPY libsimplex.dll.def flake.nix ./
-COPY scripts/desktop ./scripts/desktop
+COPY scripts/simplex-chat-build.py ./scripts/
 COPY src ./src
 
-# VLC is only for the desktop app.
-RUN sed -i '/prepare-vlc-linux.sh/d' scripts/desktop/build-lib-linux.sh
-
-# Other versions' build trees are removed: the script's simplex-chat-* glob
-# fails with "cd: too many arguments" when the cache holds more than one.
+# Other versions' build trees are removed: the build script expects one
+# simplex-chat-* build directory. The library zip holds libs/ with the
+# libraries, unzipped to /libs.
 RUN --mount=type=cache,target=/root/.cabal \
     --mount=type=cache,target=/src/dist-newstyle \
     set -eu; \
     ver=$(sed -n 's/^version: *//p' simplex-chat.cabal | tr -d '[:space:]'); \
-    build_dir=dist-newstyle/build/$(uname -m)-linux/ghc-${GHC}/simplex-chat-$ver/build; \
     find dist-newstyle/build -maxdepth 3 -type d -name 'simplex-chat-*' \
       ! -path "*/simplex-chat-$ver" -exec rm -rf {} + 2>/dev/null || true; \
-    cabal update; \
-    scripts/desktop/build-lib-linux.sh sqlite; \
-    mkdir -p /libs; \
-    cp "$build_dir"/libsimplex.so "$build_dir"/deps/* /libs/
+    uv run --python 3.12 scripts/simplex-chat-build.py build libs linux --host --out /release; \
+    unzip -o /release/simplex-chat-libs-linux-*.zip -d /
 
 # --------------------------------------------------------------------------- #
 # build
