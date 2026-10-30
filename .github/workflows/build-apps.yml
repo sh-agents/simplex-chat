@@ -114,8 +114,16 @@ jobs:
       - name: Use the macOS 26 SDK
         run: scripts/ci/ios-sim/use-macos26-sdk.sh
 
+      # the brand assets of release builds are in this private repository
+      - name: Checkout brand assets
+        uses: actions/checkout@v6
+        with:
+          repository: simplex-chat/simplex-chat-art
+          ssh-key: ${{ secrets.SIMPLEX_ART_SSH_KEY }}
+          path: simplex-chat-art
+
       - name: Build archive
-        run: scripts/ci/build-apps/ios.sh "$RUNNER_TEMP/out"
+        run: scripts/ci/build-apps/ios.sh "$RUNNER_TEMP/out" simplex-chat-art
 
       - name: Upload archive
         uses: actions/upload-artifact@v7

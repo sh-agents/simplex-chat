@@ -2,7 +2,7 @@
 
 # Builds the iOS app archive for signing at export, with the core library releases ship: the flake's
 # aarch64-darwin-ios:lib:simplex-chat, built with Nix.
-# Usage: scripts/ci/build-apps/ios.sh <output dir>
+# Usage: scripts/ci/build-apps/ios.sh <output dir> <simplex-chat-art checkout>
 # The output dir gets SimpleX.xcarchive.zip and SHA256SUMS.
 
 set -euo pipefail
@@ -14,8 +14,11 @@ core_job='.#hydraJobs.aarch64-darwin.aarch64-darwin-ios:lib:simplex-chat'
 core_zip=pkg-ios-aarch64-swift-json.zip
 project=apps/ios/SimpleX.xcodeproj
 scheme="SimpleX (iOS)"
+[ $# -eq 2 ] || { echo "usage: $0 <output dir> <simplex-chat-art checkout>" >&2; exit 1; }
+[ -d "$2/ios/Assets.xcassets" ] || { echo "no ios/Assets.xcassets in $2" >&2; exit 1; }
 mkdir -p "$1"
 out=$(cd "$1" && pwd)
+art=$(cd "$2" && pwd)
 work=$(mktemp -d)
 archive=$work/SimpleX.xcarchive
 
@@ -47,7 +50,8 @@ check_minimum_versions() {
   for lib in apps/ios/Libraries/ios/*.a; do
     newest=$(otool -l "$lib" | awk '$1 == "minos" {print $2}' | sort -V | tail -1)
     echo "$lib: newest minimum version ${newest:-none}"
-    if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$newest" "$target" | sort -V | tail -1)" != "$target" ]; then
+    [ -n "$newest" ] || { echo "$lib has no object with a minimum version" >&2; exit 1; }
+    if [ "$(printf '%s\n%s\n' "$newest" "$target" | sort -V | tail -1)" != "$target" ]; then
       echo "$lib has objects for iOS $newest, newer than the deployment target $target" >&2
       exit 1
     fi
@@ -87,6 +91,16 @@ cp "$work/core/$core_zip" ~/Downloads/
 scripts/ci/ios-sim/prepare-libs.sh
 scripts/ios/update-pbxproj.sh
 
+# The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on SIMPLEX_ASSETS.
+# copy-assets.sh runs before the build, as its build phase runs after the extensions' catalogs are compiled.
+# shellcheck disable=SC2016 # $(inherited) is xcconfig syntax, written as is
+printf 'SIMPLEX_ASSETS_DIR = %s\nSWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS\n' "$art" > apps/ios/Local.xcconfig
+scripts/ios/copy-assets.sh "$art"
+if ! ls apps/ios/Shared/SimpleXAssets.xcassets/*.imageset > /dev/null 2>&1; then
+  echo "copy-assets.sh copied no imagesets from $art" >&2
+  exit 1
+fi
+
 xcodebuild -showBuildSettings -project "$project" -scheme "$scheme" -configuration Release > "$work/build-settings" 2>/dev/null
 # $(AppIdentifierPrefix) is the team id: simplex.chat's apple-app-site-association lists 5NN7GUYB6T.chat.simplex.app.
 team=$(build_setting DEVELOPMENT_TEAM)
@@ -116,6 +130,8 @@ for appex in "$app"/PlugIns/*.appex; do
 done
 sign_bundle "$app" "apps/ios/$scheme.entitlements"
 codesign --verify --deep --strict "$app"
+# the team Xcode records when it signs the archive, which Organizer shows and distributes for
+plutil -replace ApplicationProperties.Team -string "$team" "$archive/Info.plist"
 
 ditto -c -k --keepParent "$archive" "$out/SimpleX.xcarchive.zip"
 (cd "$out" && shasum -a 256 SimpleX.xcarchive.zip | tee SHA256SUMS)
