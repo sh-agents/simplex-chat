@@ -865,6 +865,52 @@ class DesktopTest(unittest.TestCase):
         self.assertIn("--openssldir=/etc/ssl", configure)
         self.assertIn("flags: +openssl", (self.source / "cabal.project.local").read_text())
 
+    def test_release_made_before_this_script_is_built_by_its_own_scripts(self):
+        out, work = self.root / "out", self.root / "work"
+        out.mkdir()
+        work.mkdir()
+        for script in (build_script.TAG_CLI_DEB_SCRIPT, build_script.TAG_DESKTOP_DEB_SCRIPT, build_script.TAG_APPIMAGE_SCRIPT):
+            (self.source / script).parent.mkdir(parents=True, exist_ok=True)
+            (self.source / script).write_text("#!/bin/sh\n")
+        release = self.source / build_script.DESKTOP_RELEASE_DIR
+
+        def run_script(step):
+            name = pathlib.Path(step.argv[0]).name
+            if name == "build-cli-deb.sh":
+                pathlib.Path(step.argv[3]).mkdir()
+                (pathlib.Path(step.argv[3]) / "simplex-chat.deb").write_bytes(b"cli deb")
+            elif name == "make-deb-linux.sh":
+                (release / "deb").mkdir(parents=True)
+                (release / "deb/simplex_x86_64.deb").write_bytes(b"desktop deb")
+            elif name == "make-appimage-linux.sh":
+                (release / "SimpleX_Chat-x86_64.AppImage").write_bytes(b"appimage")
+
+        container = FakeRunner(
+            actions={name: run_script for name in ("build-cli-deb.sh", "make-deb-linux.sh", "make-appimage-linux.sh")},
+            answers={"list-bin": "/project/dist/simplex-chat\n"},
+        )
+        container.actions["cp"] = lambda step: pathlib.Path(step.argv[2]).write_bytes(b"cli")
+        with (
+            mock.patch.object(build_script, "linux_container", return_value=contextlib.nullcontext(container)),
+            mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(work))),
+            mock.patch.object(build_script, "build_cli_deb") as python_deb,
+            mock.patch.object(build_script, "log"),
+        ):
+            build_script.build_desktop_linux(self.source, JAMMY, "7.0.3", out)
+        python_deb.assert_not_called()
+        self.assertEqual(
+            {p.name: p.read_bytes() for p in out.iterdir()},
+            {
+                "simplex-chat-ubuntu-22_04-x86_64": b"cli",
+                "simplex-chat-ubuntu-22_04-x86_64.deb": b"cli deb",
+                "simplex-desktop-ubuntu-22_04-x86_64.deb": b"desktop deb",
+                "simplex-desktop-x86_64.AppImage": b"appimage",
+            },
+        )
+        scripts = [s for s in container.steps if s.argv[0].startswith("scripts/")]
+        self.assertEqual(scripts[0].argv[1], "7.0.3")
+        self.assertEqual(scripts[1].env, {"ASSETS_DIR": "../../assets"})
+
     def test_reproduce_reports_mismatches_and_writes_sums_only_when_all_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = pathlib.Path(tmp) / "v7.1.0-simplex-chat"

@@ -993,6 +993,10 @@ def package_appimage(runner: Runner, source: Path, arch: str, libcrypto: Path, w
 
 
 CLI_BUILD_STEPS = (Step(("cabal", "clean")), Step(("cabal", "update")), Step(("cabal", "build", "-j")))
+# Releases made before this script built their Linux files with these scripts of their own, which reproduce runs
+TAG_CLI_DEB_SCRIPT = "scripts/desktop/build-cli-deb.sh"
+TAG_DESKTOP_DEB_SCRIPT = "scripts/desktop/make-deb-linux.sh"
+TAG_APPIMAGE_SCRIPT = "scripts/desktop/make-appimage-linux.sh"
 
 
 def desktop_files(image: UbuntuImage) -> list[str]:
@@ -1038,6 +1042,9 @@ def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Pat
             container.run(Step(("cp", cli, container.path(work / "simplex-chat")), container.path(source)))
             container.run(Step(("strip", container.path(work / "simplex-chat")), container.path(source)))
             shutil.copy(work / "simplex-chat", out / desktop_files(image)[0])
+            if (source / TAG_DESKTOP_DEB_SCRIPT).exists():
+                build_desktop_linux_with_tag_scripts(container, source, image, version, work, out)
+                return
             shutil.copy(build_cli_deb(container, work / "simplex-chat", version, image.arch, work), out / desktop_files(image)[1])
             libs = build_linux_lib(container, source, image.arch, Database.SQLITE)
             add_vlc_linux(container, libs, image.arch, work)
@@ -1052,6 +1059,23 @@ def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Pat
                     container.run(Step(argv, container.path(openssl), {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}))
                 appimage = package_appimage(container, source, image.arch, openssl / "libcrypto.so.3", work)
                 shutil.copy(appimage, out / desktop_files(image)[3])
+
+
+def build_desktop_linux_with_tag_scripts(
+    container: Container, source: Path, image: UbuntuImage, version: str, work: Path, out: Path
+) -> None:
+    """The CLI deb, the desktop deb and the AppImage of a release made before this script, by its own scripts."""
+    files = desktop_files(image)
+    deb_build = work / "deb-build"
+    cli_deb = (TAG_CLI_DEB_SCRIPT, version, container.path(work / "simplex-chat"), container.path(deb_build))
+    container.run(Step(cli_deb, container.path(source)))
+    shutil.copy(deb_build / "simplex-chat.deb", out / files[1])
+    container.run(Step((TAG_DESKTOP_DEB_SCRIPT,), container.path(source), DESKTOP_ENV))
+    release = source / DESKTOP_RELEASE_DIR
+    shutil.copy(release / f"deb/simplex_{image.arch}.deb", out / files[2])
+    if image.version == APPIMAGE_IMAGE:
+        container.run(Step((TAG_APPIMAGE_SCRIPT,), container.path(source), DESKTOP_ENV))
+        shutil.copy(single_file(release, "*imple*.AppImage"), out / files[3])
 
 
 def build_linux_libs(source: Path, image: UbuntuImage, database: Database, out: Path, on_host: bool) -> None:
