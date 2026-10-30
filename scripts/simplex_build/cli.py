@@ -191,8 +191,7 @@ class BuildIosArchive:
     install_nix: bool
 
 
-# An assignment rather than a type statement, so that older Pythons parse the file and print the version check
-Build = (
+type Build = (
     BuildApk
     | BuildBundle
     | BuildDesktopLinux
@@ -208,7 +207,7 @@ Build = (
 )
 
 
-Command = Reproduce | Build | InstallLibs
+type Command = Reproduce | Build | InstallLibs
 
 
 def reproduce(command: Reproduce) -> None:
