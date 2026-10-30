@@ -50,12 +50,9 @@ jobs:
         with:
           swap-size-gb: 30
 
-      # the Nix sandbox needs user namespaces, which Ubuntu 24.04 restricts;
-      # GHC 8.10.7 of the armv7a build fails on process ids above 65535
-      - name: Prepare kernel
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo sysctl -w kernel.pid_max=65535
+      # the Nix sandbox needs user namespaces, which Ubuntu 24.04 restricts
+      - name: Allow user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build APK
         run: scripts/ci/build-apps/android.sh apk ${{ matrix.arch }} "$RUNNER_TEMP/out"

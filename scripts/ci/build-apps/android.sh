@@ -34,6 +34,7 @@ start_container() {
     --cap-add SYS_ADMIN \
     --security-opt apparmor:unconfined \
     --security-opt seccomp:unconfined \
+    --security-opt systempaths=unconfined \
     -v "$PWD:/project" \
     -v "$out:/out" \
     "$image"
@@ -53,6 +54,11 @@ build_apk() {
   android_abi=$(abi "$arch")
   vercode=$(sed -n 's/^android.version_code=//p' apps/multiplatform/gradle.properties)
   start_container
+  if [ "$arch" = armv7a ]; then
+    # 32-bit bionic aborts above pid 65535, which the armv7a GHC runs under qemu. Since Linux 6.14 pid_max belongs to
+    # each pid namespace, copied when it is created, so it is set in the container's, which the build's inherit.
+    docker exec -u root "$container" sh -c 'echo 65535 > /proc/sys/kernel/pid_max && cat /proc/sys/kernel/pid_max'
+  fi
   docker exec -e NIX_CONFIG="$nix_config" -e ARCH="$arch" -e ABI="$android_abi" -e VERCODE="$vercode" "$container" sh -eu -c '
     gradle_bin=$(find "$HOME/.gradle/wrapper/dists" -name gradle -type f -executable | head -1)
     export PATH="$(dirname "$gradle_bin"):$PATH"
