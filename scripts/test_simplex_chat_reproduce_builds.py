@@ -341,8 +341,9 @@ class AndroidTest(unittest.TestCase):
             fail_once=["build-android.sh"],
             answers={"HOME": "/home/builder\n", "PATH": "/usr/bin\n", "find": "/home/builder/.gradle/wrapper/dists/g/bin/gradle\n"},
         )
-        with mock.patch.object(reproduce, "run", recorder), mock.patch.object(reproduce, "log"):
+        with mock.patch.object(reproduce, "run", recorder), mock.patch.object(reproduce, "warn") as warn:
             reproduce.build_apk(self.container(), self.source, Arch.ARMV7A, self.out, "simplex-armv7a.apk", True, True)
+        self.assertIn("running it again", warn.call_args.args[0])
         builds = [c for c in recorder.commands if "./scripts/android/build-android.sh" in c]
         self.assertEqual(len(builds), 2)
         self.assertEqual(builds[0][-2:], ["-gs", "387"])
@@ -708,6 +709,24 @@ class IosArchiveTest(unittest.TestCase):
     def test_needs_the_art_assets(self):
         with tempfile.TemporaryDirectory() as tmp, self.assertRaises(reproduce.ReproduceError):
             reproduce.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
+
+
+class WarnTest(unittest.TestCase):
+    def test_annotates_on_github_actions(self):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as out, mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            reproduce.warn("unsigned build")
+        self.assertEqual(out.getvalue(), "::warning::unsigned build\n")
+        self.assertIn("warning: unsigned build", err.getvalue())
+
+    def test_only_prints_elsewhere(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as out, mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            reproduce.warn("unsigned build")
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("warning: unsigned build", err.getvalue())
 
 
 class MainTest(unittest.TestCase):

@@ -128,6 +128,13 @@ def log(message: str) -> None:
     print(f"\033[36m{message}\033[0m", flush=True)
 
 
+def warn(message: str) -> None:
+    """Printed in yellow, and shown in the run's summary on GitHub Actions."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning::{message}", flush=True)
+    print(f"\033[33mwarning: {message}\033[0m", file=sys.stderr, flush=True)
+
+
 def require_tools(tools: Sequence[str]) -> None:
     missing = [tool for tool in tools if shutil.which(tool) is None]
     if missing:
@@ -400,7 +407,7 @@ def retry_once(action: Callable[[], object]) -> None:
     try:
         action()
     except ReproduceError as e:
-        log(f"{e}; running again")
+        warn(f"{e}; running it again")
         action()
 
 
