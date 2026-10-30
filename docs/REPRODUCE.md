@@ -1,7 +1,7 @@
 ---
 title: Verify and reproduce builds
 permalink: /reproduce/index.html
-revision: 19.12.2025
+revision: 30.10.2026
 ---
 
 # Verifying and reproducing release builds
@@ -85,7 +85,7 @@ To reproduce the build you must have:
 
 - Linux machine
 - `x86-64` architecture
-- Installed `docker`, `curl` and `git`
+- Installed `docker`, `curl` and `git`, and Python 3.9 or newer for the apps
 
 ### Server binaries
 
@@ -132,19 +132,19 @@ To reproduce the build you must have:
 1. Download script:
 
    ```sh
-   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-reproduce-builds.sh'
+   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-reproduce-builds.py'
    ```
 
 2. Make it executable:
 
    ```sh
-   chmod +x simplex-chat-reproduce-builds.sh
+   chmod +x simplex-chat-reproduce-builds.py
    ```
 
 3. Execute the script with the required tag:
 
    ```sh
-   ./simplex-chat-reproduce-builds.sh 'v6.4.8'
+   ./simplex-chat-reproduce-builds.py 'v6.4.8'
    ```
 
    The script executes these steps (please review the script to confirm):
@@ -178,20 +178,22 @@ In addition to basic requirements, Android build will:
 1. Download script:
 
    ```sh
-   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-reproduce-builds-android.sh'
+   curl -LO 'https://raw.githubusercontent.com/simplex-chat/simplex-chat/refs/heads/master/scripts/simplex-chat-reproduce-builds.py'
    ```
 
 2. Make it executable:
 
    ```sh
-   chmod +x simplex-chat-reproduce-builds-android.sh
+   chmod +x simplex-chat-reproduce-builds.py
    ```
 
-3. Execute the script with the required tag:
+3. Execute the script with the required tag and the `android` target:
 
    ```sh
-   ./simplex-chat-reproduce-builds-android.sh 'v6.5.0-beta.3'
+   ./simplex-chat-reproduce-builds.py 'v6.5.0-beta.3' android
    ```
+
+   `--arches aarch64` or `--arches armv7a` builds one architecture. `--nix-cache` downloads the Nix toolchains and dependencies from the zw3rk and IOG caches instead of building them, which takes hours instead of a day; the paths are the same, built by those caches' builders. Running `./simplex-chat-reproduce-builds.py 'v6.5.0-beta.3' desktop android` reproduces both.
 
    The script executes these steps (please review the script to confirm):
 
@@ -199,5 +201,7 @@ In addition to basic requirements, Android build will:
    2) Builds Android APKs in a docker container.
    3) Compares the releases by copying the signature from downloaded APKs to locally built APKs.
    4) If the resulting build is bit-by-bit identical, prints the message that this tag was reproduced.
+
+   The results are in the folder named as the tag and repository name (e.g., `v6.5.0-beta.3-simplex-chat/android`).
 
    This will take a while.

@@ -2,6 +2,8 @@
 
 `.github/workflows/build-apps.yml` builds the Android and iOS apps of a commit without signing them and uploads them as artifacts, to be signed outside CI. No signing key or certificate reaches GitHub.
 
+Each job runs `scripts/simplex-chat-reproduce-builds.py build`, the script that also reproduces releases ([docs/REPRODUCE.md](../../../docs/REPRODUCE.md)), so a reproduce run rebuilds an APK exactly as this workflow built it. The same commands build locally: `build android-apk <arch> --out <dir>`, `build android-bundle --libs <dir> --out <dir>` with Docker, and `build ios-archive --art <simplex-chat-art> --out <dir>` on a Mac with Xcode and Nix.
+
 ## Running it
 
 The workflow runs only when started by hand, on any branch: in the Actions tab, `build-apps` → Run workflow, or `gh workflow run build-apps.yml --ref <branch>`. A newer run on the same branch cancels the older one. Start it on master or a branch of master: armv7a is built from the same commit, which `stable` only supports once it carries the armv7a build of master.
@@ -12,9 +14,9 @@ It needs the repository secret `SIMPLEX_ART_SSH_KEY`, the private half of a read
 
 | Job | Runner | Builds | Artifact, kept 30 days |
 |---|---|---|---|
-| Android aarch64 APK, Android armv7a APK | ubuntu-24.04 | `android.sh apk <arch>`: `scripts/android/build-android.sh` in the `Dockerfile.build` container | `android-<arch>-unsigned`: `simplex-<arch>.apk`, `pkg-<arch>-android-libsimplex.zip`, `pkg-<arch>-android-libsupport.zip`, `SHA256SUMS` |
-| Android Play bundle | ubuntu-24.04 | `android.sh bundle`: `:android:bundleGoogleRelease` in the same container, with both arches' core libraries from the APK jobs | `android-bundle-unsigned`: `simplex.aab`, `SHA256SUMS` |
-| iOS archive | macos-26 | `ios.sh`: the core library `aarch64-darwin-ios:lib:simplex-chat` with Nix, the brand assets of simplex-chat-art, then `xcodebuild archive` of the Release configuration for devices, unsigned, and each bundle signed ad hoc with its entitlements | `ios-archive-unsigned`: `SimpleX.xcarchive.zip`, `SHA256SUMS` |
+| Android aarch64 APK, Android armv7a APK | ubuntu-24.04 | `build android-apk <arch>`: `scripts/android/build-android.sh` in the `Dockerfile.build` container | `android-<arch>-unsigned`: `simplex-<arch>.apk`, `pkg-<arch>-android-libsimplex.zip`, `pkg-<arch>-android-libsupport.zip`, `SHA256SUMS` |
+| Android Play bundle | ubuntu-24.04 | `build android-bundle`: `:android:bundleGoogleRelease` in the same container, with both arches' core libraries from the APK jobs and release-mobile.py's `local.properties` | `android-bundle-unsigned`: `simplex.aab`, `SHA256SUMS` |
+| iOS archive | macos-26 | `build ios-archive`: the core library `aarch64-darwin-ios:lib:simplex-chat` with Nix, the brand assets of simplex-chat-art, then `xcodebuild archive` of the Release configuration for devices, unsigned, and each bundle signed ad hoc with its entitlements | `ios-archive-unsigned`: `SimpleX.xcarchive.zip`, `SHA256SUMS` |
 
 `gh run download <run id> -n <artifact>` downloads one. The version and build numbers are the commit's: bump them before the run.
 
@@ -22,27 +24,19 @@ It needs the repository secret `SIMPLEX_ART_SSH_KEY`, the private half of a read
 
 The APKs are the foss flavor, as `scripts/android/build-android.sh` builds them: deterministic, aligned to 4 KB pages and unsigned. Two runs on different runners built byte-identical APKs and core libraries.
 
-`scripts/simplex-chat-reproduce-builds-android.sh` rebuilds the APK, aligns it to 16 KB pages with `repro-apk zipalign --page-size 16`, copies the released APK's signature onto it with `apksigcopier`, and compares the two. An APK from this artifact signed this way passes that check, tested with apksigner 37.0.0 and the script's apksigcopier 1.1.1 and repro-apk 0.3.0:
-
-```sh
-repro-apk zipalign --page-size 16 simplex-<arch>.apk aligned.apk
-apksigner sign --alignment-preserved --v1-signing-enabled false --ks <keystore> --out simplex-<arch>.apk aligned.apk
-```
-
-- `--alignment-preserved`: apksigner 35 and later otherwise replace the zip padding.
-- `--v1-signing-enabled false`: apksigner 35 and later set the UTF-8 flag on the v1 signature files, which apksigcopier 1.1.1 drops, so the copy differs in 6 bytes. The app's minSdk is 26 and Android uses v1 signatures only below 24.
+The reproduce script rebuilds the APK, aligns it to 16 KB pages with `repro-apk zipalign`, padded as the released APK is (apksigner 35 and later pad with their `0xd935` extra field, AGP and older apksigner with zeros), copies the release's signature onto it with `apksigcopier`, restores the ZIP flags of the v1 signature files that apksigcopier 1.1.1 drops, and compares the two. An APK from this artifact passes that check when it is signed as `scripts/android/compress-and-sign-apk.sh` signs releases (`apksigner sign` with its defaults), and also with `--alignment-preserved` after a 16 KB `zipalign`, with or without a v1 signature: tested with apksigner 37.0.0 and the container's apksigcopier 1.1.1 and repro-apk 0.3.0.
 
 The bundle is the google flavor for Google Play; nothing checks its reproducibility.
 
 ## iOS: signing at export
 
-The export of an archive keeps only the entitlements that each bundle's signature carries: an unsigned archive exports without app groups, keychain groups or push. Xcode refuses ad-hoc signing for iOS devices ("Ad Hoc code signing is not allowed with SDK"), so `ios.sh` archives with `CODE_SIGNING_ALLOWED=NO`, then signs the extensions and the app ad hoc with `codesign`, each with its `.entitlements` file and `$(AppIdentifierPrefix)` replaced by the team id, and fails unless each signature carries exactly those entitlements. It records the team in the archive's Info.plist, as Xcode does when it signs.
+The export of an archive keeps only the entitlements that each bundle's signature carries: an unsigned archive exports without app groups, keychain groups or push. Xcode refuses ad-hoc signing for iOS devices ("Ad Hoc code signing is not allowed with SDK"), so the script archives with `CODE_SIGNING_ALLOWED=NO`, then signs the extensions and the app ad hoc with `codesign`, each with its `.entitlements` file and `$(AppIdentifierPrefix)` replaced by the team id, and fails unless each signature carries exactly those entitlements. It records the team in the archive's Info.plist, as Xcode does when it signs.
 
 Compared with the 7.1-beta.7 release archive, which Xcode signed with an Apple Development identity, the bundles have the same files except the development profiles (`embedded.mobileprovision`), and the same entitlements except `application-identifier`, `com.apple.developer.team-identifier` and `get-task-allow`, which the export takes from the distribution profile.
 
 To sign for the App Store: on a Mac with the distribution certificate, unzip the archive, open `SimpleX.xcarchive` in Xcode's Organizer and use Distribute App, or run `xcodebuild -exportArchive`.
 
-`ios.sh` also fails when an object of the core library is marked for a newer iOS than the app's deployment target: mac2ios relabels the library's macOS objects as iOS and keeps their minimum version.
+It also fails when an object of the core library is marked for a newer iOS than the app's deployment target: mac2ios relabels the library's macOS objects as iOS and keeps their minimum version.
 
 ## Known limits
 
