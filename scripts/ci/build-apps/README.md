@@ -4,6 +4,10 @@
 
 Each job runs `scripts/simplex-chat-build.py build` (its code is the `scripts/simplex_build` package, tested with `python3 -m unittest discover -s scripts/simplex_build -t scripts`), the script that also reproduces releases ([docs/REPRODUCE.md](../../../docs/REPRODUCE.md)), so a reproduce run rebuilds an APK exactly as this workflow built it. The same commands build locally: `build apk <arch> --out <dir>`, `build aab --libs <dir> --out <dir>` with Docker, and `build xcarchive --art <simplex-chat-art> --out <dir>` on a Mac with Xcode and Nix.
 
+## Smoke tests
+
+After each build the job runs what it built as users do, with `scripts/simplex-chat-build.py test`: each CLI prints its version; the Linux debs and AppImage, the macOS dmg and the Windows msi are installed and started, and pass when the app opens its window and keeps running; the APKs, signed with a throwaway key, start in an Android emulator. Each app leaves a screenshot, in the artifacts `screens-<platform>`. The iOS archive is built for devices, which the macOS runners can't run.
+
 ## Running it
 
 The workflow runs only when started by hand, on any branch: in the Actions tab, `build-apps` → Run workflow, or `gh workflow run build-apps.yml --ref <branch>`. A newer run on the same branch cancels the older one. Start it on master or a branch of master: armv7a is built from the same commit, which `stable` only supports once it carries the armv7a build of master.

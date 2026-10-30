@@ -94,6 +94,43 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+  android-test:
+    name: Android APKs in the emulator
+    needs: android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download APKs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: android-*-unsigned
+          path: ${{ runner.temp }}/apks
+
+      - name: Install emulator and system image
+        run: scripts/ci/android/install-sdk.sh "$RUNNER_TEMP/android-sdk"
+
+      - name: Boot emulator
+        run: scripts/ci/android/emulator.sh start "$RUNNER_TEMP/screens"
+
+      # the unsigned APKs are signed with a throwaway key, which Android needs to install them
+      - name: Smoke test
+        run: |
+          for apk in "$RUNNER_TEMP"/apks/*/simplex-*.apk; do
+            python3 scripts/simplex-chat-build.py test apk "$apk" --out "$RUNNER_TEMP/screens"
+          done
+
+      - name: Upload screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screens-android
+          path: ${{ runner.temp }}/screens
+          retention-days: 30
+          if-no-files-found: ignore
+
   ios:
     name: iOS archive
     runs-on: macos-26
@@ -165,6 +202,30 @@ jobs:
           version=$(sed -n 's/^version: *//p' simplex-chat.cabal)
           python3 scripts/simplex-chat-build.py build desktop linux ${{ matrix.ubuntu }} --version "$version" --out "$RUNNER_TEMP/out"
 
+      - name: Install a display for the smoke tests
+        run: sudo apt-get install -y --no-install-recommends xvfb openbox xdotool imagemagick
+
+      # each file runs as its users run it, and the apps leave screenshots
+      - name: Smoke test
+        run: |
+          out=$RUNNER_TEMP/out
+          ubuntu=${{ matrix.ubuntu }}
+          name=ubuntu-${ubuntu//./_}-${{ matrix.arch }}
+          python3 scripts/simplex-chat-build.py test cli "$out/simplex-chat-$name" --out "$RUNNER_TEMP/screens"
+          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-$name.deb" --out "$RUNNER_TEMP/screens"
+          if [ -f "$out/simplex-desktop-${{ matrix.arch }}.AppImage" ]; then
+            python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-${{ matrix.arch }}.AppImage" --out "$RUNNER_TEMP/screens"
+          fi
+
+      - name: Upload screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screens-ubuntu-${{ matrix.ubuntu }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/screens
+          retention-days: 30
+          if-no-files-found: ignore
+
       - name: Upload apps
         uses: actions/upload-artifact@v7
         with:
@@ -213,6 +274,22 @@ jobs:
 
       - name: Build CLI, desktop app and libraries
         run: python3 scripts/simplex-chat-build.py build desktop macos --out "$RUNNER_TEMP/out"
+
+      - name: Smoke test
+        run: |
+          out=$RUNNER_TEMP/out
+          cli=simplex-chat-macos-${{ matrix.arch == 'aarch64' && 'aarch64' || 'x86-64' }}
+          python3 scripts/simplex-chat-build.py test cli "$out/$cli" --out "$RUNNER_TEMP/screens"
+          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-macos-${{ matrix.arch }}.dmg" --out "$RUNNER_TEMP/screens"
+
+      - name: Upload screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screens-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/screens
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Upload apps
         uses: actions/upload-artifact@v7
@@ -273,6 +350,22 @@ jobs:
         run: |
           export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
           python scripts/simplex-chat-build.py build desktop windows --out "$(cygpath -w "$RUNNER_TEMP")/out"
+
+      - name: Smoke test
+        run: |
+          out="$(cygpath -w "$RUNNER_TEMP")/out"
+          screens="$(cygpath -w "$RUNNER_TEMP")/screens"
+          python scripts/simplex-chat-build.py test cli "$out/simplex-chat-windows-x86-64" --out "$screens"
+          python scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-windows-x86_64.msi" --out "$screens"
+
+      - name: Upload screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screens-windows
+          path: ${{ runner.temp }}/screens
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Upload apps
         uses: actions/upload-artifact@v7
