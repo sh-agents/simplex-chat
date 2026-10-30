@@ -32,6 +32,8 @@ apksigner sign --alignment-preserved --v1-signing-enabled false --ks <keystore> 
 - `--alignment-preserved`: apksigner 35 and later otherwise replace the zip padding.
 - `--v1-signing-enabled false`: apksigner 35 and later set the UTF-8 flag on the v1 signature files, which apksigcopier 1.1.1 drops, so the copy differs in 6 bytes. The app's minSdk is 26 and Android uses v1 signatures only below 24.
 
+The check rebuilds the core library and the app from one commit, as this workflow does. The 7.1-beta.7 release APK, built by release-mobile.py, has the core library of the last commit that changed simplex-chat.cabal (5a02b906e) and the app of the tag, which a later core commit separates; built from the tag, this workflow's APK matches the release in every file except `libsimplex.so`. That release is also signed with apksigner's padding and a v1 signature, which the reproduce script's alignment step does not expect.
+
 The bundle is the google flavor for Google Play; nothing checks its reproducibility.
 
 ## iOS: signing at export
