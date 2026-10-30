@@ -252,19 +252,19 @@ class ParseArgsTest(unittest.TestCase):
     def test_build_commands(self):
         out, here = pathlib.Path("o"), pathlib.Path(".")
         self.assertEqual(
-            build_script.parse_args(["build", "android-apk", "armv7a", "--out", "o", "--nix-cache"]),
+            build_script.parse_args(["build", "apk", "armv7a", "--out", "o", "--nix-cache"]),
             build_script.BuildApk(Arch.ARMV7A, out, here, True),
         )
         self.assertEqual(
-            build_script.parse_args(["build", "android-bundle", "--libs", "l", "--out", "o", "--source", "s"]),
+            build_script.parse_args(["build", "aab", "--libs", "l", "--out", "o", "--source", "s"]),
             build_script.BuildBundle(pathlib.Path("l"), out, pathlib.Path("s")),
         )
         self.assertEqual(
-            build_script.parse_args(["build", "desktop-linux", "24.04", "--version", "7.1.0", "--out", "o"]),
+            build_script.parse_args(["build", "desktop", "linux", "24.04", "--version", "7.1.0", "--out", "o"]),
             build_script.BuildDesktopLinux(build_script.linux_image("24.04", platform.machine()), "7.1.0", out, here),
         )
         self.assertEqual(
-            build_script.parse_args(["build", "linux-libs", "--database", "postgres", "--host", "--out", "o"]),
+            build_script.parse_args(["build", "libs", "linux", "--database", "postgres", "--host", "--out", "o"]),
             build_script.BuildLinuxLibs(
                 build_script.linux_image("22.04", platform.machine()),
                 build_script.Database.POSTGRES,
@@ -275,34 +275,64 @@ class ParseArgsTest(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            build_script.parse_args(["build", "linux-libs", "--container", "builder", "--dist-dir", "dist-lib", "--out", "o"]).builder,
+            build_script.parse_args(["build", "libs", "linux", "--container", "builder", "--dist-dir", "dist-lib", "--out", "o"]).builder,
             build_script.LibsBuilder(container="builder"),
         )
         self.assertEqual(
-            build_script.parse_args(["build", "desktop-macos", "--require-signing", "--out", "o"]),
+            build_script.parse_args(["build", "desktop", "macos", "--require-signing", "--out", "o"]),
             build_script.BuildDesktopMacos(out, here, True),
         )
-        self.assertEqual(build_script.parse_args(["build", "desktop-windows", "--out", "o"]), build_script.BuildDesktopWindows(out, here))
         self.assertEqual(
-            build_script.parse_args(["build", "macos-libs", "--require-signing", "--out", "o"]),
+            build_script.parse_args(["build", "desktop", "windows", "--out", "o"]), build_script.BuildDesktopWindows(out, here)
+        )
+        self.assertEqual(
+            build_script.parse_args(["build", "libs", "macos", "--require-signing", "--out", "o"]),
             build_script.BuildMacosLibs(out, here, True),
         )
-        self.assertEqual(build_script.parse_args(["build", "windows-libs", "--out", "o"]), build_script.BuildWindowsLibs(out, here))
-        self.assertEqual(build_script.parse_args(["build", "openssl", "--out", "o"]), build_script.BuildOpenssl(out, here))
+        self.assertEqual(build_script.parse_args(["build", "libs", "windows", "--out", "o"]), build_script.BuildWindowsLibs(out, here))
         self.assertEqual(
-            build_script.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
+            build_script.parse_args(["build", "openssl", "windows", "--out", "o"]),
+            build_script.BuildOpenssl(build_script.Platform.WINDOWS, out, here),
+        )
+        self.assertEqual(
+            build_script.parse_args(["build", "xcarchive", "--art", "a", "--out", "o", "--install-nix"]),
             build_script.BuildIosArchive(pathlib.Path("a"), out, here, True),
         )
 
     def test_build_commands_reject_missing_or_unknown_arguments(self):
         for argv in (
-            ["build", "android-bundle", "--out", "o"],
-            ["build", "desktop-linux", "20.04", "--version", "7.1.0", "--out", "o"],
-            ["build", "desktop-linux", "22.04", "--out", "o"],
-            ["build", "android-apk", "x86", "--out", "o"],
+            ["build", "aab", "--out", "o"],
+            ["build", "desktop", "linux", "20.04", "--version", "7.1.0", "--out", "o"],
+            ["build", "desktop", "linux", "22.04", "--out", "o"],
+            ["build", "desktop", "--out", "o"],
+            ["build", "openssl", "linux", "--out", "o"],
+            ["build", "libs", "macos", "--host", "--out", "o"],
+            ["build", "apk", "x86", "--out", "o"],
         ):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 build_script.parse_args(argv)
+
+
+class PlatformTest(unittest.TestCase):
+    def test_host_platform(self):
+        for os_name, sys_platform, expected in (("nt", "win32", "windows"), ("posix", "darwin", "macos"), ("posix", "linux", "linux")):
+            with mock.patch.object(build_script.os, "name", os_name), mock.patch.object(build_script.sys, "platform", sys_platform):
+                self.assertEqual(build_script.host_platform(), expected)
+
+    def test_builds_for_another_platform_are_refused(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(build_script, "host_platform", return_value=build_script.Platform.LINUX),
+        ):
+            out, here = pathlib.Path(tmp), pathlib.Path(".")
+            for command in (
+                build_script.BuildDesktopMacos(out, here, False),
+                build_script.BuildOpenssl(build_script.Platform.WINDOWS, out, here),
+                build_script.BuildIosArchive(pathlib.Path("a"), out, here, False),
+            ):
+                with self.assertRaises(build_script.ReproduceError) as raised:
+                    build_script.build(command)
+                self.assertIn("not on linux", str(raised.exception))
 
 
 class ContainerTest(unittest.TestCase):
@@ -1792,7 +1822,7 @@ class MainTest(unittest.TestCase):
 
     def test_build_commands_go_to_build(self):
         with mock.patch.object(build_script, "build") as build:
-            self.assertEqual(build_script.main(["build", "android-bundle", "--libs", "l", "--out", "o"]), 0)
+            self.assertEqual(build_script.main(["build", "aab", "--libs", "l", "--out", "o"]), 0)
         self.assertIsInstance(build.call_args.args[0], build_script.BuildBundle)
 
     def test_missing_tools_are_named(self):
@@ -1814,6 +1844,7 @@ class MainTest(unittest.TestCase):
             command = build_script.BuildIosArchive(pathlib.Path("a"), pathlib.Path(tmp), pathlib.Path("."), False)
             with (
                 mock.patch.object(build_script, "require_tools"),
+                mock.patch.object(build_script, "host_platform", return_value=build_script.Platform.MACOS),
                 mock.patch.object(build_script, "NIX_PROFILE", pathlib.Path("/nonexistent")),
                 self.assertRaises(build_script.ReproduceError) as e,
             ):

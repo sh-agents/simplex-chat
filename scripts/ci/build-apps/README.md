@@ -2,7 +2,7 @@
 
 `.github/workflows/build-apps.yml` builds the Android and iOS apps of a commit without signing them and uploads them as artifacts, to be signed outside CI. No signing key or certificate reaches GitHub.
 
-Each job runs `scripts/simplex-chat-build.py build`, the script that also reproduces releases ([docs/REPRODUCE.md](../../../docs/REPRODUCE.md)), so a reproduce run rebuilds an APK exactly as this workflow built it. The same commands build locally: `build android-apk <arch> --out <dir>`, `build android-bundle --libs <dir> --out <dir>` with Docker, and `build ios-archive --art <simplex-chat-art> --out <dir>` on a Mac with Xcode and Nix.
+Each job runs `scripts/simplex-chat-build.py build`, the script that also reproduces releases ([docs/REPRODUCE.md](../../../docs/REPRODUCE.md)), so a reproduce run rebuilds an APK exactly as this workflow built it. The same commands build locally: `build apk <arch> --out <dir>`, `build aab --libs <dir> --out <dir>` with Docker, and `build xcarchive --art <simplex-chat-art> --out <dir>` on a Mac with Xcode and Nix.
 
 ## Running it
 
@@ -14,9 +14,9 @@ It needs the repository secret `SIMPLEX_ART_SSH_KEY`, the private half of a read
 
 | Job | Runner | Builds | Artifact, kept 30 days |
 |---|---|---|---|
-| Android aarch64 APK, Android armv7a APK | ubuntu-24.04 | `build android-apk <arch>`: `scripts/android/build-android.sh` in the `Dockerfile.build` container | `android-<arch>-unsigned`: `simplex-<arch>.apk`, `pkg-<arch>-android-libsimplex.zip`, `pkg-<arch>-android-libsupport.zip`, `SHA256SUMS` |
-| Android Play bundle | ubuntu-24.04 | `build android-bundle`: `:android:bundleGoogleRelease` in the same container, with both arches' core libraries from the APK jobs and release-mobile.py's `local.properties` | `android-bundle-unsigned`: `simplex.aab`, `SHA256SUMS` |
-| iOS archive | macos-26 | `build ios-archive`: the core library `aarch64-darwin-ios:lib:simplex-chat` with Nix, the brand assets of simplex-chat-art, then `xcodebuild archive` of the Release configuration for devices, unsigned, and each bundle signed ad hoc with its entitlements | `ios-archive-unsigned`: `SimpleX.xcarchive.zip`, `SHA256SUMS` |
+| Android aarch64 APK, Android armv7a APK | ubuntu-24.04 | `build apk <arch>`: `scripts/android/build-android.sh` in the `Dockerfile.build` container | `android-<arch>-unsigned`: `simplex-<arch>.apk`, `pkg-<arch>-android-libsimplex.zip`, `pkg-<arch>-android-libsupport.zip`, `SHA256SUMS` |
+| Android Play bundle | ubuntu-24.04 | `build aab`: `:android:bundleGoogleRelease` in the same container, with both arches' core libraries from the APK jobs and release-mobile.py's `local.properties` | `android-bundle-unsigned`: `simplex.aab`, `SHA256SUMS` |
+| iOS archive | macos-26 | `build xcarchive`: the core library `aarch64-darwin-ios:lib:simplex-chat` with Nix, the brand assets of simplex-chat-art, then `xcodebuild archive` of the Release configuration for devices, unsigned, and each bundle signed ad hoc with its entitlements | `ios-archive-unsigned`: `SimpleX.xcarchive.zip`, `SHA256SUMS` |
 
 `gh run download <run id> -n <artifact>` downloads one. The version and build numbers are the commit's: bump them before the run.
 
@@ -24,7 +24,7 @@ It needs the repository secret `SIMPLEX_ART_SSH_KEY`, the private half of a read
 
 The APKs are the foss flavor, as `scripts/android/build-android.sh` builds them: AGP's unsigned output, which is deterministic. Two runs on different runners built byte-identical APKs, core libraries and bundles.
 
-Releases are signed by Gradle, with the release signing config that `apps/multiplatform/android/build.gradle.kts` reads from `ANDROID_KEYSTORE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`, or with the `android.injected.signing.*` properties that release-mobile.py passes. With the variables set, `build android-apk` and `build android-bundle` mount the keystore read-only and pass the passwords to Docker by name, so that they are in no command line; without them the script and Gradle warn that the build is unsigned. CI never has the key. An APK of this artifact signed outside Gradle stays verifiable when its layout is kept: `apksigner sign --alignment-preserved`.
+Releases are signed by Gradle, with the release signing config that `apps/multiplatform/android/build.gradle.kts` reads from `ANDROID_KEYSTORE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`, or with the `android.injected.signing.*` properties that release-mobile.py passes. With the variables set, `build android-apk` and `build aab` mount the keystore read-only and pass the passwords to Docker by name, so that they are in no command line; without them the script and Gradle warn that the build is unsigned. CI never has the key. An APK of this artifact signed outside Gradle stays verifiable when its layout is kept: `apksigner sign --alignment-preserved`.
 
 The reproduce script rebuilds the APK, copies the release's signature onto it with `apksigcopier` and compares the two. Releases signed before Gradle signed them, by apksigner after a repack, are checked by aligning the rebuilt APK to 16 KB pages with `repro-apk zipalign` first, padded as the released APK is (apksigner 35 and later pad with their `0xd935` extra field, older ones with zeros), and restoring the ZIP flags of the v1 signature files that apksigcopier 1.1.1 drops.
 

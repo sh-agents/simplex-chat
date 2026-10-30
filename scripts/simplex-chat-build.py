@@ -5,20 +5,22 @@
 Reproduce a release (desktop is the default target):
     simplex-chat-build.py reproduce <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache]
 
-Build one commit's release files, as CI does:
-    simplex-chat-build.py build android-apk <aarch64|armv7a> --out <dir> [--source <dir>] [--nix-cache]
-    simplex-chat-build.py build android-bundle --libs <dir> --out <dir> [--source <dir>]
-    simplex-chat-build.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
-    simplex-chat-build.py build linux-libs [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--dist-dir <dir>]
-        [--host | --container <name>] --out <dir> [--source <dir>]
-    simplex-chat-build.py build macos-libs --out <dir> [--source <dir>] [--require-signing]
-    simplex-chat-build.py build windows-libs --out <dir> [--source <dir>]
-    simplex-chat-build.py build openssl --out <dir> [--source <dir>]
-    simplex-chat-build.py build desktop-macos --out <dir> [--source <dir>] [--require-signing]
-    simplex-chat-build.py build desktop-windows --out <dir> [--source <dir>]
-    simplex-chat-build.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
+Build one commit's release files, as CI does; desktop, libs and openssl build for the machine they run on:
+    simplex-chat-build.py build desktop linux <22.04|24.04> --version <x.y.z> --out <dir>
+    simplex-chat-build.py build desktop macos [--require-signing] --out <dir>
+    simplex-chat-build.py build desktop windows --out <dir>
+    simplex-chat-build.py build libs linux [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--dist-dir <dir>]
+        [--host | --container <name>] --out <dir>
+    simplex-chat-build.py build libs macos [--require-signing] --out <dir>
+    simplex-chat-build.py build libs windows --out <dir>
+    simplex-chat-build.py build openssl <macos|windows> --out <dir>
+    simplex-chat-build.py build apk <aarch64|armv7a> [--nix-cache] --out <dir>
+    simplex-chat-build.py build aab --libs <dir> --out <dir>
+    simplex-chat-build.py build xcarchive --art <simplex-chat-art> [--install-nix] --out <dir>
+Each build takes --source <dir>, the simplex-chat checkout, by default the current directory.
 
-Needs Python 3.12+, git and Docker; ios-archive needs macOS with Xcode and Nix. Results go to ./<tag>-simplex-chat.
+Needs Python 3.12+; the Linux and Android builds need Docker, xcarchive macOS with Xcode and Nix, and reproduce git.
+reproduce writes its results to ./<tag>-simplex-chat.
 The Android builds are signed by Gradle when ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
 ANDROID_KEY_PASSWORD are set, and unsigned otherwise.
 """
@@ -63,6 +65,23 @@ class ReproduceError(Exception):
 class Target(enum.StrEnum):
     DESKTOP = "desktop"
     ANDROID = "android"
+
+
+class Platform(enum.StrEnum):
+    LINUX = "linux"
+    MACOS = "macos"
+    WINDOWS = "windows"
+
+
+def host_platform() -> Platform:
+    if os.name == "nt":
+        return Platform.WINDOWS
+    return Platform.MACOS if sys.platform == "darwin" else Platform.LINUX
+
+
+def require_platform(required: Platform) -> None:
+    if host_platform() != required:
+        raise ReproduceError(f"this build runs on {required}, not on {host_platform()}")
 
 
 class Arch(enum.StrEnum):
@@ -1224,12 +1243,14 @@ def macos_desktop() -> HostDesktop:
 
 def host_openssl(work: Path) -> OpenSsl:
     """The pinned OpenSSL built in work for this Mac, installed, or for Windows, in its source tree."""
+    match host_platform():
+        case Platform.LINUX:
+            raise ReproduceError("Linux builds use the system's OpenSSL")
+        case Platform.WINDOWS:
+            source = fetch_openssl(work)
+            build_openssl(source, WINDOWS_DESKTOP.openssl_target, OPENSSL_WINDOWS_PREFIX, OPENSSL_WINDOWS_DIR, install=False)
+            return OpenSsl(source / "include", source)
     source = fetch_openssl(work)
-    if os.name == "nt":
-        build_openssl(source, WINDOWS_DESKTOP.openssl_target, OPENSSL_WINDOWS_PREFIX, OPENSSL_WINDOWS_DIR, install=False)
-        return OpenSsl(source / "include", source)
-    if sys.platform != "darwin":
-        raise ReproduceError("Linux builds use the system's OpenSSL")
     prefix = work / "openssl"
     build_openssl(source, macos_desktop().openssl_target, str(prefix), OPENSSL_UNIX_DIR, install=True)
     return OpenSsl(prefix / "include", prefix / "lib")
@@ -1804,6 +1825,7 @@ class BuildWindowsLibs:
 
 @dataclass(frozen=True, slots=True)
 class BuildOpenssl:
+    platform: Platform
     out: Path
     source: Path
 
@@ -1883,27 +1905,35 @@ def build(command: Build) -> None:
             with android_container(source, out, set_pid_max=False, signing=signing) as container:
                 build_bundle(container, source, libs.resolve(), out, signing)
         case BuildDesktopLinux(image=image, version=version):
+            require_platform(Platform.LINUX)
             require_tools(["docker"])
             build_desktop_linux(source, image, version, out)
         case BuildLinuxLibs(image=image, database=database, dist_dir=dist_dir, builder=builder):
+            require_platform(Platform.LINUX)
             require_tools(["cabal", "ghc", "patchelf", "ldd"] if builder.on_host else ["docker"])
             build_linux_libs(source, image, database, dist_dir, builder, out)
         case BuildMacosLibs(require_signing=require_signing):
+            require_platform(Platform.MACOS)
             require_tools(["cabal", "ghc", "perl", "make", "otool", "install_name_tool"])
             build_macos_libs(source, out, require_signing)
         case BuildWindowsLibs():
+            require_platform(Platform.WINDOWS)
             require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "dlltool"])
             build_windows_libs(source, out)
-        case BuildOpenssl():
+        case BuildOpenssl(platform=openssl_platform):
+            require_platform(openssl_platform)
             require_tools(["perl", "make"])
             build_host_openssl(source, out)
         case BuildDesktopMacos(require_signing=require_signing):
+            require_platform(Platform.MACOS)
             require_tools(["cabal", "ghc", "perl", "make", "otool"])
             build_desktop_macos(source, out, require_signing)
         case BuildDesktopWindows():
+            require_platform(Platform.WINDOWS)
             require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool"])
             build_desktop_windows(source, out)
         case BuildIosArchive(art=art, install_nix=install):
+            require_platform(Platform.MACOS)
             require_tools(IOS_TOOLS)
             if not install and not (NIX_PROFILE / "bin/nix").exists():
                 raise ReproduceError(f"Nix is not installed ({NIX_PROFILE / 'bin/nix'} not found): install it, or pass --install-nix")
@@ -1921,58 +1951,73 @@ def execute(command: Command) -> None:
 
 def parse_build_args(argv: Sequence[str]) -> Command:
     parser = argparse.ArgumentParser(prog="simplex-chat-build.py build", description="Build one commit's release files.")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--out", type=Path, required=True)
+    common.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
     kinds = parser.add_subparsers(dest="kind", required=True)
-    apk = kinds.add_parser("android-apk", help="the deterministic unsigned APK and its core libraries")
-    apk.add_argument("arch", type=Arch, choices=list(Arch))
-    apk.add_argument("--nix-cache", action="store_true", help="substitute from zw3rk's and IOG's caches")
-    bundle = kinds.add_parser("android-bundle", help="the unsigned Play bundle, from both arches' core libraries")
-    bundle.add_argument("--libs", type=Path, required=True, help="directory with the pkg-<arch>-android-*.zip files")
-    desktop = kinds.add_parser("desktop-linux", help="the Linux CLI, its deb, the desktop deb and the AppImage")
-    desktop.add_argument("image", choices=sorted({image.version for image in DESKTOP_IMAGES}), help="the Ubuntu version")
-    desktop.add_argument("--version", required=True, help="the release version of the CLI deb, e.g. 7.1.0")
-    libs = kinds.add_parser("linux-libs", help="the Linux core library release, without VLC")
-    libs.add_argument("--ubuntu", choices=sorted({image.version for image in DESKTOP_IMAGES}), default=APPIMAGE_IMAGE)
-    libs.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
-    libs.add_argument("--dist-dir", default="dist-newstyle", help="cabal's build directory")
-    where = libs.add_mutually_exclusive_group()
+    ubuntu_versions = sorted({image.version for image in DESKTOP_IMAGES})
+
+    desktop = kinds.add_parser("desktop", help="all release files of this machine's platform").add_subparsers(
+        dest="platform", required=True
+    )
+    desktop_linux = desktop.add_parser("linux", parents=[common], help="the CLI, its deb, the desktop deb, the AppImage and libraries")
+    desktop_linux.add_argument("image", choices=ubuntu_versions, help="the Ubuntu version")
+    desktop_linux.add_argument("--version", required=True, help="the release version of the CLI deb, e.g. 7.1.0")
+    desktop_macos = desktop.add_parser("macos", parents=[common], help="the CLI, dmg and libraries, signed when APPLE_SIMPLEX_* are set")
+    desktop.add_parser("windows", parents=[common], help="the CLI, msi and libraries, in an MSYS2 UCRT64 shell")
+
+    libs = kinds.add_parser("libs", help="the core library release of this machine's platform").add_subparsers(
+        dest="platform", required=True
+    )
+    libs_linux = libs.add_parser("linux", parents=[common], help="without VLC, in Docker unless --host or --container")
+    libs_linux.add_argument("--ubuntu", choices=ubuntu_versions, default=APPIMAGE_IMAGE)
+    libs_linux.add_argument("--database", type=Database, choices=list(Database), default=Database.SQLITE)
+    libs_linux.add_argument("--dist-dir", default="dist-newstyle", help="cabal's build directory")
+    where = libs_linux.add_mutually_exclusive_group()
     where.add_argument("--host", action="store_true", help="build on this machine, with its GHC, rather than in Docker")
     where.add_argument("--container", help="build in this running container, which has the source at /project")
-    macos_libs = kinds.add_parser("macos-libs", help="this Mac's core library release, signed when APPLE_SIMPLEX_* are set")
-    macos_libs.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
-    windows_libs = kinds.add_parser("windows-libs", help="the Windows core library release, in an MSYS2 UCRT64 shell")
-    openssl = kinds.add_parser("openssl", help="the pinned OpenSSL for this Mac or Windows, and cabal.project.local linking it")
-    macos = kinds.add_parser("desktop-macos", help="this Mac's CLI, dmg and core libraries, signed when APPLE_SIMPLEX_* are set")
-    macos.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
-    windows = kinds.add_parser("desktop-windows", help="the Windows CLI, msi and core libraries, in an MSYS2 UCRT64 shell")
-    ios = kinds.add_parser("ios-archive", help="the iOS archive, its bundles signed ad hoc with their entitlements")
-    ios.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
-    ios.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
-    for sub in (apk, bundle, desktop, libs, macos_libs, windows_libs, openssl, macos, windows, ios):
-        sub.add_argument("--out", type=Path, required=True)
-        sub.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
+    libs_macos = libs.add_parser("macos", parents=[common], help="signed when APPLE_SIMPLEX_* are set")
+    libs.add_parser("windows", parents=[common], help="in an MSYS2 UCRT64 shell")
+    for signed in (desktop_macos, libs_macos):
+        signed.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
+
+    openssl = kinds.add_parser("openssl", help="the pinned OpenSSL, and cabal.project.local linking it").add_subparsers(
+        dest="platform", required=True
+    )
+    for name in (Platform.MACOS, Platform.WINDOWS):
+        openssl.add_parser(name, parents=[common])
+
+    apk = kinds.add_parser("apk", parents=[common], help="the deterministic APK and its core libraries, signed when ANDROID_* are set")
+    apk.add_argument("arch", type=Arch, choices=list(Arch))
+    apk.add_argument("--nix-cache", action="store_true", help="substitute from zw3rk's and IOG's caches")
+    aab = kinds.add_parser("aab", parents=[common], help="the Play bundle, from both arches' core libraries")
+    aab.add_argument("--libs", type=Path, required=True, help="directory with the pkg-<arch>-android-*.zip files")
+    xcarchive = kinds.add_parser("xcarchive", parents=[common], help="the iOS archive, its bundles signed ad hoc with their entitlements")
+    xcarchive.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
+    xcarchive.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
+
     args = parser.parse_args(argv)
-    match args.kind:
-        case "android-apk":
-            return BuildApk(args.arch, args.out, args.source, args.nix_cache)
-        case "android-bundle":
-            return BuildBundle(args.libs, args.out, args.source)
-        case "desktop-linux":
-            image = linux_image(args.image, platform.machine())
-            return BuildDesktopLinux(image, args.version, args.out, args.source)
-        case "linux-libs":
+    match args.kind, Platform(args.platform) if "platform" in args else None:
+        case "desktop", Platform.LINUX:
+            return BuildDesktopLinux(linux_image(args.image, platform.machine()), args.version, args.out, args.source)
+        case "desktop", Platform.MACOS:
+            return BuildDesktopMacos(args.out, args.source, args.require_signing)
+        case "desktop", Platform.WINDOWS:
+            return BuildDesktopWindows(args.out, args.source)
+        case "libs", Platform.LINUX:
             image = linux_image(args.ubuntu, platform.machine())
             builder = LibsBuilder(args.host, args.container)
             return BuildLinuxLibs(image, args.database, args.dist_dir, builder, args.out, args.source)
-        case "macos-libs":
+        case "libs", Platform.MACOS:
             return BuildMacosLibs(args.out, args.source, args.require_signing)
-        case "windows-libs":
+        case "libs", Platform.WINDOWS:
             return BuildWindowsLibs(args.out, args.source)
-        case "openssl":
-            return BuildOpenssl(args.out, args.source)
-        case "desktop-macos":
-            return BuildDesktopMacos(args.out, args.source, args.require_signing)
-        case "desktop-windows":
-            return BuildDesktopWindows(args.out, args.source)
+        case "openssl", Platform() as openssl_platform:
+            return BuildOpenssl(openssl_platform, args.out, args.source)
+        case "apk", _:
+            return BuildApk(args.arch, args.out, args.source, args.nix_cache)
+        case "aab", _:
+            return BuildBundle(args.libs, args.out, args.source)
         case _:
             return BuildIosArchive(args.art, args.out, args.source, args.install_nix)
 

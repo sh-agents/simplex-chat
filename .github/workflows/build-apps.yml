@@ -53,7 +53,7 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build APK
-        run: scripts/simplex-chat-build.py build android-apk ${{ matrix.arch }} --out "$RUNNER_TEMP/out" --nix-cache
+        run: scripts/simplex-chat-build.py build apk ${{ matrix.arch }} --out "$RUNNER_TEMP/out" --nix-cache
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
@@ -83,7 +83,7 @@ jobs:
           path: ${{ runner.temp }}/libs
 
       - name: Build bundle
-        run: scripts/simplex-chat-build.py build android-bundle --libs "$RUNNER_TEMP/libs" --out "$RUNNER_TEMP/out"
+        run: scripts/simplex-chat-build.py build aab --libs "$RUNNER_TEMP/libs" --out "$RUNNER_TEMP/out"
 
       - name: Upload bundle
         uses: actions/upload-artifact@v7
@@ -123,7 +123,7 @@ jobs:
           path: simplex-chat-art
 
       - name: Build archive
-        run: scripts/simplex-chat-build.py build ios-archive --art simplex-chat-art --out "$RUNNER_TEMP/out" --install-nix
+        run: scripts/simplex-chat-build.py build xcarchive --art simplex-chat-art --out "$RUNNER_TEMP/out" --install-nix
 
       - name: Upload archive
         uses: actions/upload-artifact@v7
@@ -163,7 +163,7 @@ jobs:
       - name: Build CLI and desktop apps
         run: |
           version=$(sed -n 's/^version: *//p' simplex-chat.cabal)
-          python3 scripts/simplex-chat-build.py build desktop-linux ${{ matrix.ubuntu }} --version "$version" --out "$RUNNER_TEMP/out"
+          python3 scripts/simplex-chat-build.py build desktop linux ${{ matrix.ubuntu }} --version "$version" --out "$RUNNER_TEMP/out"
 
       - name: Upload apps
         uses: actions/upload-artifact@v7
@@ -212,7 +212,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build CLI, desktop app and libraries
-        run: python3 scripts/simplex-chat-build.py build desktop-macos --out "$RUNNER_TEMP/out"
+        run: python3 scripts/simplex-chat-build.py build desktop macos --out "$RUNNER_TEMP/out"
 
       - name: Upload apps
         uses: actions/upload-artifact@v7
@@ -272,7 +272,7 @@ jobs:
       - name: Build CLI, desktop app and libraries
         run: |
           export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
-          python scripts/simplex-chat-build.py build desktop-windows --out "$(cygpath -w "$RUNNER_TEMP")/out"
+          python scripts/simplex-chat-build.py build desktop windows --out "$(cygpath -w "$RUNNER_TEMP")/out"
 
       - name: Upload apps
         uses: actions/upload-artifact@v7
