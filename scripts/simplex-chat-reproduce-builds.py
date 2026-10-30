@@ -24,10 +24,12 @@ import contextlib
 import enum
 import hashlib
 import os
+import platform
 import plistlib
 import shutil
 import struct
 import subprocess
+import tarfile
 import tempfile
 import urllib.request
 import zipfile
@@ -77,6 +79,18 @@ APPIMAGE_IMAGE = "22.04"
 DESKTOP_CABAL_LOCAL = "ignore-project: False\npackage direct-sqlcipher\n    flags: +openssl"
 DESKTOP_ENV = {"ASSETS_DIR": "../../assets"}
 DESKTOP_RELEASE_DIR = "apps/multiplatform/release/main"
+SOURCE_DATE_EPOCH = "1704067200"  # as make-deb-linux.sh and make-appimage-linux.sh set it
+
+# The OpenSSL bundled with the apps; pinOpenssl in flake.nix pins the same for the Android and iOS core libraries
+OPENSSL_VERSION = "3.5.9"
+OPENSSL_URL = f"https://github.com/openssl/openssl/releases/download/openssl-{OPENSSL_VERSION}/openssl-{OPENSSL_VERSION}.tar.gz"
+OPENSSL_SHA256 = "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+# OpenSSL loads openssl.cnf from OPENSSLDIR and modules from the prefix, and the file can load any module: only
+# administrators can write to these directories on users' machines
+OPENSSL_UNIX_PREFIX = "/usr/local"
+OPENSSL_UNIX_DIR = "/etc/ssl"
+OPENSSL_WINDOWS_PREFIX = "C:/Program Files/OpenSSL"
+OPENSSL_WINDOWS_DIR = "C:/Program Files/Common Files/SSL"
 
 # SHA-256 of the certificate that signs the released APKs
 SIMPLEX_KEY = "3C:52:C4:FD:3C:AD:1C:07:C9:B0:0A:70:80:E3:58:FA:B9:FE:FC:B8:AF:5A:EC:14:77:65:F1:6D:0F:21:AD:85"
@@ -575,17 +589,49 @@ def reproduce_android(tag: str, arches: Sequence[Arch], nix_cache: bool, source:
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# OpenSSL
+
+
+def fetch_openssl(work: Path) -> Path:
+    """The OpenSSL source tree, from the tarball checked against OPENSSL_SHA256."""
+    tarball = work / f"openssl-{OPENSSL_VERSION}.tar.gz"
+    download(OPENSSL_URL, tarball)
+    if sha256(tarball) != OPENSSL_SHA256:
+        raise ReproduceError(f"{OPENSSL_URL} doesn't match its pinned SHA-256 {OPENSSL_SHA256}")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(work, filter="data")
+    return work / f"openssl-{OPENSSL_VERSION}"
+
+
+def openssl_build(target: str, prefix: str, openssldir: str, install: bool) -> list[tuple[str, ...]]:
+    """The commands that build OpenSSL in its source tree, then install it to prefix when install is set."""
+    commands = [
+        ("perl", "Configure", target, f"--prefix={prefix}", f"--openssldir={openssldir}", "--libdir=lib", "no-docs", "no-tests"),
+        ("make", f"-j{os.cpu_count() or 1}"),
+    ]
+    if install:
+        commands.append(("make", "install_sw"))
+    return commands
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # Desktop and CLI
+
+OPENSSL_CONTAINER_SOURCE = f"{OUT}/openssl-{OPENSSL_VERSION}"
 
 
 def desktop_steps(image: UbuntuImage, version: str) -> list[Step]:
-    """After the CLI is built and copied to /out: its deb, the desktop deb and, on APPIMAGE_IMAGE, the AppImage."""
+    """After the CLI is built and copied to /out: its deb, the desktop deb and, on APPIMAGE_IMAGE, the AppImage with the
+    pinned OpenSSL, whose source fetch_openssl put in /out."""
     steps = [
         Step(("./scripts/desktop/build-cli-deb.sh", version, f"{OUT}/simplex-chat", f"{OUT}/deb-build")),
         Step(("./scripts/desktop/make-deb-linux.sh",), env=DESKTOP_ENV),
     ]
     if image.version == APPIMAGE_IMAGE:
-        steps.append(Step(("./scripts/desktop/make-appimage-linux.sh",), env=DESKTOP_ENV))
+        openssl = openssl_build(f"linux-{platform.machine()}", OPENSSL_UNIX_PREFIX, OPENSSL_UNIX_DIR, install=False)
+        steps += [Step(argv, OPENSSL_CONTAINER_SOURCE, env={"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}) for argv in openssl]
+        libcrypto = f"{OPENSSL_CONTAINER_SOURCE}/libcrypto.so.3"
+        steps.append(Step(("./scripts/desktop/make-appimage-linux.sh",), env={**DESKTOP_ENV, "LIBCRYPTO": libcrypto}))
     return steps
 
 
@@ -607,6 +653,8 @@ def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Pat
     log(f"building Ubuntu {image.version} CLI and desktop apps")
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
+        if image.version == APPIMAGE_IMAGE:
+            fetch_openssl(work)
         with Container(
             source,
             {source: PROJECT, work: OUT},

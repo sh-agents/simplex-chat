@@ -14,7 +14,8 @@ multiplatform_dir=$root_dir/apps/multiplatform
 release_app_dir=$root_dir/apps/multiplatform/release/main/app
 
 cd $multiplatform_dir
-libcrypto_path=$(ldd common/src/commonMain/cpp/desktop/libs/*/libHSdirect-sqlcipher-*.so | grep libcrypto | cut -d'=' -f 2 | cut -d ' ' -f 2)
+# The OpenSSL bundled in the AppImage, built by simplex-chat-reproduce-builds.py
+libcrypto_path=${LIBCRYPTO:?set LIBCRYPTO to the libcrypto.so.3 to bundle}
 trap "rm common/src/commonMain/cpp/desktop/libs/*/`basename $libcrypto_path` 2> /dev/null || true" EXIT
 cp $libcrypto_path common/src/commonMain/cpp/desktop/libs/*
 

@@ -4,9 +4,11 @@ import importlib.util
 import io
 import os
 import pathlib
+import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -447,12 +449,27 @@ class DesktopTest(unittest.TestCase):
         self.assertNotIn("simplex-desktop-x86_64.AppImage", reproduce.desktop_files(NOBLE))
 
     def test_steps_of_each_image(self):
+        steps = reproduce.desktop_steps(JAMMY, "7.1.0")
         self.assertEqual(
-            [s.argv[0] for s in reproduce.desktop_steps(JAMMY, "7.1.0")],
-            ["./scripts/desktop/build-cli-deb.sh", "./scripts/desktop/make-deb-linux.sh", "./scripts/desktop/make-appimage-linux.sh"],
+            [s.argv[:2] for s in steps],
+            [
+                ("./scripts/desktop/build-cli-deb.sh", "7.1.0"),
+                ("./scripts/desktop/make-deb-linux.sh",),
+                ("perl", "Configure"),
+                ("make", f"-j{os.cpu_count()}"),
+                ("./scripts/desktop/make-appimage-linux.sh",),
+            ],
         )
         self.assertEqual(len(reproduce.desktop_steps(NOBLE, "7.1.0")), 2)
-        self.assertEqual(reproduce.desktop_steps(JAMMY, "7.1.0")[1].env, {"ASSETS_DIR": "../../assets"})
+        self.assertEqual(steps[1].env, {"ASSETS_DIR": "../../assets"})
+
+    def test_appimage_bundles_the_pinned_openssl(self):
+        configure, build, appimage = reproduce.desktop_steps(JAMMY, "7.1.0")[2:]
+        self.assertEqual(configure.workdir, f"/out/openssl-{reproduce.OPENSSL_VERSION}")
+        self.assertIn("--openssldir=/etc/ssl", configure.argv)
+        self.assertIn("--prefix=/usr/local", configure.argv)
+        self.assertEqual(build.env, {"SOURCE_DATE_EPOCH": "1704067200"})
+        self.assertEqual(appimage.env["LIBCRYPTO"], f"/out/openssl-{reproduce.OPENSSL_VERSION}/libcrypto.so.3")
 
     def test_build_runs_the_steps_and_copies_the_released_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -473,8 +490,12 @@ class DesktopTest(unittest.TestCase):
                     (work / "deb-build/simplex-chat.deb").write_bytes(b"cli deb")
                 return recorder(args, **kwargs)
 
-            with mock.patch.object(reproduce, "run", fake_run), mock.patch.object(reproduce, "log"):
+            with mock.patch.object(reproduce, "run", fake_run), mock.patch.object(reproduce, "log"), mock.patch.object(
+                reproduce, "fetch_openssl"
+            ) as fetch_openssl:
                 reproduce.build_desktop_linux(source, JAMMY, "7.1.0", out)
+            work = next(pathlib.Path(a.split(":")[0]) for c in recorder.commands for a in c if a.endswith(":/out"))
+            fetch_openssl.assert_called_once_with(work)
             self.assertIn("flags: +openssl", (source / "cabal.project.local").read_text())
             build = next(c for c in recorder.commands if c[:2] == ["docker", "build"])
             self.assertIn("TAG=22.04", build)
@@ -511,6 +532,54 @@ class DesktopTest(unittest.TestCase):
                 mismatched = reproduce.reproduce_desktop("v7.1.0", pathlib.Path(tmp), results)
             self.assertEqual(mismatched, ["simplex-desktop-x86_64.AppImage"])
             self.assertFalse((results / "_sha256sums").exists())
+
+
+class OpenSslTest(unittest.TestCase):
+    def tarball(self, path):
+        member = tarfile.TarInfo(f"openssl-{reproduce.OPENSSL_VERSION}/Configure")
+        member.size = 4
+        with tarfile.open(path, "w:gz") as tar:
+            tar.addfile(member, io.BytesIO(b"perl"))
+
+    def test_fetch_extracts_the_checked_tarball(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = pathlib.Path(tmp)
+            self.tarball(work / "fixture.tar.gz")
+            digest = reproduce.sha256(work / "fixture.tar.gz")
+
+            def fixture_download(url, target):
+                shutil.copy(work / "fixture.tar.gz", target)
+
+            with mock.patch.object(reproduce, "download", fixture_download), mock.patch.object(reproduce, "OPENSSL_SHA256", digest):
+                source = reproduce.fetch_openssl(work)
+            self.assertEqual((source / "Configure").read_text(), "perl")
+
+    def test_fetch_rejects_a_changed_tarball(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = pathlib.Path(tmp)
+            with mock.patch.object(reproduce, "download", lambda url, target: self.tarball(target)), self.assertRaises(
+                reproduce.ReproduceError
+            ) as raised:
+                reproduce.fetch_openssl(work)
+            self.assertIn("pinned SHA-256", str(raised.exception))
+            self.assertFalse((work / f"openssl-{reproduce.OPENSSL_VERSION}").exists())
+
+    def test_build_installs_only_when_asked(self):
+        build = reproduce.openssl_build("darwin64-arm64-cc", "/w/openssl", "/etc/ssl", install=True)
+        self.assertEqual(
+            build[0],
+            ("perl", "Configure", "darwin64-arm64-cc", "--prefix=/w/openssl", "--openssldir=/etc/ssl")
+            + ("--libdir=lib", "no-docs", "no-tests"),
+        )
+        self.assertEqual(build[-1], ("make", "install_sw"))
+        self.assertNotIn(("make", "install_sw"), reproduce.openssl_build("mingw64", "/p", "/d", install=False))
+
+    def test_flake_pins_the_same_openssl(self):
+        flake = (pathlib.Path(reproduce.__file__).parents[1] / "flake.nix").read_text()
+        pin = flake[flake.index("let pinOpenssl") : flake.index("}); in", flake.index("let pinOpenssl"))]
+        self.assertIn(f'version = "{reproduce.OPENSSL_VERSION}";', pin)
+        self.assertIn(f'url = "{reproduce.OPENSSL_URL}";', pin)
+        self.assertIn(f'sha256 = "{reproduce.OPENSSL_SHA256}";', pin)
 
 
 OTOOL = """Archive : libffi.a(closures.o)
