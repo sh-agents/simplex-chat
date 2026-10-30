@@ -128,11 +128,50 @@ def log(message: str) -> None:
     print(f"\033[36m{message}\033[0m", flush=True)
 
 
+def on_github() -> bool:
+    return os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def github_escape(message: str) -> str:
+    # https://github.com/actions/toolkit/blob/main/packages/core/src/command.ts
+    return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def warn(message: str) -> None:
-    """Printed in yellow, and shown in the run's summary on GitHub Actions."""
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::warning::{message}", flush=True)
-    print(f"\033[33mwarning: {message}\033[0m", file=sys.stderr, flush=True)
+    """An annotation on the run's page on GitHub Actions, yellow text elsewhere."""
+    if on_github():
+        print(f"::warning::{github_escape(message)}", flush=True)
+    else:
+        print(f"\033[33mwarning: {message}\033[0m", file=sys.stderr, flush=True)
+
+
+def error(message: str) -> None:
+    if on_github():
+        print(f"::error::{github_escape(message)}", flush=True)
+    else:
+        print(f"\033[31merror: {message}\033[0m", file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def log_group(title: str) -> Iterator[None]:
+    """A collapsible section of the log on GitHub Actions."""
+    if not on_github():
+        log(f"$ {title}")
+        yield
+        return
+    print(f"::group::{github_escape(title)}", flush=True)
+    try:
+        yield
+    finally:
+        print("::endgroup::", flush=True)
+
+
+def add_summary(markdown: str) -> None:
+    """Appended to the job's summary page on GitHub Actions."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if on_github() and path:
+        with open(path, "a") as f:
+            f.write(markdown)
 
 
 def require_tools(tools: Sequence[str]) -> None:
@@ -150,16 +189,19 @@ def run(
     input: str | None = None,
     check: bool = True,
     capture: bool = False,
+    title: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        [str(a) for a in args],
-        cwd=cwd,
-        env={**os.environ, **env} if env else None,
-        input=input,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-    )
+    """Commands with output to show run in their own log group, titled with the command unless title is given."""
+    with contextlib.nullcontext() if capture else log_group(title or " ".join(map(str, args))):
+        result = subprocess.run(
+            [str(a) for a in args],
+            cwd=cwd,
+            env={**os.environ, **env} if env else None,
+            input=input,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE if capture else None,
+        )
     if check and result.returncode != 0:
         raise ReproduceError(f"failed ({result.returncode}): {' '.join(map(str, args))}")
     return result
@@ -246,9 +288,12 @@ def sha256(path: Path) -> str:
 
 def write_sha256sums(directory: Path, target: Path | None = None) -> None:
     files = sorted(p for p in directory.iterdir() if p.is_file() and p.name not in ("SHA256SUMS", "_sha256sums"))
-    lines = "".join(f"{sha256(p)}  {p.name}\n" for p in files)
+    hashes = {p.name: sha256(p) for p in files}
+    lines = "".join(f"{digest}  {name}\n" for name, digest in hashes.items())
     (target or directory / "SHA256SUMS").write_text(lines)
     print(lines, end="")
+    rows = "".join(f"| `{p.name}` | {p.stat().st_size:,} | `{hashes[p.name]}` |\n" for p in files)
+    add_summary(f"| File | Bytes | SHA-256 |\n|---|--:|---|\n{rows}\n")
 
 
 def compare_dirs(built: Path, released: Path) -> list[str]:
@@ -391,7 +436,8 @@ class Container:
             args += ["-u", step.user]
         for key, value in step.env.items():
             args += ["-e", f"{key}={value}"]
-        return run([*args, self.name, *step.argv], input=step.input, capture=capture).stdout or ""
+        title = " ".join(step.argv)
+        return run([*args, self.name, *step.argv], input=step.input, capture=capture, title=title).stdout or ""
 
     def run_all(self, steps: Sequence[Step]) -> None:
         for step in steps:
@@ -798,7 +844,9 @@ def reproduce(command: Reproduce) -> None:
         if Target.ANDROID in command.targets:
             failed += reproduce_android(command.tag, command.arches, command.nix_cache, source, results)
     if failed:
+        add_summary(f"{command.tag} is not reproduced: {', '.join(f'`{name}`' for name in failed)}\n")
         raise ReproduceError(f"{command.tag} is not reproduced: {', '.join(failed)}")
+    add_summary(f"{command.tag} is reproduced: {', '.join(command.targets)}\n")
     log(f"{command.tag} is reproduced: {', '.join(command.targets)}")
 
 
@@ -894,7 +942,7 @@ def main(argv: Sequence[str]) -> int:
     try:
         execute(command)
     except ReproduceError as e:
-        print(f"error: {e}", file=sys.stderr)
+        error(str(e))
         return 1
     return 0
 

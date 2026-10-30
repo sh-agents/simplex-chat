@@ -5,6 +5,7 @@ import io
 import os
 import pathlib
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ spec.loader.exec_module(reproduce)
 Arch, Step, Target = reproduce.Arch, reproduce.Step, reproduce.Target
 JAMMY, NOBLE = reproduce.DESKTOP_IMAGES
 UTF8_FLAG = 0x800
+GITHUB = {"GITHUB_ACTIONS": "true"}
 APKSIGNER_PADDING = struct.pack("<HHH", 0xD935, 2, 4)
 
 
@@ -81,7 +83,7 @@ class Recorder:
         self.fail_once = list(fail_once)
         self.answers = answers or {}
 
-    def __call__(self, args, cwd=None, env=None, input=None, check=True, capture=False):
+    def __call__(self, args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
         args = [str(a) for a in args]
         self.commands.append(args)
         self.inputs.append(input)
@@ -589,7 +591,7 @@ class FakeApple:
         self.signed = {}
         self.tamper = tamper
 
-    def __call__(self, args, cwd=None, env=None, input=None, check=True, capture=False):
+    def __call__(self, args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
         args = [str(a) for a in args]
         self.commands.append(args)
         stdout = ""
@@ -711,29 +713,73 @@ class IosArchiveTest(unittest.TestCase):
             reproduce.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
 
 
-class WarnTest(unittest.TestCase):
-    def test_annotates_on_github_actions(self):
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), mock.patch(
+class GitHubLogTest(unittest.TestCase):
+    def output(self, environ, action):
+        with mock.patch.dict(os.environ, environ, clear=True), mock.patch(
             "sys.stdout", new_callable=io.StringIO
         ) as out, mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            reproduce.warn("unsigned build")
-        self.assertEqual(out.getvalue(), "::warning::unsigned build\n")
-        self.assertIn("warning: unsigned build", err.getvalue())
+            action()
+        return out.getvalue(), err.getvalue()
 
-    def test_only_prints_elsewhere(self):
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
-            "sys.stdout", new_callable=io.StringIO
-        ) as out, mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            reproduce.warn("unsigned build")
-        self.assertEqual(out.getvalue(), "")
-        self.assertIn("warning: unsigned build", err.getvalue())
+    def test_warn_annotates_on_github_actions(self):
+        out, err = self.output(GITHUB, lambda: reproduce.warn("unsigned build"))
+        self.assertEqual((out, err), ("::warning::unsigned build\n", ""))
+
+    def test_warn_prints_to_stderr_elsewhere(self):
+        out, err = self.output({}, lambda: reproduce.warn("unsigned build"))
+        self.assertEqual(out, "")
+        self.assertIn("warning: unsigned build", err)
+
+    def test_error_escapes_newlines_and_percent(self):
+        out, _ = self.output(GITHUB, lambda: reproduce.error("100% failed\nat step 2"))
+        self.assertEqual(out, "::error::100%25 failed%0Aat step 2\n")
+
+    def test_group_is_closed_when_its_command_fails(self):
+        def failing():
+            with reproduce.log_group("cabal build"):
+                raise reproduce.ReproduceError("failed")
+
+        out, _ = self.output(GITHUB, lambda: self.assertRaises(reproduce.ReproduceError, failing))
+        self.assertEqual(out, "::group::cabal build\n::endgroup::\n")
+
+    def test_run_groups_shown_output_only(self):
+        def commands():
+            reproduce.run([sys.executable, "-c", "print('built')"])
+            reproduce.run([sys.executable, "-c", "print('hidden')"], capture=True, title="never shown")
+
+        with mock.patch.object(subprocess, "run", return_value=mock.Mock(returncode=0, stdout="")):
+            out, _ = self.output(GITHUB, commands)
+        self.assertEqual(out, f"::group::{sys.executable} -c print('built')\n::endgroup::\n")
+
+    def test_container_steps_are_titled_with_their_command(self):
+        recorder = Recorder()
+        container = reproduce.Container(pathlib.Path("."), {}, {}, [])
+        with mock.patch.object(reproduce, "run", wraps=recorder) as run:
+            container.run(reproduce.Step(("cabal", "update"), env={"PATH": "/x"}))
+        self.assertEqual(run.call_args.kwargs["title"], "cabal update")
+
+    def test_summary_lists_files_on_github_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = pathlib.Path(tmp)
+            (d / "simplex-aarch64.apk").write_bytes(b"apk")
+            summary = d / "summary.md"
+            self.output({**GITHUB, "GITHUB_STEP_SUMMARY": str(summary)}, lambda: reproduce.write_sha256sums(d))
+            text = summary.read_text()
+        self.assertIn("| `simplex-aarch64.apk` | 3 | `", text)
+        self.assertNotIn("SHA256SUMS`", text)
+
+    def test_summary_is_skipped_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = pathlib.Path(tmp) / "summary.md"
+            self.output({"GITHUB_STEP_SUMMARY": str(summary)}, lambda: reproduce.add_summary("text"))
+            self.assertFalse(summary.exists())
 
 
 class MainTest(unittest.TestCase):
     def test_errors_exit_with_1(self):
-        with mock.patch.object(reproduce, "reproduce", side_effect=reproduce.ReproduceError("boom")), mock.patch(
-            "sys.stderr", new_callable=io.StringIO
-        ) as err:
+        with mock.patch.object(reproduce, "reproduce", side_effect=reproduce.ReproduceError("boom")), mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             self.assertEqual(reproduce.main(["v7.1.0"]), 1)
         self.assertIn("error: boom", err.getvalue())
 
