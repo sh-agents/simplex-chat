@@ -11,6 +11,9 @@ Build one commit's release files, as CI does:
     simplex-chat-build.py build desktop-linux <22.04|24.04> --version <x.y.z> --out <dir> [--source <dir>]
     simplex-chat-build.py build linux-libs [--ubuntu <22.04|24.04>] [--database <sqlite|postgres>] [--dist-dir <dir>]
         [--host | --container <name>] --out <dir> [--source <dir>]
+    simplex-chat-build.py build macos-libs --out <dir> [--source <dir>] [--require-signing]
+    simplex-chat-build.py build windows-libs --out <dir> [--source <dir>]
+    simplex-chat-build.py build openssl --out <dir> [--source <dir>]
     simplex-chat-build.py build desktop-macos --out <dir> [--source <dir>] [--require-signing]
     simplex-chat-build.py build desktop-windows --out <dir> [--source <dir>]
     simplex-chat-build.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
@@ -1201,6 +1204,37 @@ def build_openssl(source: Path, target: str, prefix: str, openssldir: str, insta
         run(argv, cwd=source, env={"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH})
 
 
+@dataclass(frozen=True, slots=True)
+class OpenSsl:
+    """A build of the pinned OpenSSL: its headers, and the directory with its libraries."""
+
+    include: Path
+    lib: Path
+
+    def cabal_local(self, simplex_chat_ghc_options: str = "") -> str:
+        return openssl_cabal_local(self.include.as_posix(), self.lib.as_posix(), simplex_chat_ghc_options)
+
+
+def macos_desktop() -> HostDesktop:
+    host = MACOS_DESKTOPS.get(platform.machine())
+    if host is None:
+        raise ReproduceError(f"no macOS build for {platform.machine()}")
+    return host
+
+
+def host_openssl(work: Path) -> OpenSsl:
+    """The pinned OpenSSL built in work for this Mac, installed, or for Windows, in its source tree."""
+    source = fetch_openssl(work)
+    if os.name == "nt":
+        build_openssl(source, WINDOWS_DESKTOP.openssl_target, OPENSSL_WINDOWS_PREFIX, OPENSSL_WINDOWS_DIR, install=False)
+        return OpenSsl(source / "include", source)
+    if sys.platform != "darwin":
+        raise ReproduceError("Linux builds use the system's OpenSSL")
+    prefix = work / "openssl"
+    build_openssl(source, macos_desktop().openssl_target, str(prefix), OPENSSL_UNIX_DIR, install=True)
+    return OpenSsl(prefix / "include", prefix / "lib")
+
+
 def static_libcrypto(lib: Path, work: Path) -> Path:
     """A directory with only the static libcrypto, so that the linker can't choose the shared one."""
     static = work / "openssl-static"
@@ -1436,31 +1470,48 @@ def package_dmg(source: Path, keychain: Path | None) -> Path:
     return single_file(source / DESKTOP_RELEASE_DIR / "dmg", "SimpleX-*.dmg")
 
 
-def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
-    host = MACOS_DESKTOPS.get(platform.machine())
-    if host is None:
-        raise ReproduceError(f"no macOS build for {platform.machine()}")
+def release_macos_libs(source: Path, openssl: OpenSsl, keychain: Path | None, work: Path, out: Path) -> Path:
+    """The library release, signed and notarized with the keychain; returns the libraries directory of the app."""
+    host = macos_desktop()
+    # bundle_mac_libcrypto copies the libcrypto that the libraries link into the app
+    (source / "cabal.project.local").write_text(openssl.cabal_local())
+    libs = build_mac_lib(source, host.arch, Database.SQLITE, work)
+    released = work / "libs"
+    shutil.copytree(libs, released)
+    if keychain:
+        sign_mac_libs(released, keychain, work)
+    zip_desktop_libs(released, [], out / host.libs)
+    return libs
+
+
+def build_macos_libs(source: Path, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
-        prefix = work / "openssl"
-        build_openssl(fetch_openssl(work), host.openssl_target, str(prefix), OPENSSL_UNIX_DIR, install=True)
-        include = str(prefix / "include")
-        cli = build_host_cli(source, openssl_cabal_local(include, str(static_libcrypto(prefix / "lib", work))))
+        release_macos_libs(source, host_openssl(work), keychain, work, out)
+
+
+def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
+    host = macos_desktop()
+    signed = apple_signing(require_signing)
+    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+        work = Path(tmp).resolve()
+        keychain = stack.enter_context(apple_keychain(work)) if signed else None
+        openssl = host_openssl(work)
+        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
+        cli = build_host_cli(source, static.cabal_local())
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        # bundle_mac_libcrypto copies the libcrypto that the libraries link into the app
-        (source / "cabal.project.local").write_text(openssl_cabal_local(include, str(prefix / "lib")))
-        libs = build_mac_lib(source, host.arch, Database.SQLITE, work)
-        released_libs = work / "libs"
-        shutil.copytree(libs, released_libs)
+        libs = release_macos_libs(source, openssl, keychain, work, out)
         add_vlc_mac(libs, host.arch, work)
         link_desktop_libs(source, host.libs_dir, f"macos-{COMPOSE_ARCHES[host.arch]}")
         shutil.copy(package_dmg(source, keychain), out / host.desktop)
-        if keychain:
-            sign_mac_libs(released_libs, keychain, work)
-        zip_desktop_libs(released_libs, [], out / host.libs)
+
+
+def build_host_openssl(source: Path, out: Path) -> None:
+    """The pinned OpenSSL in out, and cabal.project.local that links it, for CI's test builds on macOS and Windows."""
+    (source / "cabal.project.local").write_text(host_openssl(out).cabal_local())
 
 
 def remove_cabal_sources(source: Path) -> None:
@@ -1482,22 +1533,21 @@ def disable_ghc_lld() -> None:
     edit_lines(settings, lambda line: line.replace("ld.lld.exe", "abracadabra.exe", 1))
 
 
-def build_windows_lib(source: Path, openssl: Path) -> Path:
+def build_windows_lib(source: Path, openssl: OpenSsl) -> Path:
     """libsimplex.dll and the libcrypto it loads, in the desktop app's libraries directory, which it returns."""
     check_exports(source)
     for old in source.glob("dist-newstyle/build/x86_64-windows/ghc-*/simplex-chat-*"):
         shutil.rmtree(old)
     remove_cabal_sources(source)
-    o = openssl.as_posix()
-    options = f"-shared -threaded -optl-L{o} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
-    (source / "cabal.project.local").write_text(openssl_cabal_local(f"{o}/include", o, options))
+    options = f"-shared -threaded -optl-L{openssl.lib.as_posix()} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
+    (source / "cabal.project.local").write_text(openssl.cabal_local(options))
     disable_ghc_lld()
     run(["cabal", "build", "lib:simplex-chat", *client_library_constraints(Database.SQLITE)], cwd=source)
     libs = desktop_libs(source, WINDOWS_DESKTOP.libs_dir)
     shutil.rmtree(libs, ignore_errors=True)
     shutil.rmtree(source / "apps/multiplatform/desktop/build/cmake", ignore_errors=True)
     libs.mkdir(parents=True)
-    shutil.copy(openssl / "libcrypto-3-x64.dll", libs)
+    shutil.copy(openssl.lib / "libcrypto-3-x64.dll", libs)
     shutil.copy(source / "libsimplex.dll", libs)
     return libs
 
@@ -1520,22 +1570,31 @@ def add_vlc_windows(libs: Path, work: Path) -> None:
     shutil.copytree(root / "plugins", vlc / "vlc/plugins", dirs_exist_ok=True)
 
 
+def release_windows_libs(source: Path, openssl: OpenSsl, out: Path) -> Path:
+    """The library release, with the import library of libsimplex.dll; returns the libraries directory of the app."""
+    libs = build_windows_lib(source, openssl)
+    run(["dlltool", "-d", "libsimplex.dll.def", "-l", "libsimplex.lib", "-D", "libsimplex.dll"], cwd=source)
+    zip_desktop_libs(libs, [source / "libsimplex.lib"], out / WINDOWS_DESKTOP.libs)
+    return libs
+
+
+def build_windows_libs(source: Path, out: Path) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        release_windows_libs(source, host_openssl(Path(tmp).resolve()), out)
+
+
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp).resolve()
-        openssl = fetch_openssl(work)
-        build_openssl(openssl, host.openssl_target, OPENSSL_WINDOWS_PREFIX, OPENSSL_WINDOWS_DIR, install=False)
-        include = f"{openssl.as_posix()}/include"
-        static = static_libcrypto(openssl, work).as_posix()
+        openssl = host_openssl(work)
+        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
         remove_cabal_sources(source)
-        cli = build_host_cli(source, openssl_cabal_local(include, static, OPENSSL_WINDOWS_STATIC_LINK))
+        cli = build_host_cli(source, static.cabal_local(OPENSSL_WINDOWS_STATIC_LINK))
         remove_cabal_sources(source)
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        libs = build_windows_lib(source, openssl)
-        run(["dlltool", "-d", "libsimplex.dll.def", "-l", "libsimplex.lib", "-D", "libsimplex.dll"], cwd=source)
-        zip_desktop_libs(libs, [source / "libsimplex.lib"], out / host.libs)
+        libs = release_windows_libs(source, openssl, out)
         add_vlc_windows(libs, work)
         link_desktop_libs(source, host.libs_dir, "windows-x64")
         assets = f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"
@@ -1731,6 +1790,25 @@ class BuildLinuxLibs:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildMacosLibs:
+    out: Path
+    source: Path
+    require_signing: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BuildWindowsLibs:
+    out: Path
+    source: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BuildOpenssl:
+    out: Path
+    source: Path
+
+
+@dataclass(frozen=True, slots=True)
 class BuildDesktopMacos:
     out: Path
     source: Path
@@ -1752,7 +1830,18 @@ class BuildIosArchive:
 
 
 # An assignment rather than a type statement, so that older Pythons parse the file and print the version check
-Build = BuildApk | BuildBundle | BuildDesktopLinux | BuildLinuxLibs | BuildDesktopMacos | BuildDesktopWindows | BuildIosArchive
+Build = (
+    BuildApk
+    | BuildBundle
+    | BuildDesktopLinux
+    | BuildLinuxLibs
+    | BuildMacosLibs
+    | BuildWindowsLibs
+    | BuildOpenssl
+    | BuildDesktopMacos
+    | BuildDesktopWindows
+    | BuildIosArchive
+)
 Command = Reproduce | Build
 
 
@@ -1799,6 +1888,15 @@ def build(command: Build) -> None:
         case BuildLinuxLibs(image=image, database=database, dist_dir=dist_dir, builder=builder):
             require_tools(["cabal", "ghc", "patchelf", "ldd"] if builder.on_host else ["docker"])
             build_linux_libs(source, image, database, dist_dir, builder, out)
+        case BuildMacosLibs(require_signing=require_signing):
+            require_tools(["cabal", "ghc", "perl", "make", "otool", "install_name_tool"])
+            build_macos_libs(source, out, require_signing)
+        case BuildWindowsLibs():
+            require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "dlltool"])
+            build_windows_libs(source, out)
+        case BuildOpenssl():
+            require_tools(["perl", "make"])
+            build_host_openssl(source, out)
         case BuildDesktopMacos(require_signing=require_signing):
             require_tools(["cabal", "ghc", "perl", "make", "otool"])
             build_desktop_macos(source, out, require_signing)
@@ -1839,13 +1937,17 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     where = libs.add_mutually_exclusive_group()
     where.add_argument("--host", action="store_true", help="build on this machine, with its GHC, rather than in Docker")
     where.add_argument("--container", help="build in this running container, which has the source at /project")
+    macos_libs = kinds.add_parser("macos-libs", help="this Mac's core library release, signed when APPLE_SIMPLEX_* are set")
+    macos_libs.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
+    windows_libs = kinds.add_parser("windows-libs", help="the Windows core library release, in an MSYS2 UCRT64 shell")
+    openssl = kinds.add_parser("openssl", help="the pinned OpenSSL for this Mac or Windows, and cabal.project.local linking it")
     macos = kinds.add_parser("desktop-macos", help="this Mac's CLI, dmg and core libraries, signed when APPLE_SIMPLEX_* are set")
     macos.add_argument("--require-signing", action="store_true", help="fail rather than build unsigned")
     windows = kinds.add_parser("desktop-windows", help="the Windows CLI, msi and core libraries, in an MSYS2 UCRT64 shell")
     ios = kinds.add_parser("ios-archive", help="the iOS archive, its bundles signed ad hoc with their entitlements")
     ios.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
     ios.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
-    for sub in (apk, bundle, desktop, libs, macos, windows, ios):
+    for sub in (apk, bundle, desktop, libs, macos_libs, windows_libs, openssl, macos, windows, ios):
         sub.add_argument("--out", type=Path, required=True)
         sub.add_argument("--source", type=Path, default=Path("."), help="the simplex-chat checkout (default: current directory)")
     args = parser.parse_args(argv)
@@ -1861,6 +1963,12 @@ def parse_build_args(argv: Sequence[str]) -> Command:
             image = linux_image(args.ubuntu, platform.machine())
             builder = LibsBuilder(args.host, args.container)
             return BuildLinuxLibs(image, args.database, args.dist_dir, builder, args.out, args.source)
+        case "macos-libs":
+            return BuildMacosLibs(args.out, args.source, args.require_signing)
+        case "windows-libs":
+            return BuildWindowsLibs(args.out, args.source)
+        case "openssl":
+            return BuildOpenssl(args.out, args.source)
         case "desktop-macos":
             return BuildDesktopMacos(args.out, args.source, args.require_signing)
         case "desktop-windows":

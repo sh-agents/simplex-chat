@@ -19,9 +19,7 @@ import unittest
 import zipfile
 from unittest import mock
 
-spec = importlib.util.spec_from_file_location(
-    "build_script", pathlib.Path(__file__).with_name("simplex-chat-build.py")
-)
+spec = importlib.util.spec_from_file_location("build_script", pathlib.Path(__file__).with_name("simplex-chat-build.py"))
 build_script = importlib.util.module_from_spec(spec)
 # dataclasses look the module up by name
 sys.modules[spec.name] = build_script
@@ -285,6 +283,12 @@ class ParseArgsTest(unittest.TestCase):
             build_script.BuildDesktopMacos(out, here, True),
         )
         self.assertEqual(build_script.parse_args(["build", "desktop-windows", "--out", "o"]), build_script.BuildDesktopWindows(out, here))
+        self.assertEqual(
+            build_script.parse_args(["build", "macos-libs", "--require-signing", "--out", "o"]),
+            build_script.BuildMacosLibs(out, here, True),
+        )
+        self.assertEqual(build_script.parse_args(["build", "windows-libs", "--out", "o"]), build_script.BuildWindowsLibs(out, here))
+        self.assertEqual(build_script.parse_args(["build", "openssl", "--out", "o"]), build_script.BuildOpenssl(out, here))
         self.assertEqual(
             build_script.parse_args(["build", "ios-archive", "--art", "a", "--out", "o", "--install-nix"]),
             build_script.BuildIosArchive(pathlib.Path("a"), out, here, True),
@@ -933,9 +937,12 @@ class DesktopTest(unittest.TestCase):
             def fake_download(url, target):
                 target.write_bytes(b"other" if target.name.endswith(".AppImage") else target.name.encode())
 
-            with mock.patch.object(build_script, "checkout"), mock.patch.object(
-                build_script, "build_desktop_linux", fake_build
-            ), mock.patch.object(build_script, "download", fake_download), mock.patch.object(build_script, "log"):
+            with (
+                mock.patch.object(build_script, "checkout"),
+                mock.patch.object(build_script, "build_desktop_linux", fake_build),
+                mock.patch.object(build_script, "download", fake_download),
+                mock.patch.object(build_script, "log"),
+            ):
                 mismatched = build_script.reproduce_desktop("v7.1.0", pathlib.Path(tmp), results)
             self.assertEqual(mismatched, ["simplex-desktop-x86_64.AppImage"])
             self.assertFalse((results / "_sha256sums").exists())
@@ -964,9 +971,10 @@ class OpenSslTest(unittest.TestCase):
     def test_fetch_rejects_a_changed_tarball(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
-            with mock.patch.object(build_script, "download", lambda url, target: self.tarball(target)), self.assertRaises(
-                build_script.ReproduceError
-            ) as raised:
+            with (
+                mock.patch.object(build_script, "download", lambda url, target: self.tarball(target)),
+                self.assertRaises(build_script.ReproduceError) as raised,
+            ):
                 build_script.fetch_openssl(work)
             self.assertIn("pinned SHA-256", str(raised.exception))
             self.assertFalse((work / f"openssl-{build_script.OPENSSL_VERSION}").exists())
@@ -1010,7 +1018,6 @@ class LinuxLibsTest(unittest.TestCase):
             with zipfile.ZipFile(root / "simplex-chat-libs-linux-x86_64-postgres.zip") as z:
                 self.assertEqual(z.namelist(), ["libs/libsimplex.so"])
 
-
     def test_running_container_is_used_and_kept(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -1040,13 +1047,50 @@ class HostDesktopTest(unittest.TestCase):
 
     def fetch(self, work):
         source = work / f"openssl-{build_script.OPENSSL_VERSION}"
-        source.mkdir()
+        source.mkdir(exist_ok=True)
         (source / "libcrypto.a").write_bytes(b"static")
         return source
 
     def zip_names(self, name):
         with zipfile.ZipFile(self.out / name) as z:
             return sorted(z.namelist())
+
+    def openssl_on(self, os_name, sys_platform, machine="arm64"):
+        recorder = Recorder()
+        with (
+            mock.patch.object(build_script, "run", recorder),
+            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(build_script.os, "name", os_name),
+            mock.patch.object(build_script.sys, "platform", sys_platform),
+            mock.patch.object(build_script.platform, "machine", return_value=machine),
+        ):
+            return build_script.host_openssl(self.root), recorder.commands
+
+    def test_openssl_for_windows_stays_in_its_source_tree(self):
+        openssl, commands = self.openssl_on("nt", "win32")
+        tree = self.root / f"openssl-{build_script.OPENSSL_VERSION}"
+        self.assertEqual(openssl, build_script.OpenSsl(tree / "include", tree))
+        self.assertEqual(
+            commands[0][2:5], ["mingw64", "--prefix=C:/Program Files/OpenSSL", "--openssldir=C:/Program Files/Common Files/SSL"]
+        )
+        self.assertNotIn(["make", "install_sw"], commands)
+
+    def test_openssl_for_macos_is_installed(self):
+        openssl, commands = self.openssl_on("posix", "darwin", "x86_64")
+        self.assertEqual(openssl, build_script.OpenSsl(self.root / "openssl/include", self.root / "openssl/lib"))
+        self.assertEqual(commands[0][2:5], ["darwin64-x86_64-cc", f"--prefix={self.root / 'openssl'}", "--openssldir=/etc/ssl"])
+        self.assertEqual(commands[-1], ["make", "install_sw"])
+
+    def test_linux_has_no_pinned_openssl_build(self):
+        with self.assertRaises(build_script.ReproduceError):
+            self.openssl_on("posix", "linux")
+
+    def test_openssl_command_writes_cabal_local(self):
+        with mock.patch.object(
+            build_script, "host_openssl", return_value=build_script.OpenSsl(self.root / "o/include", self.root / "o/lib")
+        ):
+            build_script.build_host_openssl(self.source, self.root)
+        self.assertIn(f"extra-lib-dirs: {self.root / 'o/lib'}", (self.source / "cabal.project.local").read_text())
 
     def test_cabal_local_links_both_packages_with_openssl(self):
         text = build_script.openssl_cabal_local("/o/include", "/o/lib", "-optl-lws2_32")
@@ -1087,9 +1131,19 @@ class HostDesktopTest(unittest.TestCase):
         (self.root / "dist").mkdir()
         (self.root / "dist/simplex-chat").write_bytes(b"cli")
         calls = []
+        recorder_cabal_locals = []
+        original_cli = build_script.build_host_cli
+
+        def build_cli(source, cabal_local):
+            recorder_cabal_locals.append(cabal_local)
+            return original_cli(source, cabal_local)
+
         with (
+            mock.patch.object(build_script, "build_host_cli", build_cli),
             mock.patch.object(build_script, "run", recorder),
-            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(
+                build_script, "host_openssl", return_value=build_script.OpenSsl(work / "openssl/include", work / "openssl/lib")
+            ),
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             mock.patch.object(build_script, "apple_signing", return_value=False),
             mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(work))),
@@ -1100,10 +1154,7 @@ class HostDesktopTest(unittest.TestCase):
             mock.patch.object(build_script, "sign_mac_libs") as sign,
         ):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
-        configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
-        self.assertIn("darwin64-arm64-cc", configure)
-        self.assertIn("--openssldir=/etc/ssl", configure)
-        self.assertIn(["make", "install_sw"], recorder.commands)
+        self.assertIn(f"extra-lib-dirs: {work / 'openssl-static'}", recorder_cabal_locals[0])
         self.assertEqual(calls, [("lib", "aarch64"), ("link", "mac-aarch64", "macos-arm64"), ("dmg", None)])
         sign.assert_not_called()
         self.assertIn(f"extra-lib-dirs: {work / 'openssl/lib'}", (self.source / "cabal.project.local").read_text())
@@ -1117,7 +1168,7 @@ class HostDesktopTest(unittest.TestCase):
         recorder = Recorder(answers={"list-bin": f"{self.root}/cli\n", "otool -L": "\t@rpath/libcrypto.3.dylib\n"})
         with (
             mock.patch.object(build_script, "run", recorder),
-            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(build_script, "host_openssl", return_value=build_script.OpenSsl(self.root, self.root)),
             mock.patch.object(build_script.platform, "machine", return_value="x86_64"),
             mock.patch.object(build_script, "apple_signing", return_value=False),
             mock.patch.object(build_script, "static_libcrypto", return_value=self.root),
@@ -1146,17 +1197,14 @@ class HostDesktopTest(unittest.TestCase):
         calls = []
         with (
             mock.patch.object(build_script, "run", fake_run),
-            mock.patch.object(build_script, "fetch_openssl", self.fetch),
-            mock.patch.object(build_script, "build_windows_lib", lambda source, openssl: calls.append(("lib", openssl.name)) or libs),
+            mock.patch.object(
+                build_script, "host_openssl", lambda work: build_script.OpenSsl(self.fetch(work) / "include", self.fetch(work))
+            ),
+            mock.patch.object(build_script, "build_windows_lib", lambda source, openssl: calls.append(("lib", openssl.lib.name)) or libs),
             mock.patch.object(build_script, "add_vlc_windows", lambda libs, work: (libs / "vlc").mkdir()),
             mock.patch.object(build_script, "link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
         ):
             build_script.build_desktop_windows(self.source, self.out)
-        configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
-        self.assertIn("mingw64", configure)
-        self.assertIn("--prefix=C:/Program Files/OpenSSL", configure)
-        self.assertIn("--openssldir=C:/Program Files/Common Files/SSL", configure)
-        self.assertNotIn(["make", "install_sw"], recorder.commands)
         self.assertEqual(calls, [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64")])
         self.assertIn(["bash", "./gradlew", "-Psimplex.assets.dir=../../assets", "packageMsi"], recorder.commands)
         self.assertEqual(
@@ -1174,7 +1222,9 @@ class HostDesktopTest(unittest.TestCase):
 
         with (
             mock.patch.object(build_script, "run"),
-            mock.patch.object(build_script, "fetch_openssl", self.fetch),
+            mock.patch.object(
+                build_script, "host_openssl", lambda work: build_script.OpenSsl(self.fetch(work) / "include", self.fetch(work))
+            ),
             mock.patch.object(build_script, "build_host_cli", fake_cli),
             self.assertRaises(build_script.ReproduceError),
         ):
@@ -1432,7 +1482,7 @@ class WindowsLibTest(unittest.TestCase):
         (self.source / "libsimplex.dll").write_bytes(b"simplex")
         recorder = Recorder()
         with mock.patch.object(build_script, "run", recorder), mock.patch.object(build_script, "disable_ghc_lld") as disable:
-            libs = build_script.build_windows_lib(self.source, openssl)
+            libs = build_script.build_windows_lib(self.source, build_script.OpenSsl(openssl / "include", openssl))
         disable.assert_called_once()
         cabal_local = (self.source / "cabal.project.local").read_text()
         self.assertIn(f"extra-include-dirs: {openssl.as_posix()}/include", cabal_local)
@@ -1518,8 +1568,9 @@ class IosDetailsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cert = pathlib.Path(tmp) / "ca-bundle.crt"
             cert.write_text("")
-            with mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True), mock.patch.object(
-                build_script, "NIX_CERT_FILES", (pathlib.Path(tmp) / "missing", cert)
+            with (
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True),
+                mock.patch.object(build_script, "NIX_CERT_FILES", (pathlib.Path(tmp) / "missing", cert)),
             ):
                 env = build_script.nix_env()
             self.assertEqual(env["NIX_SSL_CERT_FILE"], str(cert))
@@ -1629,9 +1680,12 @@ class IosArchiveTest(unittest.TestCase):
                     pathlib.Path(args[-1]).write_bytes(b"archive")
                 return apple(args, cwd, env, input, check, capture)
 
-            with mock.patch.object(build_script, "run", fake_run), mock.patch("builtins.print"), mock.patch.object(
-                build_script.Path, "home", return_value=home
-            ), mock.patch.object(build_script, "nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}):
+            with (
+                mock.patch.object(build_script, "run", fake_run),
+                mock.patch("builtins.print"),
+                mock.patch.object(build_script.Path, "home", return_value=home),
+                mock.patch.object(build_script, "nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
+            ):
                 build_script.build_ios_archive(source, art, out, install=False)
 
             self.assertEqual((home / "Downloads" / build_script.IOS_CORE_ZIP).read_bytes(), b"core")
@@ -1664,9 +1718,11 @@ class IosArchiveTest(unittest.TestCase):
 
 class GitHubLogTest(unittest.TestCase):
     def output(self, environ, action):
-        with mock.patch.dict(os.environ, environ, clear=True), mock.patch(
-            "sys.stdout", new_callable=io.StringIO
-        ) as out, mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+        with (
+            mock.patch.dict(os.environ, environ, clear=True),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as err,
+        ):
             action()
         return out.getvalue(), err.getvalue()
 
@@ -1726,9 +1782,11 @@ class GitHubLogTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def test_errors_exit_with_1(self):
-        with mock.patch.object(build_script, "reproduce", side_effect=build_script.ReproduceError("boom")), mock.patch.dict(
-            os.environ, {}, clear=True
-        ), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+        with (
+            mock.patch.object(build_script, "reproduce", side_effect=build_script.ReproduceError("boom")),
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as err,
+        ):
             self.assertEqual(build_script.main(["reproduce", "v7.1.0"]), 1)
         self.assertIn("error: boom", err.getvalue())
 
@@ -1743,18 +1801,22 @@ class MainTest(unittest.TestCase):
         self.assertIn("git, docker", str(e.exception))
 
     def test_unreachable_docker_daemon(self):
-        with mock.patch.object(build_script.shutil, "which", return_value="/usr/bin/docker"), mock.patch.object(
-            build_script.subprocess, "run", return_value=mock.Mock(returncode=1)
-        ), self.assertRaises(build_script.ReproduceError) as e:
+        with (
+            mock.patch.object(build_script.shutil, "which", return_value="/usr/bin/docker"),
+            mock.patch.object(build_script.subprocess, "run", return_value=mock.Mock(returncode=1)),
+            self.assertRaises(build_script.ReproduceError) as e,
+        ):
             build_script.require_tools(["docker"])
         self.assertIn("daemon", str(e.exception))
 
     def test_ios_needs_nix_unless_installing_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             command = build_script.BuildIosArchive(pathlib.Path("a"), pathlib.Path(tmp), pathlib.Path("."), False)
-            with mock.patch.object(build_script, "require_tools"), mock.patch.object(
-                build_script, "NIX_PROFILE", pathlib.Path("/nonexistent")
-            ), self.assertRaises(build_script.ReproduceError) as e:
+            with (
+                mock.patch.object(build_script, "require_tools"),
+                mock.patch.object(build_script, "NIX_PROFILE", pathlib.Path("/nonexistent")),
+                self.assertRaises(build_script.ReproduceError) as e,
+            ):
                 build_script.build(command)
         self.assertIn("--install-nix", str(e.exception))
 
