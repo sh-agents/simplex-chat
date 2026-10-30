@@ -1620,7 +1620,10 @@ def remove_cabal_sources(source: Path) -> None:
         function(path)
 
     for path in [*source.glob("dist-newstyle/src/direct-sq*"), *source.glob("dist-newstyle/src/simplexmq*")]:
-        shutil.rmtree(path, onexc=make_writable)
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, onexc=make_writable)
+        else:
+            path.unlink()
 
 
 def disable_ghc_lld() -> None:

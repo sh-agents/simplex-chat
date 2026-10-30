@@ -1270,7 +1270,10 @@ class HostDesktopTest(unittest.TestCase):
         pack.parent.chmod(0o555)
         keep = self.source / "dist-newstyle/src/aeson-1"
         keep.mkdir()
+        tarball = self.source / "dist-newstyle/src/direct-sq_-fd06-direct-sqlcipher-2.3.28.tar.gz"
+        tarball.write_bytes(b"tar")
         build_script.remove_cabal_sources(self.source)
+        self.assertFalse(tarball.exists())
         self.assertFalse((self.source / "dist-newstyle/src/simplexmq-abc").exists())
         self.assertTrue(keep.exists())
 
