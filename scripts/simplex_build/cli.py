@@ -19,6 +19,11 @@ Build one commit's release files, as CI does; desktop, libs and openssl build fo
     simplex-chat-build.py build xcarchive --art <simplex-chat-art> [--install-nix] --out <dir>
 Each build takes --source <dir>, the simplex-chat checkout, by default the current directory.
 
+Run release files as their users do, with screenshots of the apps; apk needs a running emulator:
+    simplex-chat-build.py test cli <binary> --out <dir>
+    simplex-chat-build.py test desktop <.deb|.AppImage|.dmg|.msi> --out <dir>
+    simplex-chat-build.py test apk <apk> --out <dir>
+
 Install prebuilt core libraries where the apps' builds take them, as the test workflows do:
     simplex-chat-build.py install libs linux <libs zip>
     simplex-chat-build.py install libs android <dir> [--arch <aarch64|armv7a>]
@@ -55,6 +60,7 @@ from .common import (
     add_summary,
     clone,
     error,
+    host_platform,
     log,
     require_platform,
     require_tools,
@@ -76,6 +82,7 @@ from .linux import (
 from .macos import build_desktop_macos, build_macos_libs
 from .nix import NIX_PROFILE
 from .openssl import build_host_openssl
+from .smoke import test_apk, test_cli, test_desktop
 from .windows import build_desktop_windows, build_windows_libs
 
 
@@ -207,7 +214,16 @@ type Build = (
 )
 
 
-type Command = Reproduce | Build | InstallLibs
+@dataclass(frozen=True, slots=True)
+class TestRelease:
+    """A smoke test of a release file: what it is, and the file."""
+
+    kind: str
+    file: Path
+    out: Path
+
+
+type Command = Reproduce | Build | InstallLibs | TestRelease
 
 
 def reproduce(command: Reproduce) -> None:
@@ -308,12 +324,32 @@ def install(command: InstallLibs) -> None:
                 install_ios_libs(source, package, Path(tmp))
 
 
+def test(command: TestRelease) -> None:
+    out = prepare_out(command.out)
+    file = command.file.resolve()
+    match command.kind:
+        case "cli":
+            test_cli(file, out)
+        case "desktop":
+            tools = {
+                Platform.LINUX: ["Xvfb", "openbox", "xdotool", "import", "identify"],
+                Platform.MACOS: ["hdiutil", "screencapture"],
+                Platform.WINDOWS: ["msiexec", "powershell"],
+            }
+            require_tools(tools[host_platform()])
+            test_desktop(file, out)
+        case _:
+            test_apk(file, out)
+
+
 def execute(command: Command) -> None:
     match command:
         case Reproduce():
             reproduce(command)
         case InstallLibs():
             install(command)
+        case TestRelease():
+            test(command)
         case _:
             build(command)
 
@@ -420,6 +456,21 @@ def parse_install_args(argv: Sequence[str]) -> InstallLibs:
     return InstallLibs(args.platform, args.package, getattr(args, "arch", Arch.AARCH64), args.source)
 
 
+def parse_test_args(argv: Sequence[str]) -> TestRelease:
+    parser = argparse.ArgumentParser(prog="simplex-chat-build.py test", description="Run a release file as its users do.")
+    kinds = parser.add_subparsers(dest="kind", required=True)
+    for name, file, help in (
+        ("cli", "the CLI binary", "the CLI starts and prints its version"),
+        ("desktop", "the .deb, .AppImage, .dmg or .msi", "the app installs, opens its window and draws it, with a screenshot"),
+        ("apk", "the APK, signed with a throwaway key when unsigned", "the app starts in the running emulator, with a screenshot"),
+    ):
+        sub = kinds.add_parser(name, help=help)
+        sub.add_argument("file", type=Path, help=file)
+        sub.add_argument("--out", type=Path, required=True, help="where the screenshots and logs go")
+    args = parser.parse_args(argv)
+    return TestRelease(args.kind, args.file, args.out)
+
+
 def parse_arches(value: str) -> tuple[Arch, ...]:
     try:
         return tuple(Arch(arch) for arch in value.split(","))
@@ -435,8 +486,10 @@ def parse_args(argv: Sequence[str]) -> Command:
             return parse_reproduce_args(argv[1:])
         case ["install"]:
             return parse_install_args(argv[1:])
-    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,install,reproduce} ...", description=__doc__)
-    parser.error("the first argument is build, install or reproduce")
+        case ["test"]:
+            return parse_test_args(argv[1:])
+    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,install,test,reproduce} ...", description=__doc__)
+    parser.error("the first argument is build, install, test or reproduce")
 
 
 def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:

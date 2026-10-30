@@ -140,6 +140,15 @@ class PrebuiltLibsTest(unittest.TestCase):
         self.assertEqual([p.name for p in libs.iterdir()], ["libsimplex.so"])
         self.assertTrue((self.root / "apps/multiplatform/build/links/linux-x64").is_symlink())
 
+    def test_test_commands(self):
+        self.assertEqual(
+            build_script.parse_args(["test", "desktop", "simplex-desktop-x86_64.AppImage", "--out", "screens"]),
+            build_script.TestRelease("desktop", pathlib.Path("simplex-desktop-x86_64.AppImage"), pathlib.Path("screens")),
+        )
+        for argv in (["test", "desktop", "app.deb"], ["test", "ios", "x", "--out", "o"]):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                build_script.parse_args(argv)
+
     def test_install_commands(self):
         here = pathlib.Path(".")
         self.assertEqual(

@@ -19,10 +19,11 @@ from . import (
     macos,
     nix,
     openssl,
+    smoke,
     windows,
 )
 
-MODULES = (common, apk_zip, docker, nix, desktop, openssl, android, linux, macos, windows, ios, cli)
+MODULES = (common, apk_zip, docker, nix, desktop, openssl, android, linux, macos, windows, ios, smoke, cli)
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
