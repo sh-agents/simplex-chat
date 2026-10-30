@@ -153,11 +153,15 @@ def build_host_cli(source: Path, cabal_local: str) -> Path:
     remove_tree(source / "dist-newstyle")
     update, build = CLI_BUILD_STEPS[1:]
     run(update.argv, cwd=source)
+    run_cabal(source, build.argv[1:])
+    return Path(run_cabal(source, ["list-bin", "exe:simplex-chat"], capture=True).strip().splitlines()[-1])
+
+
+def run_cabal(source: Path, args: Sequence[str], capture: bool = False) -> str:
     if host_platform() == Platform.WINDOWS:
-        # cabal update checks these out, and cabal build fails to update them in place
+        # each cabal command updates the checkouts that an earlier one left, which fails on Windows
         remove_cabal_sources(source)
-    run(build.argv, cwd=source)
-    return Path(run(["cabal", "list-bin", "exe:simplex-chat"], cwd=source, capture=True).stdout.strip().splitlines()[-1])
+    return run(["cabal", *args], cwd=source, capture=capture).stdout or ""
 
 
 def zip_desktop_libs(libs: Path, extra: Sequence[Path], target: Path) -> None:

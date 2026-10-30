@@ -220,18 +220,19 @@ class HostDesktopTest(unittest.TestCase):
             args = [str(a) for a in args]
             if args == ["cabal", "update"]:
                 checkout.mkdir(parents=True)
-            elif args == ["cabal", "build", "-j"]:
+            elif args[:2] in (["cabal", "build"], ["cabal", "list-bin"]):
                 seen.append(checkout.exists())
+                checkout.mkdir(parents=True, exist_ok=True)
             return mock.Mock(returncode=0, stdout="/dist/simplex-chat\n")
 
         with patch_all("run", fake_run), patch_all("host_platform", return_value=host):
             build_script.build_host_cli(self.source, "")
         return seen
 
-    def test_windows_cli_build_starts_without_the_checkouts_of_cabal_update(self):
-        self.assertEqual(self.checkouts_at_build(build_script.Platform.WINDOWS), [False])
+    def test_windows_cabal_commands_start_without_earlier_checkouts(self):
+        self.assertEqual(self.checkouts_at_build(build_script.Platform.WINDOWS), [False, False])
         shutil.rmtree(self.source / "dist-newstyle")
-        self.assertEqual(self.checkouts_at_build(build_script.Platform.MACOS), [True])
+        self.assertEqual(self.checkouts_at_build(build_script.Platform.MACOS), [True, True])
 
     def test_read_only_cabal_checkouts_are_removed(self):
         pack = self.source / "dist-newstyle/src/simplexmq-abc/.git/objects/pack/p.pack"

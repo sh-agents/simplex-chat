@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .common import edit_lines, fetch_pinned, run, single_dir, single_file
+from .common import edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file
 from .desktop import (
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
@@ -19,7 +19,7 @@ from .desktop import (
     client_library_constraints,
     desktop_libs,
     link_desktop_libs,
-    remove_cabal_sources,
+    run_cabal,
     zip_desktop_libs,
 )
 from .openssl import OpenSsl, check_static_openssl, host_openssl, static_libcrypto
@@ -38,12 +38,11 @@ def build_windows_lib(source: Path, openssl: OpenSsl) -> Path:
     """libsimplex.dll and the libcrypto it loads, in the desktop app's libraries directory, which it returns."""
     check_exports(source)
     for old in source.glob("dist-newstyle/build/x86_64-windows/ghc-*/simplex-chat-*"):
-        shutil.rmtree(old)
-    remove_cabal_sources(source)
+        remove_tree(old)
     options = f"-shared -threaded -optl-L{openssl.lib.as_posix()} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
     (source / "cabal.project.local").write_text(openssl.cabal_local(options))
     disable_ghc_lld()
-    run(["cabal", "build", "lib:simplex-chat", *client_library_constraints(Database.SQLITE)], cwd=source)
+    run_cabal(source, ["build", "lib:simplex-chat", *client_library_constraints(Database.SQLITE)])
     libs = desktop_libs(source, WINDOWS_DESKTOP.libs_dir)
     shutil.rmtree(libs, ignore_errors=True)
     shutil.rmtree(source / "apps/multiplatform/desktop/build/cmake", ignore_errors=True)
@@ -91,7 +90,6 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         openssl = host_openssl(work)
         static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
         cli = build_host_cli(source, static.cabal_local(OPENSSL_WINDOWS_STATIC_LINK))
-        remove_cabal_sources(source)
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
         libs = release_windows_libs(source, openssl, out)
