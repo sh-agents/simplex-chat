@@ -59,7 +59,8 @@ def apple_signing(require: bool) -> bool:
 
 
 def otool(flag: str, lib: Path) -> list[str]:
-    return run(["otool", flag, lib], capture=True).stdout.splitlines()
+    """What otool prints about lib, without its first line, which is lib's path."""
+    return run(["otool", flag, lib], capture=True).stdout.splitlines()[1:]
 
 
 def rpath_dependencies(lib: Path) -> list[str]:

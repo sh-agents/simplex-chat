@@ -79,6 +79,29 @@ class MacLibTest(unittest.TestCase):
         self.assertIn(["install_name_tool", "-id", "libcrypto.3.0.dylib", str(libs / "libcrypto.3.0.dylib")], fake.commands)
         self.assertIn(["install_name_tool", "-delete_rpath", "/Users/runner/ghc/lib", str(libs / "libHSsmplxmq-6.5.dylib")], fake.commands)
 
+    def test_the_path_that_otool_prints_first_is_not_a_local_directory(self):
+        libs = self.root / "Users/runner/libs"
+        libs.mkdir(parents=True)
+        (libs / "libHSsmplxmq-6.5.dylib").write_bytes(b"x")
+        (libs / "libffi.dylib").write_bytes(b"x")
+        crypto = self.root / "libcrypto.3.dylib"
+        crypto.write_bytes(b"c")
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            if args[0] == "otool":
+                lines = [f"{args[2]}:", "Load command 0", "      cmd LC_ID_DYLIB", "         name @rpath/lib.dylib (offset 24)"]
+                if "smplxmq" in args[2] and not any("-change" in c for c in changed):
+                    lines.append(f"         name {crypto} (offset 24)")
+                return mock.Mock(returncode=0, stdout="\n".join(lines) + "\n")
+            changed.append(args)
+            return mock.Mock(returncode=0, stdout="")
+
+        changed = []
+        with patch_all("run", fake_run):
+            build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
+        self.assertTrue((libs / "libcrypto.3.0.dylib").exists())
+
     def test_libraries_still_pointing_to_local_directories_fail(self):
         libs = self.root / "libs"
         libs.mkdir()
