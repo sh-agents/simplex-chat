@@ -96,5 +96,7 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         add_vlc_windows(libs, work)
         link_desktop_libs(source, host.libs_dir, "windows-x64")
         assets = f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"
-        run(["bash", "./gradlew", assets, "packageMsi"], cwd=source / "apps/multiplatform")
+        # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's
+        multiplatform = source / "apps/multiplatform"
+        run([multiplatform / "gradlew.bat", assets, "packageMsi"], cwd=multiplatform)
         shutil.copy(single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi"), out / host.desktop)

@@ -176,7 +176,8 @@ class HostDesktopTest(unittest.TestCase):
         ):
             build_script.build_desktop_windows(self.source, self.out)
         self.assertEqual(calls, [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64")])
-        self.assertIn(["bash", "./gradlew", "-Psimplex.assets.dir=../../assets", "packageMsi"], recorder.commands)
+        multiplatform = self.source / "apps/multiplatform"
+        self.assertIn([str(multiplatform / "gradlew.bat"), "-Psimplex.assets.dir=../../assets", "packageMsi"], recorder.commands)
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-windows-x86_64.zip", "simplex-chat-windows-x86-64", "simplex-desktop-windows-x86_64.msi"],

@@ -261,7 +261,7 @@ def build(command: Build) -> None:
             build_macos_libs(source, database, out, require_signing)
         case BuildWindowsLibs():
             require_platform(Platform.WINDOWS)
-            require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "dlltool"])
+            require_tools(["cabal", "ghc", "perl", "make", "gcc", "dlltool"])
             build_windows_libs(source, out)
         case BuildAndroidLibs(arch=arch, install_nix=install):
             require_platform(Platform.LINUX)
@@ -282,7 +282,7 @@ def build(command: Build) -> None:
             build_desktop_macos(source, out, require_signing)
         case BuildDesktopWindows():
             require_platform(Platform.WINDOWS)
-            require_tools(["bash", "cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool"])
+            require_tools(["cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool"])
             build_desktop_windows(source, out)
         case BuildIosArchive(art=art, install_nix=install):
             require_platform(Platform.MACOS)
