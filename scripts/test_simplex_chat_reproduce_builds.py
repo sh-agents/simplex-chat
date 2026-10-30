@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import contextlib
 import importlib.util
 import io
 import os
@@ -692,6 +693,169 @@ class OpenSslTest(unittest.TestCase):
         self.assertIn(f'version = "{reproduce.OPENSSL_VERSION}";', pin)
         self.assertIn(f'url = "{reproduce.OPENSSL_URL}";', pin)
         self.assertIn(f'sha256 = "{reproduce.OPENSSL_SHA256}";', pin)
+
+
+class HostDesktopTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.source, self.out = self.root / "src", self.root / "out"
+        self.source.mkdir()
+        self.out.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fake_build(self, libs_dir, desktop_dir, desktop_name, dependencies):
+        """Stands in for the commands: OpenSSL's build, cabal, the desktop scripts and gradle write what they would."""
+        recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat\n", "otool": dependencies, "objdump": dependencies})
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            if args[:2] == ["make", "install_sw"]:
+                lib = self.root / "work-openssl"
+                (lib / "lib").mkdir(parents=True, exist_ok=True)
+                (lib / "lib/libcrypto.a").write_bytes(b"static")
+            if "build-lib" in " ".join(args) or "build-desktop-mac.sh" in " ".join(args):
+                libs = self.source / reproduce.DESKTOP_LIBS_DIR / libs_dir
+                (libs / "vlc").mkdir(parents=True)
+                (libs / "libsimplex.so").write_bytes(b"lib")
+                (libs / "vlc/libvlc").write_bytes(b"vlc")
+                (self.source / reproduce.DESKTOP_RELEASE_DIR / desktop_dir).mkdir(parents=True)
+                (self.source / reproduce.DESKTOP_RELEASE_DIR / desktop_dir / desktop_name).write_bytes(b"desktop")
+            if args[0] == "dlltool":
+                (self.source / "libsimplex.lib").write_bytes(b"import lib")
+            return recorder(args, **kwargs)
+
+        (self.root / "dist").mkdir()
+        (self.root / "dist/simplex-chat").write_bytes(b"cli")
+        return recorder, fake_run
+
+    def fetch(self, work):
+        source = work / f"openssl-{reproduce.OPENSSL_VERSION}"
+        source.mkdir()
+        (source / "libcrypto.a").write_bytes(b"static")
+        return source
+
+    def zip_names(self, name):
+        with zipfile.ZipFile(self.out / name) as z:
+            return sorted(z.namelist())
+
+    def test_cabal_local_links_both_packages_with_openssl(self):
+        text = reproduce.openssl_cabal_local("/o/include", "/o/lib", "-optl-lws2_32")
+        self.assertEqual(text.count("extra-include-dirs: /o/include"), 2)
+        self.assertIn("package simplexmq\n", text)
+        self.assertIn("package direct-sqlcipher\n    extra-include-dirs: /o/include\n    extra-lib-dirs: /o/lib\n    flags: +openssl", text)
+        self.assertTrue(text.endswith("package simplex-chat\n    ghc-options: -optl-lws2_32\n"))
+        self.assertNotIn("simplex-chat", reproduce.openssl_cabal_local("/i", "/l"))
+
+    def test_cli_loading_libcrypto_is_rejected(self):
+        with self.assertRaises(reproduce.ReproduceError):
+            reproduce.check_static_openssl(pathlib.Path("cli"), "\t/opt/homebrew/opt/openssl@3.0/lib/libcrypto.3.dylib\n")
+        reproduce.check_static_openssl(pathlib.Path("cli"), "\t/usr/lib/libSystem.B.dylib\n")
+
+    def test_apple_signing_needs_all_or_none(self):
+        full = {name: "x" for name in reproduce.APPLE_SIGNING_ENV}
+        with mock.patch.dict(os.environ, full, clear=True):
+            self.assertTrue(reproduce.apple_signing(require=True))
+        with mock.patch.dict(os.environ, {"APPLE_SIMPLEX_SIGNING_KEYCHAIN": "x"}, clear=True), self.assertRaises(reproduce.ReproduceError):
+            reproduce.apple_signing(require=False)
+        with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(reproduce.ReproduceError):
+            reproduce.apple_signing(require=True)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(reproduce, "warn") as warn:
+            self.assertFalse(reproduce.apple_signing(require=False))
+        self.assertIn("unsigned", warn.call_args.args[0])
+
+    def test_macos_unsigned_build(self):
+        recorder, fake_run = self.fake_build("mac-aarch64", "dmg", "SimpleX-7.1.0.dmg", "\t/usr/lib/libSystem.B.dylib\n")
+
+        def fetch(work):
+            source = self.fetch(work)
+            (self.root / "work-openssl").mkdir(exist_ok=True)
+            return source
+
+        with (
+            mock.patch.object(reproduce, "run", fake_run),
+            mock.patch.object(reproduce, "fetch_openssl", fetch),
+            mock.patch.object(reproduce.platform, "machine", return_value="arm64"),
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(reproduce, "warn"),
+            mock.patch.object(reproduce.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(self.root / "work"))),
+        ):
+            (self.root / "work").mkdir()
+            (self.root / "work/openssl/lib").mkdir(parents=True)
+            (self.root / "work/openssl/lib/libcrypto.a").write_bytes(b"static")
+            reproduce.build_desktop_macos(self.source, self.out, require_signing=False)
+        configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
+        self.assertIn("darwin64-arm64-cc", configure)
+        self.assertIn("--openssldir=/etc/ssl", configure)
+        self.assertIn(["make", "install_sw"], recorder.commands)
+        scripts = [c[0] for c in recorder.commands if c[0].startswith(("scripts/", "./gradlew"))]
+        self.assertEqual(scripts, ["scripts/desktop/build-lib-mac.sh", "./gradlew"])
+        self.assertIn(f"extra-lib-dirs: {self.root / 'work/openssl/lib'}", (self.source / "cabal.project.local").read_text())
+        self.assertEqual(
+            sorted(p.name for p in self.out.iterdir()),
+            ["simplex-chat-libs-macos-aarch64.zip", "simplex-chat-macos-aarch64", "simplex-desktop-macos-aarch64.dmg"],
+        )
+        self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.so"])
+
+    def test_macos_cli_linking_libcrypto_fails(self):
+        _, fake_run = self.fake_build("mac-aarch64", "dmg", "SimpleX-7.1.0.dmg", "\t@rpath/libcrypto.3.dylib\n")
+        with (
+            mock.patch.object(reproduce, "run", fake_run),
+            mock.patch.object(reproduce, "fetch_openssl", self.fetch),
+            mock.patch.object(reproduce.platform, "machine", return_value="x86_64"),
+            mock.patch.object(reproduce, "apple_signing", return_value=False),
+            mock.patch.object(reproduce, "static_libcrypto", return_value=self.root),
+            self.assertRaises(reproduce.ReproduceError),
+        ):
+            reproduce.build_desktop_macos(self.source, self.out, require_signing=False)
+
+    def test_windows_build(self):
+        recorder, fake_run = self.fake_build("windows-x86_64", "msi", "SimpleX-7.1.0.msi", "\tDLL Name: KERNEL32.dll\n")
+        with mock.patch.object(reproduce, "run", fake_run), mock.patch.object(reproduce, "fetch_openssl", self.fetch):
+            reproduce.build_desktop_windows(self.source, self.out)
+        configure = next(c for c in recorder.commands if c[:2] == ["perl", "Configure"])
+        self.assertIn("mingw64", configure)
+        self.assertIn("--prefix=C:/Program Files/OpenSSL", configure)
+        self.assertIn("--openssldir=C:/Program Files/Common Files/SSL", configure)
+        self.assertNotIn(["make", "install_sw"], recorder.commands)
+        lib_build = recorder.commands.index(["bash", "scripts/desktop/build-lib-windows.sh"])
+        self.assertTrue(recorder.envs[lib_build]["OPENSSL_DIR"].endswith(f"/openssl-{reproduce.OPENSSL_VERSION}"))
+        self.assertEqual(
+            sorted(p.name for p in self.out.iterdir()),
+            ["simplex-chat-libs-windows-x86_64.zip", "simplex-chat-windows-x86-64", "simplex-desktop-windows-x86_64.msi"],
+        )
+        self.assertEqual(self.zip_names("simplex-chat-libs-windows-x86_64.zip"), ["libs/libsimplex.lib", "libs/libsimplex.so"])
+
+    def test_cli_cabal_local_is_static_on_windows(self):
+        cabal_locals = []
+
+        def fake_cli(source, cabal_local):
+            cabal_locals.append(cabal_local)
+            raise reproduce.ReproduceError("stop")
+
+        with (
+            mock.patch.object(reproduce, "run"),
+            mock.patch.object(reproduce, "fetch_openssl", self.fetch),
+            mock.patch.object(reproduce, "build_host_cli", fake_cli),
+            self.assertRaises(reproduce.ReproduceError),
+        ):
+            reproduce.build_desktop_windows(self.source, self.out)
+        self.assertIn("/openssl-static\n", cabal_locals[0])
+        self.assertIn("ghc-options: -optl-lws2_32 -optl-lgdi32 -optl-lcrypt32", cabal_locals[0])
+
+    def test_read_only_cabal_checkouts_are_removed(self):
+        pack = self.source / "dist-newstyle/src/simplexmq-abc/.git/objects/pack/p.pack"
+        pack.parent.mkdir(parents=True)
+        pack.write_bytes(b"pack")
+        pack.chmod(0o444)
+        pack.parent.chmod(0o555)
+        keep = self.source / "dist-newstyle/src/aeson-1"
+        keep.mkdir()
+        reproduce.remove_cabal_sources(self.source)
+        self.assertFalse((self.source / "dist-newstyle/src/simplexmq-abc").exists())
+        self.assertTrue(keep.exists())
 
 
 OTOOL = """Archive : libffi.a(closures.o)

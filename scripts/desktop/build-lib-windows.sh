@@ -34,9 +34,8 @@ for elem in "${exports[@]}"; do count=$(grep -R "\"$elem\"" flake.nix | wc -l); 
 cd $root_dir
 mkdir dist-newstyle 2>/dev/null || true
 
-scripts/desktop/prepare-openssl-windows.sh
-
-openssl_windows_style_path=$(echo `pwd`/dist-newstyle/openssl-3.0.15 | sed 's#/\([a-zA-Z]\)#\1:#' | sed 's#/#\\#g')
+# The OpenSSL source tree built by simplex-chat-reproduce-builds.py, as a C:/... path
+openssl_dir=${OPENSSL_DIR:?set OPENSSL_DIR to an OpenSSL build}
 rm -rf $BUILD_DIR 2>/dev/null || true
 # Existence of these directories produces build error: cabal's bug
 # (simplexmq is removed because cabal cannot delete its read-only git submodule pack files - blst, libbbs - on Windows)
@@ -45,10 +44,10 @@ rm cabal.project.local 2>/dev/null || true
 echo "ignore-project: False" >> cabal.project.local
 echo "package direct-sqlcipher" >> cabal.project.local
 echo "    flags: +openssl" >> cabal.project.local
-echo "    extra-include-dirs: $openssl_windows_style_path\include" >> cabal.project.local
-echo "    extra-lib-dirs: $openssl_windows_style_path" >> cabal.project.local
+echo "    extra-include-dirs: $openssl_dir/include" >> cabal.project.local
+echo "    extra-lib-dirs: $openssl_dir" >> cabal.project.local
 echo "package simplex-chat" >> cabal.project.local
-echo "    ghc-options: -shared -threaded -optl-L$openssl_windows_style_path -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def" >> cabal.project.local
+echo "    ghc-options: -shared -threaded -optl-L$openssl_dir -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def" >> cabal.project.local
 # Very important! Without it the build fails on linking step since the linker can't find exported symbols.
 # It looks like GHC bug because with such random path the build ends successfully
 sed -i "s/ld.lld.exe/abracadabra.exe/" `ghc --print-libdir`/settings
@@ -58,7 +57,7 @@ rm -rf apps/multiplatform/common/src/commonMain/cpp/desktop/libs/$OS-$ARCH/
 rm -rf apps/multiplatform/desktop/build/cmake
 
 mkdir -p apps/multiplatform/common/src/commonMain/cpp/desktop/libs/$OS-$ARCH/
-cp dist-newstyle/openssl-3.0.15/libcrypto-3-x64.dll apps/multiplatform/common/src/commonMain/cpp/desktop/libs/$OS-$ARCH/
+cp "$openssl_dir/libcrypto-3-x64.dll" apps/multiplatform/common/src/commonMain/cpp/desktop/libs/$OS-$ARCH/
 cp libsimplex.dll apps/multiplatform/common/src/commonMain/cpp/desktop/libs/$OS-$ARCH/
 
 [ -n "$SKIP_VLC" ] || scripts/desktop/prepare-vlc-windows.sh
