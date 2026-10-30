@@ -133,3 +133,152 @@ jobs:
           compression-level: 0
           retention-days: 30
           if-no-files-found: error
+
+  desktop-linux:
+    name: Desktop Ubuntu ${{ matrix.ubuntu }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ubuntu: "22.04", arch: x86_64, runner: ubuntu-22.04 }
+          - { ubuntu: "24.04", arch: x86_64, runner: ubuntu-24.04 }
+          - { ubuntu: "22.04", arch: aarch64, runner: ubuntu-22.04-arm }
+          - { ubuntu: "24.04", arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: scripts/ci/linux_util_free_space.sh
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build CLI and desktop apps
+        run: |
+          version=$(sed -n 's/^version: *//p' simplex-chat.cabal)
+          python3 scripts/simplex-chat-build.py build desktop-linux ${{ matrix.ubuntu }} --version "$version" --out "$RUNNER_TEMP/out"
+
+      - name: Upload apps
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-ubuntu-${{ matrix.ubuntu }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
+  desktop-macos:
+    name: Desktop macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: aarch64, runner: macos-latest }
+          - { arch: x86_64, runner: macos-15-intel }
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      # GHC's C compiler uses the Command Line Tools' SDK
+      - name: Point Command Line Tools SDK to Xcode SDK
+        run: sudo ln -sfn "$(xcrun --sdk macosx --show-sdk-path)" /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+
+      - name: Setup Haskell
+        uses: simplex-chat/setup-haskell-action@v2
+        with:
+          ghc-version: 9.6.3
+          cabal-version: 3.10.2.0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: corretto
+          java-version: 17
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build CLI, desktop app and libraries
+        run: python3 scripts/simplex-chat-build.py build desktop-macos --out "$RUNNER_TEMP/out"
+
+      - name: Upload apps
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macos-${{ matrix.arch }}-unsigned
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
+  desktop-windows:
+    name: Desktop Windows
+    runs-on: windows-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure pagefile
+        uses: simplex-chat/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 16GB
+          disk-root: "C:"
+
+      - name: Setup Haskell
+        uses: simplex-chat/setup-haskell-action@v2
+        with:
+          ghc-version: 9.6.3
+          cabal-version: 3.10.2.0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: corretto
+          java-version: 17
+
+      - name: Setup MSYS2
+        uses: simplex-chat/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: >-
+            git
+            perl
+            make
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            python:p
+
+      - name: Build CLI, desktop app and libraries
+        run: |
+          export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
+          python scripts/simplex-chat-build.py build desktop-windows --out "$(cygpath -w "$RUNNER_TEMP")/out"
+
+      - name: Upload apps
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-windows-unsigned
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
