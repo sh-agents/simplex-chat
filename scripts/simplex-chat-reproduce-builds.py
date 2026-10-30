@@ -12,6 +12,8 @@ Build one commit's release files, as CI does:
     simplex-chat-reproduce-builds.py build ios-archive --art <simplex-chat-art> --out <dir> [--source <dir>] [--install-nix]
 
 Needs Python 3.12+, git and Docker; ios-archive needs macOS with Xcode and Nix. Results go to ./<tag>-simplex-chat.
+The Android builds are signed by Gradle when ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
+ANDROID_KEY_PASSWORD are set, and unsigned otherwise.
 """
 
 import sys
@@ -97,6 +99,9 @@ SIMPLEX_KEY = "3C:52:C4:FD:3C:AD:1C:07:C9:B0:0A:70:80:E3:58:FA:B9:FE:FC:B8:AF:5A
 ANDROID_LIBS_DIR = "apps/multiplatform/common/src/commonMain/cpp/android/libs"
 ANDROID_LIBS = ("libsimplex", "libsupport")
 ANDROID_BUNDLE_DIR = "apps/multiplatform/android/build/outputs/bundle/googleRelease"
+# The release key that android/build.gradle.kts signs with: the keystore's path and its passwords and alias
+ANDROID_SIGNING_ENV = ("ANDROID_KEYSTORE", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD")
+ANDROID_KEYSTORE_MOUNT = "/keystore/release.keystore"
 # The local.properties of release-mobile.py's builds
 ANDROID_LOCAL_PROPERTIES = {
     "compression.level": "5",
@@ -442,7 +447,8 @@ class Container:
         run(["docker", "rm", "--force", self.name], check=False, capture=True)
         run(["docker", "image", "rm", self.name], check=False, capture=True)
 
-    def run(self, step: Step, capture: bool = False) -> str:
+    def run(self, step: Step, capture: bool = False, secrets: Mapping[str, str] | None = None) -> str:
+        """Secrets are environment variables passed to docker by name, so that their values are in no command line."""
         args = ["docker", "exec", "-w", step.workdir]
         if step.input is not None:
             args.append("-i")
@@ -450,8 +456,10 @@ class Container:
             args += ["-u", step.user]
         for key, value in step.env.items():
             args += ["-e", f"{key}={value}"]
+        for key in secrets or {}:
+            args += ["-e", key]
         title = " ".join(step.argv)
-        return run([*args, self.name, *step.argv], input=step.input, capture=capture, title=title).stdout or ""
+        return run([*args, self.name, *step.argv], env=secrets, input=step.input, capture=capture, title=title).stdout or ""
 
     def run_all(self, steps: Sequence[Step]) -> None:
         for step in steps:
@@ -475,12 +483,52 @@ def retry_once(action: Callable[[], object]) -> None:
 # Android
 
 
+@dataclass(frozen=True, slots=True)
+class AndroidSigning:
+    keystore: Path
+    store_password: str = field(repr=False)
+    key_alias: str
+    key_password: str = field(repr=False)
+
+    @staticmethod
+    def from_env(environ: Mapping[str, str]) -> "AndroidSigning | None":
+        """The release key of the ANDROID_SIGNING_ENV variables, or None when none of them is set."""
+        values = [environ.get(name, "") for name in ANDROID_SIGNING_ENV]
+        if not any(values):
+            return None
+        missing = [name for name, value in zip(ANDROID_SIGNING_ENV, values, strict=True) if not value]
+        if missing:
+            raise ReproduceError(f"set all of {', '.join(ANDROID_SIGNING_ENV)} to sign, or none; missing: {', '.join(missing)}")
+        keystore = Path(values[0])
+        if not keystore.is_file():
+            raise ReproduceError(f"the keystore {keystore} is not found")
+        return AndroidSigning(keystore.resolve(), values[1], values[2], values[3])
+
+    @property
+    def env(self) -> dict[str, str]:
+        return {"ANDROID_KEYSTORE": ANDROID_KEYSTORE_MOUNT, "ANDROID_KEY_ALIAS": self.key_alias}
+
+    @property
+    def secrets(self) -> dict[str, str]:
+        return {"ANDROID_KEYSTORE_PASSWORD": self.store_password, "ANDROID_KEY_PASSWORD": self.key_password}
+
+
+def android_signing() -> AndroidSigning | None:
+    signing = AndroidSigning.from_env(os.environ)
+    if signing is None:
+        warn(f"{', '.join(ANDROID_SIGNING_ENV)} are not set: building unsigned")
+    return signing
+
+
 @contextlib.contextmanager
-def android_container(source: Path, out: Path, set_pid_max: bool) -> Iterator[Container]:
+def android_container(source: Path, out: Path, set_pid_max: bool, signing: AndroidSigning | None = None) -> Iterator[Container]:
+    mounts = {source.resolve(): PROJECT, out.resolve(): OUT}
+    if signing:
+        mounts[signing.keystore] = f"{ANDROID_KEYSTORE_MOUNT}:ro"
     # FUSE and SYS_ADMIN are what Dockerfile.build's builds need; systempaths=unconfined makes /proc/sys writable
     with Container(
         source,
-        {source.resolve(): PROJECT, out.resolve(): OUT},
+        mounts,
         run_args=[
             "--device", "/dev/fuse",
             "--cap-add", "SYS_ADMIN",
@@ -509,20 +557,33 @@ def gradle_path(container: Container) -> str:
     return f"{Path(found[0]).parent}:{path}"
 
 
-def build_apk(container: Container, source: Path, arch: Arch, out: Path, out_name: str, nix_cache: bool, keep_libs: bool) -> None:
-    """The deterministic unsigned APK of scripts/android/build-android.sh, as <out>/<out_name>."""
+def build_apk(
+    container: Container,
+    source: Path,
+    arch: Arch,
+    out: Path,
+    out_name: str,
+    nix_cache: bool,
+    keep_libs: bool,
+    signing: AndroidSigning | None = None,
+) -> None:
+    """The deterministic APK of scripts/android/build-android.sh, signed by Gradle with signing, as <out>/<out_name>."""
     env = {"ARCHES": arch.value, "PATH": gradle_path(container)}
     if nix_cache:
         env["NIX_CONFIG"] = NIX_CACHE_CONFIG
+    secrets = None
+    if signing:
+        env |= signing.env
+        secrets = signing.secrets
     build = Step(("./scripts/android/build-android.sh", "-gs", android_vercode(source)), env=env)
-    retry_once(lambda: container.run(build))
+    retry_once(lambda: container.run(build, secrets=secrets))
     shutil.copy(source / f"simplex-chat-{arch.abi}.apk", out / out_name)
     if keep_libs:
         for lib in ANDROID_LIBS:
             container.copy_out(f"{PROJECT}/result-{arch}-{lib}/pkg-{arch}-android-{lib}.zip", out)
 
 
-def build_bundle(container: Container, source: Path, libs: Path, out: Path) -> None:
+def build_bundle(container: Container, source: Path, libs: Path, out: Path, signing: AndroidSigning | None = None) -> None:
     # Gradle reads compression.level only from local.properties; a non-zero level extracts the native libraries at
     # install, as the APKs do.
     properties = "".join(f"{key}={value}\n" for key, value in ANDROID_LOCAL_PROPERTIES.items())
@@ -537,8 +598,12 @@ def build_bundle(container: Container, source: Path, libs: Path, out: Path) -> N
                 raise ReproduceError(f"{name} not found in {libs}")
             with zipfile.ZipFile(found[0]) as z:
                 z.extractall(target)
-    build = Step(("./gradlew", "--no-daemon", ":android:bundleGoogleRelease"), workdir=f"{PROJECT}/apps/multiplatform")
-    retry_once(lambda: container.run(build))
+    build = Step(
+        ("./gradlew", "--no-daemon", ":android:bundleGoogleRelease"),
+        workdir=f"{PROJECT}/apps/multiplatform",
+        env=signing.env if signing else {},
+    )
+    retry_once(lambda: container.run(build, secrets=signing.secrets if signing else None))
     shutil.copy(single_file(source / ANDROID_BUNDLE_DIR, "*.aab"), out / "simplex.aab")
 
 
@@ -914,12 +979,14 @@ def build(command: BuildApk | BuildBundle | BuildDesktopLinux | BuildIosArchive)
     match command:
         case BuildApk(arch=arch, nix_cache=nix_cache):
             require_tools(["docker"])
-            with android_container(source, out, arch == Arch.ARMV7A) as container:
-                build_apk(container, source, arch, out, f"simplex-{arch}.apk", nix_cache, keep_libs=True)
+            signing = android_signing()
+            with android_container(source, out, arch == Arch.ARMV7A, signing) as container:
+                build_apk(container, source, arch, out, f"simplex-{arch}.apk", nix_cache, keep_libs=True, signing=signing)
         case BuildBundle(libs=libs):
             require_tools(["docker"])
-            with android_container(source, out, set_pid_max=False) as container:
-                build_bundle(container, source, libs.resolve(), out)
+            signing = android_signing()
+            with android_container(source, out, set_pid_max=False, signing=signing) as container:
+                build_bundle(container, source, libs.resolve(), out, signing)
         case BuildDesktopLinux(image=image, version=version):
             require_tools(["docker"])
             build_desktop_linux(source, image, version, out)

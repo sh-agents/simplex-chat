@@ -82,6 +82,7 @@ class Recorder:
     def __init__(self, fail_once=(), answers=None):
         self.commands = []
         self.inputs = []
+        self.envs = []
         self.fail_once = list(fail_once)
         self.answers = answers or {}
 
@@ -89,6 +90,7 @@ class Recorder:
         args = [str(a) for a in args]
         self.commands.append(args)
         self.inputs.append(input)
+        self.envs.append(env)
         joined = " ".join(args)
         for pattern in self.fail_once:
             if pattern in joined:
@@ -403,6 +405,80 @@ class AndroidTest(unittest.TestCase):
         recorder = Recorder(answers={"apksigner": "Signer #1 certificate SHA-256 digest: 3c52c4fd\n"})
         with mock.patch.object(reproduce, "run", recorder):
             self.assertEqual(reproduce.release_signer(self.container(), "simplex-aarch64.apk"), "3C:52:C4:FD")
+
+
+SIGNING_ENV = {
+    "ANDROID_KEYSTORE_PASSWORD": "store-secret",
+    "ANDROID_KEY_ALIAS": "simplex",
+    "ANDROID_KEY_PASSWORD": "key-secret",
+}
+
+
+class AndroidSigningTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.keystore = pathlib.Path(self.tmp.name) / "release.keystore"
+        self.keystore.write_bytes(b"keystore")
+        self.environ = {**SIGNING_ENV, "ANDROID_KEYSTORE": str(self.keystore)}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unset_environment_builds_unsigned(self):
+        self.assertIsNone(reproduce.AndroidSigning.from_env({}))
+
+    def test_partial_environment_names_what_is_missing(self):
+        environ = dict(self.environ)
+        del environ["ANDROID_KEY_PASSWORD"]
+        with self.assertRaises(reproduce.ReproduceError) as raised:
+            reproduce.AndroidSigning.from_env(environ)
+        self.assertIn("missing: ANDROID_KEY_PASSWORD", str(raised.exception))
+
+    def test_missing_keystore_file(self):
+        with self.assertRaises(reproduce.ReproduceError):
+            reproduce.AndroidSigning.from_env({**self.environ, "ANDROID_KEYSTORE": str(self.keystore) + ".gone"})
+
+    def test_passwords_are_secrets_kept_out_of_env_and_repr(self):
+        signing = reproduce.AndroidSigning.from_env(self.environ)
+        self.assertEqual(signing.env, {"ANDROID_KEYSTORE": "/keystore/release.keystore", "ANDROID_KEY_ALIAS": "simplex"})
+        self.assertEqual(signing.secrets, {"ANDROID_KEYSTORE_PASSWORD": "store-secret", "ANDROID_KEY_PASSWORD": "key-secret"})
+        self.assertNotIn("secret", repr(signing))
+
+    def test_gradle_reads_the_same_variables(self):
+        gradle = (pathlib.Path(reproduce.__file__).parents[1] / "apps/multiplatform/android/build.gradle.kts").read_text()
+        names = ", ".join(f'"{name}"' for name in reproduce.ANDROID_SIGNING_ENV)
+        self.assertIn(f"val releaseSigningEnv = listOf({names})", gradle)
+
+    def test_container_mounts_the_keystore_read_only(self):
+        recorder = Recorder()
+        signing = reproduce.AndroidSigning.from_env(self.environ)
+        root = self.keystore.parent
+        with mock.patch.object(reproduce, "run", recorder), reproduce.android_container(root, root, False, signing):
+            pass
+        start = next(c for c in recorder.commands if c[1] == "run")
+        self.assertIn(f"{self.keystore.resolve()}:/keystore/release.keystore:ro", start)
+
+    def test_apk_build_passes_passwords_by_name_only(self):
+        source = pathlib.Path(self.tmp.name)
+        (source / "apps/multiplatform").mkdir(parents=True)
+        (source / "apps/multiplatform/gradle.properties").write_text("android.version_code=387\n")
+        (source / "simplex-chat-arm64-v8a.apk").write_bytes(b"signed apk")
+        recorder = Recorder(answers={"find": "/g/bin/gradle\n"})
+        signing = reproduce.AndroidSigning.from_env(self.environ)
+        with mock.patch.object(reproduce, "run", recorder):
+            reproduce.build_apk(reproduce.Container(source, {}), source, Arch.AARCH64, source, "x.apk", False, False, signing)
+        index = next(i for i, c in enumerate(recorder.commands) if "./scripts/android/build-android.sh" in c)
+        build = recorder.commands[index]
+        self.assertIn("ANDROID_KEYSTORE=/keystore/release.keystore", build)
+        self.assertIn("ANDROID_KEY_ALIAS=simplex", build)
+        self.assertEqual(build[build.index("ANDROID_KEY_PASSWORD") - 1], "-e")
+        self.assertFalse(any("secret" in a for a in build))
+        self.assertEqual(recorder.envs[index], signing.secrets)
+
+    def test_unsigned_build_warns(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(reproduce, "warn") as warn:
+            self.assertIsNone(reproduce.android_signing())
+        self.assertIn("building unsigned", warn.call_args.args[0])
 
 
 class VerifyApkTest(unittest.TestCase):

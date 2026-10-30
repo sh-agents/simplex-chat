@@ -8,8 +8,26 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// The release key, as simplex-chat-reproduce-builds.py passes it; android.injected.signing.* properties take precedence
+val releaseSigningEnv = listOf("ANDROID_KEYSTORE", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD")
+    .associateWith { System.getenv(it) }
+if (releaseSigningEnv.values.any { it != null } && releaseSigningEnv.values.any { it == null }) {
+    throw GradleException("Set all of ${releaseSigningEnv.keys.joinToString()} to sign, or none")
+}
+
 android {
     compileSdk = 36
+
+    if (releaseSigningEnv.values.all { it != null }) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseSigningEnv.getValue("ANDROID_KEYSTORE")!!)
+                storePassword = releaseSigningEnv.getValue("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = releaseSigningEnv.getValue("ANDROID_KEY_ALIAS")
+                keyPassword = releaseSigningEnv.getValue("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "chat.simplex.app"
@@ -61,6 +79,7 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     kotlinOptions {
@@ -156,8 +175,10 @@ gradle.taskGraph.whenReady {
     if (hasTask("$projectPath:packageFossReleaseBundle")) {
         throw GradleException("An app bundle must include Play Billing, use bundleGoogleRelease or assembleFossRelease")
     }
-    if (hasTask("$projectPath:packageFossRelease") && project.findProperty("android.injected.signing.key.alias") == null) {
-        logger.warn("warning: the release apks are unsigned, pass android.injected.signing.* to sign them")
+    val releaseTasks = listOf("packageFossRelease", "packageGoogleReleaseBundle").map { "$projectPath:$it" }
+    val signed = android.signingConfigs.findByName("release") != null || project.hasProperty("android.injected.signing.key.alias")
+    if (releaseTasks.any { hasTask(it) } && !signed) {
+        logger.warn("warning: the release is unsigned, set ${releaseSigningEnv.keys.joinToString()} to sign it")
     }
     // `isBundle` above is derived from the whole invocation, so a bundle in it disables abi splits
     if (apkTaskPaths.any { hasTask(it) } && bundleTaskPaths.any { hasTask(it) }) {
@@ -195,7 +216,7 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.4")
 }
 
-// Release apks keep the names of the released files; AGP signs them when android.injected.signing.* are given
+// Release apks keep the names of the released files
 tasks.matching { it.path == "$projectPath:packageFossRelease" }.configureEach {
     doLast {
         val outputDir = outputs.files.files.last()
