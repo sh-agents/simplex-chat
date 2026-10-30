@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import BuildError, remove_tree, run
+from .common import BuildError, Platform, host_platform, remove_tree, run
 from .docker import Step
 
 DESKTOP_ENV = {"ASSETS_DIR": "../../assets"}
@@ -141,12 +141,22 @@ def macos_desktop() -> HostDesktop:
     return host
 
 
+def remove_cabal_sources(source: Path) -> None:
+    """cabal fails on Windows when these checkouts exist, and can't delete simplexmq's read-only git pack files."""
+    for path in [*source.glob("dist-newstyle/src/direct-sq*"), *source.glob("dist-newstyle/src/simplexmq*")]:
+        remove_tree(path)
+
+
 def build_host_cli(source: Path, cabal_local: str) -> Path:
     (source / "cabal.project.local").write_text(cabal_local)
     # in place of cabal clean, which can't delete the read-only git pack files of its checkouts on Windows
     remove_tree(source / "dist-newstyle")
-    for step in CLI_BUILD_STEPS[1:]:
-        run(step.argv, cwd=source)
+    update, build = CLI_BUILD_STEPS[1:]
+    run(update.argv, cwd=source)
+    if host_platform() == Platform.WINDOWS:
+        # cabal update checks these out, and cabal build fails to update them in place
+        remove_cabal_sources(source)
+    run(build.argv, cwd=source)
     return Path(run(["cabal", "list-bin", "exe:simplex-chat"], cwd=source, capture=True).stdout.strip().splitlines()[-1])
 
 

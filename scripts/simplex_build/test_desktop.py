@@ -1,6 +1,7 @@
 import contextlib
 import os
 import pathlib
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -210,6 +211,27 @@ class HostDesktopTest(unittest.TestCase):
         self.assertFalse((self.source / "dist-newstyle").exists())
         self.assertEqual(recorder.commands, [["cabal", "update"], ["cabal", "build", "-j"], ["cabal", "list-bin", "exe:simplex-chat"]])
         self.assertEqual(cli, pathlib.Path("/dist/simplex-chat"))
+
+    def checkouts_at_build(self, host):
+        checkout = self.source / "dist-newstyle/src/direct-sq_-fd06"
+        seen = []
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            if args == ["cabal", "update"]:
+                checkout.mkdir(parents=True)
+            elif args == ["cabal", "build", "-j"]:
+                seen.append(checkout.exists())
+            return mock.Mock(returncode=0, stdout="/dist/simplex-chat\n")
+
+        with patch_all("run", fake_run), patch_all("host_platform", return_value=host):
+            build_script.build_host_cli(self.source, "")
+        return seen
+
+    def test_windows_cli_build_starts_without_the_checkouts_of_cabal_update(self):
+        self.assertEqual(self.checkouts_at_build(build_script.Platform.WINDOWS), [False])
+        shutil.rmtree(self.source / "dist-newstyle")
+        self.assertEqual(self.checkouts_at_build(build_script.Platform.MACOS), [True])
 
     def test_read_only_cabal_checkouts_are_removed(self):
         pack = self.source / "dist-newstyle/src/simplexmq-abc/.git/objects/pack/p.pack"

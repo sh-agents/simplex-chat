@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .common import edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file
+from .common import edit_lines, fetch_pinned, run, single_dir, single_file
 from .desktop import (
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
@@ -19,18 +19,13 @@ from .desktop import (
     client_library_constraints,
     desktop_libs,
     link_desktop_libs,
+    remove_cabal_sources,
     zip_desktop_libs,
 )
 from .openssl import OpenSsl, check_static_openssl, host_openssl, static_libcrypto
 
 # The system libraries that the static libcrypto of a MinGW build needs (ex_libs of OpenSSL's mingw-common)
 OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
-
-
-def remove_cabal_sources(source: Path) -> None:
-    """cabal fails on Windows when these checkouts exist, and can't delete simplexmq's read-only git pack files."""
-    for path in [*source.glob("dist-newstyle/src/direct-sq*"), *source.glob("dist-newstyle/src/simplexmq*")]:
-        remove_tree(path)
 
 
 def disable_ghc_lld() -> None:
@@ -95,7 +90,6 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         work = Path(tmp).resolve()
         openssl = host_openssl(work)
         static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
-        remove_cabal_sources(source)
         cli = build_host_cli(source, static.cabal_local(OPENSSL_WINDOWS_STATIC_LINK))
         remove_cabal_sources(source)
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
