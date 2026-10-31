@@ -10,6 +10,8 @@ from unittest import mock
 
 from .testing import FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
 
+XCODE_SDK_LIB = "/Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"
+
 
 class MacLibTest(unittest.TestCase):
     def setUp(self):
@@ -57,7 +59,7 @@ class MacLibTest(unittest.TestCase):
         add_rpath = [c for c in fake.commands if c[:2] == ["install_name_tool", "-add_rpath"]]
         self.assertEqual(add_rpath, [["install_name_tool", "-add_rpath", "@loader_path", str(deps / "libHSbase.dylib")]])
 
-    def test_libcrypto_is_bundled_and_local_rpaths_deleted(self):
+    def test_libcrypto_is_bundled_and_absolute_rpaths_deleted(self):
         libs = self.root / "libs"
         libs.mkdir()
         openssl = self.root / "openssl/lib"
@@ -69,17 +71,22 @@ class MacLibTest(unittest.TestCase):
         fake = FakeOtool(
             small_l={
                 "libHSsmplxmq-6.5.dylib": otool_l(["/Users/runner/ghc/lib"], [linked]),
-                "libHSdrct-2.3.dylib": otool_l([], [linked]),
-                "libsimplex.dylib": otool_l(["@loader_path"]),
+                "libHSdrct-2.3.dylib": otool_l([XCODE_SDK_LIB], [linked]),
+                "libsimplex.dylib": otool_l(["@loader_path", "@executable_path/../lib"]),
             }
         )
         with patch_all("run", fake):
             build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
+            kept = build_script.rpaths(libs / "libsimplex.dylib")
         self.assertEqual((libs / "libcrypto.3.0.dylib").read_bytes(), b"crypto")
         changes = [c[-1] for c in fake.commands if c[:2] == ["install_name_tool", "-change"]]
         self.assertEqual(sorted(pathlib.Path(c).name for c in changes), ["libHSdrct-2.3.dylib", "libHSsmplxmq-6.5.dylib"])
         self.assertIn(["install_name_tool", "-id", "libcrypto.3.0.dylib", str(libs / "libcrypto.3.0.dylib")], fake.commands)
-        self.assertIn(["install_name_tool", "-delete_rpath", "/Users/runner/ghc/lib", str(libs / "libHSsmplxmq-6.5.dylib")], fake.commands)
+        deleted = [c[2:] for c in fake.commands if c[:2] == ["install_name_tool", "-delete_rpath"]]
+        self.assertEqual(
+            deleted, [[XCODE_SDK_LIB, str(libs / "libHSdrct-2.3.dylib")], ["/Users/runner/ghc/lib", str(libs / "libHSsmplxmq-6.5.dylib")]]
+        )
+        self.assertEqual(kept, ["@loader_path", "@executable_path/../lib"])
 
     def test_the_path_that_otool_prints_first_is_not_a_local_directory(self):
         libs = self.root / "Users/runner/libs"
@@ -111,10 +118,11 @@ class MacLibTest(unittest.TestCase):
         (libs / "libffi.dylib").write_bytes(b"x")
         crypto = self.root / "libcrypto.3.dylib"
         crypto.write_bytes(b"c")
-        fake = FakeOtool(small_l={"libHSsmplxmq-6.5.dylib": otool_l([], [str(crypto), "/opt/homebrew/lib/libgmp.dylib"])})
-        with patch_all("run", fake), self.assertRaises(build_script.BuildError) as raised:
-            build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
-        self.assertIn("libHSsmplxmq-6.5.dylib", str(raised.exception))
+        for local in ("/opt/homebrew/lib/libgmp.dylib", f"{XCODE_SDK_LIB}/libz.dylib"):
+            fake = FakeOtool(small_l={"libHSsmplxmq-6.5.dylib": otool_l([], [str(crypto), local])})
+            with self.subTest(local), patch_all("run", fake), self.assertRaises(build_script.BuildError) as raised:
+                build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
+            self.assertIn("libHSsmplxmq-6.5.dylib", str(raised.exception))
 
     def test_vlc_gets_rpaths_and_its_plugin_cache(self):
         libs, work = self.root / "libs", self.root / "work"

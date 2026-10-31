@@ -61,6 +61,15 @@ DOS_EPOCH_YEAR = 1980
 HFS_PARTITION = "Apple_HFS"
 
 
+# rpaths relative to the library or the app; GHC's links also add absolute ones, such as the SDK's usr/lib in the Xcode
+# that linked them, which the libraries don't need on users' machines
+RELATIVE_RPATH = "@"
+
+
+# directories of the build machine that the libraries must not load from
+LOCAL_DIRS = re.compile("/Users|/opt/|/usr/local|/Applications/|/Library/Developer/")
+
+
 # the metadata of Compose's signature that the app keeps when it is signed again
 PRESERVED_SIGNATURE = "--preserve-metadata=entitlements,flags,runtime"
 
@@ -150,9 +159,9 @@ def bundle_mac_libcrypto(libs: Path, database: Database) -> None:
     dylibs = sorted(p for p in libs.rglob("*.dylib") if p.is_file())
     for lib in dylibs:
         for rpath in rpaths(lib):
-            if rpath.startswith(("/Users/", "/usr/local", "/opt/")):
+            if not rpath.startswith(RELATIVE_RPATH):
                 run(["install_name_tool", "-delete_rpath", rpath, lib])
-    local = [lib.name for lib in dylibs if any(re.search("/Users|/opt/|/usr/local", line) for line in otool("-l", lib))]
+    local = [lib.name for lib in dylibs if any(LOCAL_DIRS.search(line) for line in otool("-l", lib))]
     if local:
         message = f"these libraries still point to local directories: {', '.join(local)}"
         # the postgres libraries are not distributed
