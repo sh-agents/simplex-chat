@@ -238,7 +238,8 @@ def build_ios_sim_libs(source: Path, out: Path) -> None:
 
 
 def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) -> None:
-    """The archive, with the brand assets of art, the simplex-chat-art checkout, or else with the default icons."""
+    """The archive and the Nix core package it links, with the brand assets of art, the simplex-chat-art checkout, or
+    else with the default icons."""
     if art is None:
         warn("no simplex-chat-art checkout (--art): the archive has the default icons, not the release's brand assets")
     elif not (art / "ios/Assets.xcassets").is_dir():
@@ -249,6 +250,8 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
             install_nix(work)
         run(["nix", "build", "-L", "--out-link", work / "core", IOS_CORE_JOB], cwd=source, env=nix_env())
         install_ios_libs(source, work / "core" / IOS_CORE_ZIP, work)
+        # the simulator test builds the app with this core, relabelled for the simulator by install libs ios
+        shutil.copy(work / "core" / IOS_CORE_ZIP, out / IOS_CORE_ZIP)
 
         if art is not None:
             # The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on
