@@ -9,7 +9,7 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from .common import BuildError, fetch_pinned, log, run
+from .common import BuildError, fetch_pinned, log, run, warn
 from .nix import install_nix, nix_env
 from .openssl import host_openssl
 
@@ -237,8 +237,11 @@ def build_ios_sim_libs(source: Path, out: Path) -> None:
                 z.write(lib, lib.name)
 
 
-def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None:
-    if not (art / "ios/Assets.xcassets").is_dir():
+def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) -> None:
+    """The archive, with the brand assets of art, the simplex-chat-art checkout, or else with the default icons."""
+    if art is None:
+        warn("no simplex-chat-art checkout (--art): the archive has the default icons, not the release's brand assets")
+    elif not (art / "ios/Assets.xcassets").is_dir():
         raise BuildError(f"no ios/Assets.xcassets in {art}")
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -247,12 +250,13 @@ def build_ios_archive(source: Path, art: Path, out: Path, install: bool) -> None
         run(["nix", "build", "-L", "--out-link", work / "core", IOS_CORE_JOB], cwd=source, env=nix_env())
         install_ios_libs(source, work / "core" / IOS_CORE_ZIP, work)
 
-        # The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on
-        # SIMPLEX_ASSETS. copy-assets.sh runs first, as its build phase runs after the extensions' catalogs are built.
-        (source / "apps/ios/Local.xcconfig").write_text(IOS_LOCAL_XCCONFIG.format(art=art))
-        run(["scripts/ios/copy-assets.sh", art], cwd=source)
-        if not list((source / "apps/ios/Shared/SimpleXAssets.xcassets").glob("*.imageset")):
-            raise BuildError(f"copy-assets.sh copied no imagesets from {art}")
+        if art is not None:
+            # The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on
+            # SIMPLEX_ASSETS. copy-assets.sh runs first, as its build phase runs after the extensions' catalogs are built.
+            (source / "apps/ios/Local.xcconfig").write_text(IOS_LOCAL_XCCONFIG.format(art=art))
+            run(["scripts/ios/copy-assets.sh", art], cwd=source)
+            if not list((source / "apps/ios/Shared/SimpleXAssets.xcassets").glob("*.imageset")):
+                raise BuildError(f"copy-assets.sh copied no imagesets from {art}")
 
         xcode = ["-project", IOS_PROJECT, "-scheme", IOS_SCHEME, "-configuration", "Release"]
         settings_output = run(["xcodebuild", "-showBuildSettings", *xcode], cwd=source, capture=True).stdout

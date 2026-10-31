@@ -16,7 +16,7 @@ Build one commit's release files, as CI does; desktop, libs and openssl build fo
     simplex-chat-build.py build openssl <macos|windows> --out <dir>
     simplex-chat-build.py build apk <aarch64|armv7a> [--nix-cache] --out <dir>
     simplex-chat-build.py build aab --libs <dir> --out <dir>
-    simplex-chat-build.py build xcarchive --art <simplex-chat-art> [--install-nix] --out <dir>
+    simplex-chat-build.py build xcarchive [--art <simplex-chat-art>] [--install-nix] --out <dir>
 Each build takes --source <dir>, the simplex-chat checkout, by default the current directory.
 
 Run release files as their users do, with screenshots of the apps; apk needs a running emulator:
@@ -192,7 +192,7 @@ class BuildDesktopWindows:
 
 @dataclass(frozen=True, slots=True)
 class BuildIosArchive:
-    art: Path
+    art: Path | None
     out: Path
     source: Path
     install_nix: bool
@@ -305,7 +305,7 @@ def build(command: Build) -> None:
             require_tools(IOS_TOOLS)
             if not install and not (NIX_PROFILE / "bin/nix").exists():
                 raise BuildError(f"Nix is not installed ({NIX_PROFILE / 'bin/nix'} not found): install it, or pass --install-nix")
-            build_ios_archive(source, art.resolve(), out, install)
+            build_ios_archive(source, art.resolve() if art else None, out, install)
     write_sha256sums(out)
 
 
@@ -403,7 +403,7 @@ def parse_build_args(argv: Sequence[str]) -> Command:
     aab = kinds.add_parser("aab", parents=[common], help="the Play bundle, from both arches' core libraries")
     aab.add_argument("--libs", type=Path, required=True, help="directory with the pkg-<arch>-android-*.zip files")
     xcarchive = kinds.add_parser("xcarchive", parents=[common], help="the iOS archive, its bundles signed ad hoc with their entitlements")
-    xcarchive.add_argument("--art", type=Path, required=True, help="checkout of simplex-chat-art, with the brand assets")
+    xcarchive.add_argument("--art", type=Path, help="checkout of simplex-chat-art, with the brand assets (default: none, with a warning)")
     xcarchive.add_argument("--install-nix", action="store_true", help="install Nix first, as on a CI runner")
 
     args = parser.parse_args(argv)

@@ -97,68 +97,83 @@ class IosSigningTest(unittest.TestCase):
 
 
 class IosArchiveTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.tmp.name)
+        self.source, self.art, self.out = root / "src", root / "art", root / "out"
+        (self.art / "ios/Assets.xcassets/logo.imageset").mkdir(parents=True)
+        for name in ("SimpleX NSE", "SimpleX SE"):
+            (self.source / f"apps/ios/{name}").mkdir(parents=True)
+            (self.source / f"apps/ios/{name}/{name}.entitlements").write_text(ENTITLEMENTS)
+        (self.source / "apps/ios/SimpleX (iOS).entitlements").write_text(ENTITLEMENTS)
+        (self.source / "apps/ios/Shared/SimpleXAssets.xcassets").mkdir(parents=True)
+        (self.source / "apps/ios/Libraries/ios").mkdir(parents=True)
+        (self.source / "apps/ios/Libraries/ios/libHSsimplex-chat.a").write_bytes(b"")
+        self.out.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def build(self, art):
+        """build_ios_archive with art, against stand-ins of nix, Xcode and codesign; returns their commands and warn."""
+        apple = FakeApple()
+        source = self.source
+
+        def fake_run(args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
+            args = [str(a) for a in args]
+            if args[:2] == ["nix", "build"]:
+                self.assertIn("NIX_SSL_CERT_FILE", env)
+                link = pathlib.Path(args[args.index("--out-link") + 1])
+                link.mkdir()
+                (link / build_script.IOS_CORE_ZIP).write_bytes(b"core")
+            elif args[0] == "scripts/ios/copy-assets.sh":
+                (source / "apps/ios/Shared/SimpleXAssets.xcassets/logo.imageset").mkdir()
+            elif args[:2] == ["xcodebuild", "-showBuildSettings"]:
+                apple.commands.append(args)
+                return mock.Mock(returncode=0, stdout="    DEVELOPMENT_TEAM = 5NN7GUYB6T\n    IPHONEOS_DEPLOYMENT_TARGET = 15.0\n")
+            elif args[:2] == ["xcodebuild", "archive"]:
+                app = pathlib.Path(args[args.index("-archivePath") + 1]) / "Products/Applications/SimpleX.app"
+                for appex in ("SimpleX NSE", "SimpleX SE"):
+                    (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
+            elif args[0] == "ditto":
+                pathlib.Path(args[-1]).write_bytes(b"archive")
+            return apple(args, cwd, env, input, check, capture)
+
+        with (
+            patch_all("run", fake_run),
+            mock.patch("builtins.print"),
+            patch_all("nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
+            patch_all("install_ios_libs") as install_libs,
+            patch_all("warn") as warn,
+        ):
+            build_script.build_ios_archive(source, art, self.out, install=False)
+        self.assertEqual(install_libs.call_args.args[1].name, build_script.IOS_CORE_ZIP)
+        return apple.commands, warn
+
     def test_build_flow(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            source, art, out = root / "src", root / "art", root / "out"
-            (art / "ios/Assets.xcassets/logo.imageset").mkdir(parents=True)
-            for name in ("SimpleX NSE", "SimpleX SE"):
-                (source / f"apps/ios/{name}").mkdir(parents=True)
-                (source / f"apps/ios/{name}/{name}.entitlements").write_text(ENTITLEMENTS)
-            (source / "apps/ios/SimpleX (iOS).entitlements").write_text(ENTITLEMENTS)
-            (source / "apps/ios/Shared/SimpleXAssets.xcassets").mkdir(parents=True)
-            (source / "apps/ios/Libraries/ios").mkdir(parents=True)
-            (source / "apps/ios/Libraries/ios/libHSsimplex-chat.a").write_bytes(b"")
-            out.mkdir()
-            apple = FakeApple()
+        commands, warn = self.build(self.art)
+        warn.assert_not_called()
+        xcconfig = (self.source / "apps/ios/Local.xcconfig").read_text()
+        self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", xcconfig)
+        self.assertIn(f"SIMPLEX_ASSETS_DIR = {self.art}", xcconfig)
+        self.assertEqual([c[0] for c in commands][:5], ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "xcodebuild"])
+        archive = next(c for c in commands if c[:2] == ["xcodebuild", "archive"])
+        self.assertIn("CODE_SIGNING_ALLOWED=NO", archive)
+        signed = [c[-1] for c in commands if c[0] == "codesign" and "--entitlements" in c and "-d" not in c]
+        self.assertEqual([pathlib.Path(p).name for p in signed], ["SimpleX NSE.appex", "SimpleX SE.appex", "SimpleX.app"])
+        self.assertIn(["plutil", "-replace", "ApplicationProperties.Team", "-string", "5NN7GUYB6T"], [c[:5] for c in commands])
+        self.assertEqual((self.out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
 
-            def fake_run(args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
-                args = [str(a) for a in args]
-                if args[:2] == ["nix", "build"]:
-                    self.assertIn("NIX_SSL_CERT_FILE", env)
-                    link = pathlib.Path(args[args.index("--out-link") + 1])
-                    link.mkdir()
-                    (link / build_script.IOS_CORE_ZIP).write_bytes(b"core")
-                elif args[0] == "scripts/ios/copy-assets.sh":
-                    (source / "apps/ios/Shared/SimpleXAssets.xcassets/logo.imageset").mkdir()
-                elif args[:2] == ["xcodebuild", "-showBuildSettings"]:
-                    apple.commands.append(args)
-                    return mock.Mock(returncode=0, stdout="    DEVELOPMENT_TEAM = 5NN7GUYB6T\n    IPHONEOS_DEPLOYMENT_TARGET = 15.0\n")
-                elif args[:2] == ["xcodebuild", "archive"]:
-                    app = pathlib.Path(args[args.index("-archivePath") + 1]) / "Products/Applications/SimpleX.app"
-                    for appex in ("SimpleX NSE", "SimpleX SE"):
-                        (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
-                elif args[0] == "ditto":
-                    pathlib.Path(args[-1]).write_bytes(b"archive")
-                return apple(args, cwd, env, input, check, capture)
+    def test_without_the_art_checkout_the_archive_has_the_default_icons(self):
+        commands, warn = self.build(None)
+        self.assertIn("default icons", warn.call_args.args[0])
+        self.assertFalse((self.source / "apps/ios/Local.xcconfig").exists())
+        self.assertNotIn("scripts/ios/copy-assets.sh", [c[0] for c in commands])
+        self.assertEqual((self.out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
 
-            with (
-                patch_all("run", fake_run),
-                mock.patch("builtins.print"),
-                patch_all("nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
-                patch_all("install_ios_libs") as install_libs,
-            ):
-                build_script.build_ios_archive(source, art, out, install=False)
-
-            installed = install_libs.call_args.args[1]
-            self.assertEqual(installed.name, build_script.IOS_CORE_ZIP)
-            xcconfig = (source / "apps/ios/Local.xcconfig").read_text()
-            self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", xcconfig)
-            self.assertIn(f"SIMPLEX_ASSETS_DIR = {art}", xcconfig)
-            self.assertEqual(
-                [c[0] for c in apple.commands][:5],
-                ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "xcodebuild"],
-            )
-            archive = next(c for c in apple.commands if c[:2] == ["xcodebuild", "archive"])
-            self.assertIn("CODE_SIGNING_ALLOWED=NO", archive)
-            signed = [c[-1] for c in apple.commands if c[0] == "codesign" and "--entitlements" in c and "-d" not in c]
-            self.assertEqual([pathlib.Path(p).name for p in signed], ["SimpleX NSE.appex", "SimpleX SE.appex", "SimpleX.app"])
-            self.assertIn(["plutil", "-replace", "ApplicationProperties.Team", "-string", "5NN7GUYB6T"], [c[:5] for c in apple.commands])
-            self.assertEqual((out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
-
-    def test_needs_the_art_assets(self):
-        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(build_script.BuildError):
-            build_script.build_ios_archive(pathlib.Path(tmp), pathlib.Path(tmp) / "art", pathlib.Path(tmp), install=False)
+    def test_art_checkout_without_the_assets_fails(self):
+        with self.assertRaises(build_script.BuildError):
+            build_script.build_ios_archive(self.source, self.art / "missing", self.out, install=False)
 
 
 class IosLibsTest(unittest.TestCase):

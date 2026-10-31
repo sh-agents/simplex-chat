@@ -135,6 +135,8 @@ jobs:
     name: iOS archive
     runs-on: macos-26
     timeout-minutes: 360
+    env:
+      HAS_ART_KEY: ${{ secrets.SIMPLEX_ART_SSH_KEY != '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -151,8 +153,10 @@ jobs:
       - name: Use the macOS 26 SDK
         run: scripts/ci/ios-sim/use-macos26-sdk.sh
 
-      # the brand assets of release builds are in this private repository
+      # the brand assets of release builds are in this private repository; without its key, as on forks, the archive
+      # has the default icons
       - name: Checkout brand assets
+        if: env.HAS_ART_KEY == 'true'
         uses: actions/checkout@v6
         with:
           repository: simplex-chat/simplex-chat-art
@@ -160,7 +164,7 @@ jobs:
           path: simplex-chat-art
 
       - name: Build archive
-        run: scripts/simplex-chat-build.py build xcarchive --art simplex-chat-art --out "$RUNNER_TEMP/out" --install-nix
+        run: scripts/simplex-chat-build.py build xcarchive ${{ env.HAS_ART_KEY == 'true' && '--art simplex-chat-art' || '' }} --out "$RUNNER_TEMP/out" --install-nix
 
       - name: Upload archive
         uses: actions/upload-artifact@v7

@@ -79,6 +79,7 @@ class ParseArgsTest(unittest.TestCase):
         )
 
     def test_build_commands_reject_missing_or_unknown_arguments(self):
+        self.assertIsNone(build_script.parse_args(["build", "xcarchive", "--out", "o"]).art)
         for argv in (
             ["build", "aab", "--out", "o"],
             ["build", "desktop", "linux", "20.04", "--version", "7.1.0", "--out", "o"],
