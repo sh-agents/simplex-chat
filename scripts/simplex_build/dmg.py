@@ -82,6 +82,10 @@ BLOCK_SIZE = 4096
 VOLUME_HEADER_OFFSET = 1024
 
 
+# block 0, which holds the volume header, and the last block, which holds the alternate one
+HEADER_BLOCKS = 2
+
+
 HFS_PLUS_VERSION = 4
 
 
@@ -93,7 +97,8 @@ VOLUME_ATTRIBUTES = 0x80000100
 LAST_MOUNTED_VERSION = b"10.0"
 
 
-MAC_ROMAN_ENCODING = 1
+# the volume header's bitmap of the text encodings of its names: bit 0, MacRoman
+ENCODINGS_BITMAP_MAC_ROMAN = 1
 
 
 CLUMP_SIZE = 65536
@@ -146,7 +151,7 @@ CASE_FOLDING = 0xCF
 HEADER_NODE_OVERHEAD = 256
 
 
-# one catalog node per item is twice what the half-full leaves of its file and thread records take
+# about five times what SimpleX.app's catalog takes: a 4 KB leaf, half full, holds five items' file and thread records
 CATALOG_NODES_PER_ITEM = 1
 
 
@@ -155,6 +160,9 @@ MIN_TREE_NODES = 8
 
 # the share of the volume left free beyond the files' blocks, as Tor Browser's ddmg.sh leaves
 FREE_SPACE_SHARE = 0.1
+
+
+MIN_FREE_BLOCKS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +266,7 @@ def header_node(tree: BTree, leaf_records: int) -> bytes:
     return btree_node(HEADER_NODE, 0, [header, bytes(128), bytes(node_map)], tree.node_size)
 
 
-def catalog_leaf(volume_name: str, date: int) -> bytes:
+def catalog_leaf(volume_name: str, date: int, node_size: int) -> bytes:
     """The root folder's record, keyed by its parent and the volume's name, and its thread record."""
     key = struct.pack(">I", ROOT_PARENT_ID) + hfs_name(volume_name)
     permissions = struct.pack(">IIBBHI", 0, 0, 0, 0, ROOT_MODE, 0)
@@ -266,7 +274,7 @@ def catalog_leaf(volume_name: str, date: int) -> bytes:
     thread_key = struct.pack(">I", ROOT_FOLDER_ID) + hfs_name("")
     thread = struct.pack(">hhI", FOLDER_THREAD_RECORD, 0, ROOT_PARENT_ID) + hfs_name(volume_name)
     records = [struct.pack(">H", len(key)) + key + folder, struct.pack(">H", len(thread_key)) + thread_key + thread]
-    return btree_node(LEAF_NODE, 1, records, BLOCK_SIZE)
+    return btree_node(LEAF_NODE, 1, records, node_size)
 
 
 def fork(start: int, blocks: int) -> bytes:
@@ -274,20 +282,23 @@ def fork(start: int, blocks: int) -> bytes:
     return struct.pack(">QIIII56x", size, size, blocks, start, blocks)
 
 
-def volume_header(volume_name: str, total_blocks: int, catalog: BTree, volume_id: bytes) -> tuple[bytes, bytes, list[bytes]]:
-    """The volume header, the allocation file, and the extents, catalog and attributes files, in the order they follow
-    the header; the last block, which holds the alternate header, is in use."""
+def volume_header(volume_name: str, total_blocks: int, catalog: BTree, volume_id: bytes) -> tuple[bytes, bytes, list[tuple[int, bytes]]]:
+    """The volume header, the allocation file, and the start blocks and first nodes of the extents, catalog and
+    attributes files, which follow it; the last block, which holds the alternate header, is in use."""
     allocation_blocks = math.ceil(math.ceil(total_blocks / 8) / BLOCK_SIZE)
-    files = [header_node(EXTENTS_TREE, 0), header_node(catalog, 2), header_node(ATTRIBUTES_TREE, 0)]
-    starts = []
+    date = hfs_date(SOURCE_DATE_EPOCH)
+    nodes = [
+        header_node(EXTENTS_TREE, 0),
+        header_node(catalog, 2) + catalog_leaf(volume_name, date, catalog.node_size),
+        header_node(ATTRIBUTES_TREE, 0),
+    ]
+    files = []
     next_block = 1 + allocation_blocks
-    for tree in (EXTENTS_TREE, catalog, ATTRIBUTES_TREE):
-        starts.append(next_block)
+    for tree, first_nodes in zip((EXTENTS_TREE, catalog, ATTRIBUTES_TREE), nodes, strict=True):
+        files.append((next_block, first_nodes))
         next_block += tree.blocks
     if next_block >= total_blocks:
         raise BuildError(f"an HFS+ volume of {total_blocks} blocks has no room for its {next_block} blocks of metadata")
-    date = hfs_date(SOURCE_DATE_EPOCH)
-    files[1] += catalog_leaf(volume_name, date)
     allocation = bytearray(allocation_blocks * BLOCK_SIZE)
     for block in [*range(next_block), total_blocks - 1]:
         allocation[block // 8] |= 0x80 >> (block % 8)
@@ -312,11 +323,11 @@ def volume_header(volume_name: str, total_blocks: int, catalog: BTree, volume_id
         CLUMP_SIZE,
         FIRST_USER_ID,
         0,
-        MAC_ROMAN_ENCODING,
+        ENCODINGS_BITMAP_MAC_ROMAN,
         volume_id,
     )
     header += fork(1, allocation_blocks)
-    for start, tree in zip(starts, (EXTENTS_TREE, catalog, ATTRIBUTES_TREE), strict=True):
+    for (start, _), tree in zip(files, (EXTENTS_TREE, catalog, ATTRIBUTES_TREE), strict=True):
         header += fork(start, tree.blocks)
     header += fork(0, 0)
     return header, bytes(allocation), files
@@ -332,11 +343,9 @@ def format_hfs(image: Path, volume_name: str, total_blocks: int, catalog: BTree,
             f.write(header)
         f.seek(BLOCK_SIZE)
         f.write(allocation)
-        start = 1 + len(allocation) // BLOCK_SIZE
-        for tree, nodes in zip((EXTENTS_TREE, catalog, ATTRIBUTES_TREE), files, strict=True):
+        for start, nodes in files:
             f.seek(start * BLOCK_SIZE)
             f.write(nodes)
-            start += tree.blocks
 
 
 def volume_counts(image: Path) -> tuple[int, int]:
@@ -379,8 +388,8 @@ def item_blocks(source: Path) -> int:
 def volume_blocks(root: Path, paths: list[Path], catalog: BTree) -> int:
     """Blocks for the volume's metadata and paths, with FREE_SPACE_SHARE of them more."""
     data = sum(item_blocks(root / path) for path in paths)
-    metadata = 2 + math.ceil(data / BLOCK_SIZE / 8) + EXTENTS_TREE.blocks + catalog.blocks + ATTRIBUTES_TREE.blocks
-    return metadata + data + math.ceil(data * FREE_SPACE_SHARE) + MIN_TREE_NODES
+    metadata = HEADER_BLOCKS + math.ceil(data / BLOCK_SIZE / 8) + EXTENTS_TREE.blocks + catalog.blocks + ATTRIBUTES_TREE.blocks
+    return metadata + data + math.ceil(data * FREE_SPACE_SHARE) + MIN_FREE_BLOCKS
 
 
 def ds_record(name: str, code: bytes, kind: bytes, value: bytes) -> bytes:
@@ -446,7 +455,7 @@ def ds_store(records: list[tuple[str, bytes, bytes, bytes]]) -> bytes:
     tree = struct.pack(">5I", blocks.index(DS_LEAF_BLOCK), 0, len(ordered), 1, DS_PAGE_SIZE)
     root_offset, root_bits = DS_ROOT_BLOCK
     space = bytearray(root_offset + (1 << root_bits))
-    # Finder's stores have the leaf's address after the root block's
+    # the header repeats the root block's offset after its size, then has the leaf's address, as Finder's stores do
     leaf_address = addresses[blocks.index(DS_LEAF_BLOCK)]
     space[:DS_HEADER_SIZE] = struct.pack(">4sIII4I", b"Bud1", root_offset, 1 << root_bits, root_offset, leaf_address, 0, 0, 0)
     for (offset, _), content in zip(blocks, (root, tree, leaf), strict=True):

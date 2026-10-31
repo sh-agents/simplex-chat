@@ -146,7 +146,7 @@ class HfsTest(unittest.TestCase):
             build_script.header_node(build_script.catalog_tree(4096 * 8), 2)
 
     def test_catalog_leaf_has_the_root_folder_and_its_thread(self):
-        leaf = build_script.catalog_leaf("SimpleX", HFS_2024)
+        leaf = build_script.catalog_leaf("SimpleX", HFS_2024, 4096)
         free, thread_at, folder_at = struct.unpack(">3H", leaf[-6:])
         key_length, parent = struct.unpack(">HI", leaf[folder_at : folder_at + 6])
         self.assertEqual((key_length, parent), (6 + 14, 1))
@@ -182,7 +182,7 @@ class HfsTest(unittest.TestCase):
         self.assertEqual(starts, [1, 2, 10, 20])
         self.assertEqual(allocation[:5], b"\xff\xff\xff\xff\xf0")
         self.assertEqual(allocation[999 // 8], 0x80 >> (999 % 8))
-        self.assertEqual([len(f) for f in files], [4096, 2 * 4096, 8192])
+        self.assertEqual([(start, len(nodes)) for start, nodes in files], [(2, 4096), (10, 2 * 4096), (20, 8192)])
         with self.assertRaises(build_script.BuildError):
             build_script.volume_header("SimpleX", metadata, catalog, b"12345678")
 

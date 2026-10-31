@@ -285,9 +285,10 @@ def dos_date_time(epoch: str) -> bytes:
 
 def normalize_jar(jar: Path, epoch: str) -> None:
     """Dates each entry of jar with epoch, in its local and central headers."""
-    data = bytearray(jar.read_bytes())
+    original = jar.read_bytes()
+    data = bytearray(original)
     date_time = dos_date_time(epoch)
-    for entry in central_directory(bytes(data)):
+    for entry in central_directory(original):
         if data[entry.local_offset : entry.local_offset + 4] != LOCAL_HEADER:
             raise BuildError(f"no local header for {entry.name} in {jar.name}")
         data[entry.central_offset + 12 : entry.central_offset + 16] = date_time
