@@ -38,6 +38,19 @@ LINKER_NO_TIMESTAMP = "-Wl,--no-insert-timestamp"
 WINDOWS_NO_TIMESTAMP = f"-optl{LINKER_NO_TIMESTAMP}"
 
 
+# Compose's packageMsi makes an app image of its own; this makes it pack the one of createDistributable, as on macOS
+MSI_FROM_APP_IMAGE_INIT = """gradle.allprojects { project ->
+    project.tasks.configureEach { task ->
+        if (task.name == "packageMsi") {
+            def app = project.tasks.named("createDistributable")
+            task.dependsOn(app)
+            task.appImage.set(app.flatMap { it.destinationDir.dir(it.packageName) })
+        }
+    }
+}
+"""
+
+
 # WiX gives each msi a random package code, which the build replaces with one derived from the msi's content
 MSI_PLACEHOLDER_PACKAGE_CODE = "{00000000-0000-0000-0000-000000000000}"
 
@@ -147,8 +160,11 @@ def package_msi(source: Path, work: Path) -> Path:
     app = single_dir(source / DESKTOP_RELEASE_DIR / "app", "*imple*")
     remove_skiko_runtime(app / "app")
     touch_tree(app, SOURCE_DATE_EPOCH)
+    init = work / "msi-from-app-image.gradle"
+    init.write_text(MSI_FROM_APP_IMAGE_INIT)
     # packageMsi would otherwise create the edited app image again
-    run([*gradle, "packageMsi", "-x", "createDistributable"], cwd=multiplatform, env=env)
+    run([*gradle, "--init-script", init, "packageMsi", "-x", "createDistributable"], cwd=multiplatform, env=env)
+    init.unlink()
     msi = single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi")
     normalize_msi_summary(msi, work)
     return msi

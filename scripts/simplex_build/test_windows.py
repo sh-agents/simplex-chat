@@ -140,6 +140,7 @@ class MsiTest(unittest.TestCase):
                 files = list(image.rglob("*"))
                 seen["names"] = sorted(p.relative_to(image).as_posix() for p in files)
                 seen["times"] = {p.stat().st_mtime for p in [image, *files]}
+                seen["init"] = pathlib.Path(args[args.index("--init-script") + 1]).read_text()
                 release_msi.parent.mkdir(parents=True)
                 release_msi.write_bytes(b"msi")
             return recorder(args, **kwargs)
@@ -149,8 +150,15 @@ class MsiTest(unittest.TestCase):
         self.assertEqual(msi, release_msi)
         normalize.assert_called_once_with(release_msi, self.work)
         gradle = [str(self.source / "apps/multiplatform/gradlew.bat"), "-Psimplex.assets.dir=../../assets"]
-        self.assertEqual(recorder.commands, [[*gradle, "createDistributable"], [*gradle, "packageMsi", "-x", "createDistributable"]])
+        init = str(self.work / "msi-from-app-image.gradle")
+        self.assertEqual(
+            recorder.commands,
+            [[*gradle, "createDistributable"], [*gradle, "--init-script", init, "packageMsi", "-x", "createDistributable"]],
+        )
         self.assertEqual(recorder.envs, [{"LDFLAGS": "-Wl,--no-insert-timestamp"}] * 2)
+        self.assertEqual(seen["init"], build_script.MSI_FROM_APP_IMAGE_INIT)
+        self.assertIn('task.appImage.set(app.flatMap { it.destinationDir.dir(it.packageName) })', seen["init"])
+        self.assertFalse((self.work / "msi-from-app-image.gradle").exists())
         self.assertEqual(seen["names"], ["SimpleX.exe", "app", "app/SimpleX.cfg", "app/desktop-jvm-7.1.7-854b.jar"])
         self.assertEqual(seen["times"], {1704067200})
         self.assertEqual((image / "app/SimpleX.cfg").read_text(), "")
