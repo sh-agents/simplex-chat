@@ -1327,6 +1327,69 @@ jobs:
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO
 
+  # The unsigned archive that the App Store build is exported from, and its core, for reproduce ios: the App Store
+  # binary is encrypted and signed again by Apple, so no one can compare it with a build.
+  release-ios:
+    name: "macos-26 (iOS archive)"
+    needs: maybe-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      HAS_ART_KEY: ${{ secrets.SIMPLEX_ART_SSH_KEY != '' }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: tree:0
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
+
+      - name: Use the macOS 26 SDK
+        run: scripts/ci/ios-sim/use-macos26-sdk.sh
+
+      # without the key of the private brand assets, as on forks, the archive has the default icons
+      - name: Checkout brand assets
+        if: env.HAS_ART_KEY == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: simplex-chat/simplex-chat-art
+          ssh-key: ${{ secrets.SIMPLEX_ART_SSH_KEY }}
+          path: simplex-chat-art
+
+      - name: Build archive
+        id: ios-release
+        run: |
+          scripts/simplex-chat-build.py build xcarchive ${{ env.HAS_ART_KEY == 'true' && '--art simplex-chat-art' || '' }} --out release-files --install-nix
+          for output in "archive=SimpleX.xcarchive.zip" "core=pkg-ios-aarch64-swift-json.zip"; do
+            key=${output%%=*}
+            name=${output#*=}
+            echo "${key}_path=$GITHUB_WORKSPACE/release-files/$name" >> "$GITHUB_OUTPUT"
+            echo "${key}_hash=SHA2-256($name)= $(shasum -a 256 "release-files/$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Upload archive
+        uses: ./.github/actions/prepare-release
+        with:
+          bin_path: ${{ steps.ios-release.outputs.archive_path }}
+          bin_name: SimpleX.xcarchive.zip
+          bin_hash: ${{ steps.ios-release.outputs.archive_hash }}
+          github_ref: ${{ github.ref }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload core
+        uses: ./.github/actions/prepare-release
+        with:
+          bin_path: ${{ steps.ios-release.outputs.core_path }}
+          bin_name: pkg-ios-aarch64-swift-json.zip
+          bin_hash: ${{ steps.ios-release.outputs.core_hash }}
+          github_ref: ${{ github.ref }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
 # =========================
 #      Windows Build
 # =========================
