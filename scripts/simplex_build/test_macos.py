@@ -2,8 +2,10 @@ import base64
 import json
 import os
 import pathlib
+import struct
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 from .testing import FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
@@ -207,6 +209,80 @@ class MacLibTest(unittest.TestCase):
             build_script.build_app(source, None)
         self.assertEqual([c[-1] for c in recorder.commands], ["createDistributable"])
         self.assertFalse((source / "apps/multiplatform/local.properties").exists())
+
+    def test_dos_date_of_source_date_epoch(self):
+        self.assertEqual(build_script.dos_date_time("1704067200"), struct.pack("<HH", 0, (44 << 9) | (1 << 5) | 1))
+        self.assertEqual(build_script.dos_date_time("1704114245"), struct.pack("<HH", (13 << 11) | (4 << 5) | 2, (44 << 9) | (1 << 5) | 1))
+
+    def jar(self, path, date_time):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in (("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"), ("a/B.class", b"class" * 100)):
+                z.writestr(zipfile.ZipInfo(name, date_time), data, zipfile.ZIP_DEFLATED)
+
+    def test_jar_entries_get_the_epoch_date_in_both_headers(self):
+        jar = self.root / "a.jar"
+        self.jar(jar, (2026, 10, 31, 12, 34, 56))
+        build_script.normalize_jar(jar, "1704067200")
+        data = jar.read_bytes()
+        with zipfile.ZipFile(jar) as z:
+            self.assertIsNone(z.testzip())
+            self.assertEqual({i.date_time for i in z.infolist()}, {(2024, 1, 1, 0, 0, 0)})
+            self.assertEqual(z.read("a/B.class"), b"class" * 100)
+        for entry in build_script.central_directory(data):
+            self.assertEqual(data[entry.local_offset + 10 : entry.local_offset + 14], build_script.dos_date_time("1704067200"))
+        broken = bytearray(data)
+        broken[0:4] = b"XXXX"
+        jar.write_bytes(broken)
+        with self.assertRaises(build_script.BuildError):
+            build_script.normalize_jar(jar, "1704067200")
+
+    def app_built_at(self, name, date_time):
+        app = self.root / name / "SimpleX.app"
+        jars = app / "Contents/app"
+        jars.mkdir(parents=True)
+        self.jar(jars / f"skiko-awt-runtime-macos-arm64-0.9.4.2-{date_time[4]:02}aa.jar", date_time)
+        self.jar(jars / "plain.jar", date_time)
+        cfg = f"[Application]\napp.classpath=$APPDIR/skiko-awt-runtime-macos-arm64-0.9.4.2-{date_time[4]:02}aa.jar\n"
+        (jars / "SimpleX.cfg").write_text(cfg + "app.classpath=$APPDIR/plain.jar\napp.mainclass=chat.simplex.desktop.MainKt\n")
+        build_script.normalize_app(app)
+        return {p.name: p.read_bytes() for p in sorted(jars.iterdir())}
+
+    def test_apps_built_at_other_times_get_the_same_jars_and_classpath(self):
+        first = self.app_built_at("a", (2026, 10, 31, 12, 34, 56))
+        second = self.app_built_at("b", (2026, 10, 31, 13, 45, 2))
+        self.assertEqual(first, second)
+        skiko = next(name for name in first if name.startswith("skiko"))
+        self.assertRegex(skiko, r"^skiko-awt-runtime-macos-arm64-0\.9\.4\.2-[0-9a-f]{32}\.jar$")
+        self.assertIn(f"app.classpath=$APPDIR/{skiko}\n".encode(), first["SimpleX.cfg"])
+        self.assertIn(b"app.classpath=$APPDIR/plain.jar\n", first["SimpleX.cfg"])
+
+    def test_app_is_signed_again_as_compose_signed_it(self):
+        app = self.root / "SimpleX.app"
+        app.mkdir()
+        recorder = Recorder()
+        with patch_all("run", recorder):
+            build_script.sign_app(app, None)
+            (app / "Contents/_CodeSignature").mkdir(parents=True)
+            build_script.sign_app(app, None)
+            build_script.sign_app(app, self.root / "k.keychain")
+        preserve = "--preserve-metadata=entitlements,flags,runtime"
+        self.assertEqual(
+            recorder.commands,
+            [
+                ["codesign", "--force", preserve, "--sign", "-", str(app)],
+                [
+                    "codesign",
+                    "--force",
+                    preserve,
+                    "--timestamp",
+                    "--sign",
+                    build_script.APPLE_IDENTITY,
+                    "--keychain",
+                    str(self.root / "k.keychain"),
+                    str(app),
+                ],
+            ],
+        )
 
     def test_signed_dmg_is_notarized_itself_and_stapled(self):
         dmg = self.root / "simplex-desktop-macos-aarch64.dmg"

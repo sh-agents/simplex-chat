@@ -140,6 +140,8 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("add_vlc_mac", lambda libs, arch, work: (libs / "vlc").mkdir()),
             patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
             patch_all("build_app", lambda source, keychain: calls.append(("app", keychain)) or self.app),
+            patch_all("normalize_app", lambda app: calls.append(("normalize", app))),
+            patch_all("sign_app", lambda app, keychain: calls.append(("sign", keychain))),
             patch_all("build_libdmg", return_value=self.tools),
             patch_all("java_home", return_value=self.root / "jdk"),
             patch_all("build_dmg", build_dmg),
@@ -160,6 +162,8 @@ class HostDesktopTest(unittest.TestCase):
                 ("lib", "aarch64"),
                 ("link", "mac-aarch64", "macos-arm64"),
                 ("app", None),
+                ("normalize", self.app),
+                ("sign", None),
                 ("dmg", self.tools, self.app, self.root / "jdk"),
             ],
         )
@@ -172,9 +176,10 @@ class HostDesktopTest(unittest.TestCase):
         )
         self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.dylib"])
 
-    def test_macos_signed_build_notarizes_the_dmg(self):
+    def test_macos_signed_build_signs_the_app_and_notarizes_the_dmg(self):
         calls, sign_dmg, work = self.build_macos(signed=True)
         self.assertIn(("app", self.keychain), calls)
+        self.assertIn(("sign", self.keychain), calls)
         sign_dmg.assert_called_once_with(work / "simplex-desktop-macos-aarch64.dmg", self.keychain, work)
         self.assertEqual((self.out / "simplex-desktop-macos-aarch64.dmg").read_bytes(), b"dmg")
 

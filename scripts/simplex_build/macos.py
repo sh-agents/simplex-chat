@@ -2,16 +2,20 @@
 
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
 import shutil
+import struct
 import tarfile
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from .common import GHC, BuildError, fetch_pinned, run, single_dir, single_file, touch_tree, warn
+from .apk_zip import LOCAL_HEADER, central_directory
+from .common import GHC, BuildError, edit_lines, fetch_pinned, run, single_dir, single_file, touch_tree, warn
 from .desktop import (
     COMPOSE_ARCHES,
     DESKTOP_ENV,
@@ -41,6 +45,20 @@ LIBFFI_URL = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3
 
 
 LIBFFI_SHA256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
+
+
+# the jars that Compose copies into the app, named with a hash of the jar it copied, and the classpath that lists them
+COMPOSE_JAR_NAME = re.compile(r"(?P<name>.+)-[0-9a-f]{1,32}\.jar")
+
+
+CLASSPATH_PREFIX = "app.classpath=$APPDIR/"
+
+
+DOS_EPOCH_YEAR = 1980
+
+
+# the metadata of Compose's signature that the app keeps when it is signed again
+PRESERVED_SIGNATURE = "--preserve-metadata=entitlements,flags,runtime"
 
 
 APPLE_SIGNING_ENV = ("APPLE_SIMPLEX_SIGNING_KEYCHAIN", "APPLE_SIMPLEX_NOTARIZATION_APPLE_ID", "APPLE_SIMPLEX_NOTARIZATION_PASSWORD")
@@ -258,6 +276,55 @@ def build_app(source: Path, keychain: Path | None) -> Path:
     return single_dir(source / DESKTOP_RELEASE_DIR / "app", "*.app")
 
 
+def dos_date_time(epoch: str) -> bytes:
+    t = time.gmtime(int(epoch))
+    dos_time = (t.tm_hour << 11) | (t.tm_min << 5) | (t.tm_sec // 2)
+    dos_date = ((t.tm_year - DOS_EPOCH_YEAR) << 9) | (t.tm_mon << 5) | t.tm_mday
+    return struct.pack("<HH", dos_time, dos_date)
+
+
+def normalize_jar(jar: Path, epoch: str) -> None:
+    """Dates each entry of jar with epoch, in its local and central headers."""
+    data = bytearray(jar.read_bytes())
+    date_time = dos_date_time(epoch)
+    for entry in central_directory(bytes(data)):
+        if data[entry.local_offset : entry.local_offset + 4] != LOCAL_HEADER:
+            raise BuildError(f"no local header for {entry.name} in {jar.name}")
+        data[entry.central_offset + 12 : entry.central_offset + 16] = date_time
+        data[entry.local_offset + 10 : entry.local_offset + 14] = date_time
+    jar.write_bytes(data)
+
+
+def normalize_app(app: Path) -> None:
+    """Dates the entries of the jars, which Compose packs again with the current time, with SOURCE_DATE_EPOCH, and names
+    each jar, in the app and its classpath, with a hash of its content in place of Compose's hash."""
+    jars = app / "Contents/app"
+    renamed = {}
+    for jar in sorted(jars.glob("*.jar")):
+        normalize_jar(jar, SOURCE_DATE_EPOCH)
+        match = COMPOSE_JAR_NAME.fullmatch(jar.name)
+        if match:
+            with jar.open("rb") as f:
+                digest = hashlib.file_digest(f, lambda: hashlib.md5(usedforsecurity=False)).hexdigest()
+            renamed[jar.name] = f"{match['name']}-{digest}.jar"
+            jar.rename(jars / renamed[jar.name])
+
+    def rename_classpath(line: str) -> str:
+        name = line.removeprefix(CLASSPATH_PREFIX)
+        return CLASSPATH_PREFIX + renamed[name] if line.startswith(CLASSPATH_PREFIX) and name in renamed else line
+
+    edit_lines(jars / f"{app.stem}.cfg", rename_classpath)
+
+
+def sign_app(app: Path, keychain: Path | None) -> None:
+    """Signs the bundle again after normalize_app, with the keychain's identity or, when Compose signed it ad hoc, ad hoc,
+    keeping the entitlements and options of Compose's signature."""
+    if keychain:
+        run(["codesign", "--force", PRESERVED_SIGNATURE, "--timestamp", "--sign", APPLE_IDENTITY, "--keychain", keychain, app])
+    elif (app / "Contents/_CodeSignature").is_dir():
+        run(["codesign", "--force", PRESERVED_SIGNATURE, "--sign", "-", app])
+
+
 def sign_dmg(dmg: Path, keychain: Path, work: Path) -> None:
     """Signs dmg with the keychain's identity, then notarizes it."""
     run(["codesign", "--timestamp", "--sign", APPLE_IDENTITY, "--keychain", keychain, dmg])
@@ -313,6 +380,8 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         libs = release_macos_libs(source, openssl, Database.SQLITE, keychain, work, out)
         add_vlc_mac(libs, host.arch, work)
         app = build_app(source, keychain)
+        normalize_app(app)
+        sign_app(app, keychain)
         dmg = work / host.desktop
         build_dmg(build_libdmg(work), app, java_home(), work, dmg)
         if keychain:
