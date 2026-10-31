@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import shutil
+import time
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -167,6 +168,11 @@ def run_cabal(source: Path, args: Sequence[str], capture: bool = False) -> str:
 def zip_desktop_libs(libs: Path, extra: Sequence[Path], target: Path) -> None:
     """The library release: the files directly in the desktop app's libraries directory, under libs/."""
     files = sorted([p for p in libs.iterdir() if p.is_file()] + list(extra))
+    date_time = time.gmtime(int(SOURCE_DATE_EPOCH))[:6]
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
         for path in files:
-            z.write(path, f"libs/{path.name}")
+            info = zipfile.ZipInfo(f"libs/{path.name}", date_time)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (path.stat().st_mode & 0o777) << 16
+            with path.open("rb") as source, z.open(info, "w") as entry:
+                shutil.copyfileobj(source, entry)

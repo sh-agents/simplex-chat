@@ -235,6 +235,23 @@ class HostDesktopTest(unittest.TestCase):
         shutil.rmtree(self.source / "dist-newstyle")
         self.assertEqual(self.checkouts_at_build(build_script.Platform.MACOS), [True, True])
 
+    def test_libs_zip_is_the_same_whenever_the_libraries_were_built(self):
+        libs = self.root / "libs"
+        libs.mkdir()
+        (libs / "libsimplex.so").write_bytes(b"simplex" * 100)
+        (libs / "libHSbase.so").write_bytes(b"base")
+        extra = self.root / "libsimplex.lib"
+        extra.write_bytes(b"import library")
+        build_script.zip_desktop_libs(libs, [extra], self.out / "first.zip")
+        for path in [*libs.iterdir(), extra]:
+            os.utime(path, (1_900_000_000, 1_900_000_000))
+        build_script.zip_desktop_libs(libs, [extra], self.out / "second.zip")
+        self.assertEqual((self.out / "first.zip").read_bytes(), (self.out / "second.zip").read_bytes())
+        self.assertEqual(self.zip_names("first.zip"), ["libs/libHSbase.so", "libs/libsimplex.lib", "libs/libsimplex.so"])
+        with zipfile.ZipFile(self.out / "first.zip") as z:
+            self.assertEqual(z.read("libs/libsimplex.so"), b"simplex" * 100)
+            self.assertEqual({info.date_time for info in z.infolist()}, {(2024, 1, 1, 0, 0, 0)})
+
     def test_read_only_cabal_checkouts_are_removed(self):
         pack = self.source / "dist-newstyle/src/simplexmq-abc/.git/objects/pack/p.pack"
         pack.parent.mkdir(parents=True)
