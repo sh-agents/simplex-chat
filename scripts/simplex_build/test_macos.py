@@ -272,10 +272,12 @@ class MacLibTest(unittest.TestCase):
             build_script.sign_app(app, None)
             build_script.sign_app(app, self.root / "k.keychain")
         preserve = "--preserve-metadata=entitlements,flags,runtime"
+        verify = ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)]
         self.assertEqual(
             recorder.commands,
             [
                 ["codesign", "--force", preserve, "--sign", "-", str(app)],
+                verify,
                 [
                     "codesign",
                     "--force",
@@ -287,8 +289,51 @@ class MacLibTest(unittest.TestCase):
                     str(self.root / "k.keychain"),
                     str(app),
                 ],
+                verify,
             ],
         )
+
+    def check_dmg(self, signed, attached):
+        dmg = self.root / "simplex-desktop-macos-aarch64.dmg"
+        dmg.write_bytes(b"dmg")
+        recorder = Recorder(answers={"hdiutil attach": attached})
+        with patch_all("run", recorder):
+            build_script.check_dmg(dmg, signed, self.root)
+        return dmg, recorder.commands
+
+    ATTACHED = "/dev/disk4          \tApple_partition_scheme\n/dev/disk4s1        \tApple_partition_map\n/dev/disk4s2        \tApple_HFS\n"
+
+    def test_dmg_and_its_volume_are_checked_and_an_ad_hoc_copy_verified(self):
+        dmg, commands = self.check_dmg(False, self.ATTACHED)
+        copy = str(self.root / f"ad-hoc-{dmg.name}")
+        self.assertEqual(
+            commands,
+            [
+                ["hdiutil", "verify", str(dmg)],
+                ["hdiutil", "attach", "-nomount", "-readonly", "-noverify", str(dmg)],
+                ["fsck_hfs", "-fn", "/dev/disk4s2"],
+                ["hdiutil", "detach", "/dev/disk4"],
+                ["codesign", "--sign", "-", copy],
+                ["codesign", "--verify", "--strict", "--verbose=2", copy],
+            ],
+        )
+        self.assertEqual(pathlib.Path(copy).read_bytes(), b"dmg")
+
+    def test_signed_dmg_is_verified_itself(self):
+        dmg, commands = self.check_dmg(True, self.ATTACHED)
+        self.assertEqual(commands[-1], ["codesign", "--verify", "--strict", "--verbose=2", str(dmg)])
+        self.assertFalse(any("--sign" in c for c in commands))
+
+    def test_dmg_without_one_hfs_partition_fails(self):
+        with self.assertRaises(build_script.BuildError):
+            self.check_dmg(False, "/dev/disk4          \tApple_partition_scheme\n")
+
+    def test_dmg_whose_volume_fsck_rejects_fails_and_is_detached(self):
+        recorder = Recorder(answers={"hdiutil attach": self.ATTACHED}, fail_once=["fsck_hfs"])
+        dmg = self.root / "simplex-desktop-macos-aarch64.dmg"
+        with patch_all("run", recorder), self.assertRaises(build_script.BuildError):
+            build_script.check_dmg(dmg, False, self.root)
+        self.assertEqual(recorder.commands[-1], ["hdiutil", "detach", "/dev/disk4"])
 
     def test_signed_dmg_is_notarized_itself_and_stapled(self):
         dmg = self.root / "simplex-desktop-macos-aarch64.dmg"

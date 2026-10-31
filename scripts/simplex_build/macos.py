@@ -57,6 +57,10 @@ CLASSPATH_PREFIX = "app.classpath=$APPDIR/"
 DOS_EPOCH_YEAR = 1980
 
 
+# the partition of a dmg's volume, in hdiutil attach's list of its partitions
+HFS_PARTITION = "Apple_HFS"
+
+
 # the metadata of Compose's signature that the app keeps when it is signed again
 PRESERVED_SIGNATURE = "--preserve-metadata=entitlements,flags,runtime"
 
@@ -328,17 +332,42 @@ def normalize_app(app: Path) -> None:
 
 def sign_app(app: Path, keychain: Path | None) -> None:
     """Signs the bundle again after normalize_app, with the keychain's identity or, when Compose signed it ad hoc, ad hoc,
-    keeping the entitlements and options of Compose's signature."""
+    keeping the entitlements and options of Compose's signature, and verifies the signatures of the bundle and its code."""
     if keychain:
         run(["codesign", "--force", PRESERVED_SIGNATURE, "--timestamp", "--sign", APPLE_IDENTITY, "--keychain", keychain, app])
     elif (app / "Contents/_CodeSignature").is_dir():
         run(["codesign", "--force", PRESERVED_SIGNATURE, "--sign", "-", app])
+    else:
+        return
+    run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
 
 
 def sign_dmg(dmg: Path, keychain: Path, work: Path) -> None:
     """Signs dmg with the keychain's identity, then notarizes it."""
     run(["codesign", "--timestamp", "--sign", APPLE_IDENTITY, "--keychain", keychain, dmg])
     notarize(dmg, work)
+
+
+def check_dmg(dmg: Path, signed: bool, work: Path) -> None:
+    """Fails unless hdiutil verifies dmg, fsck_hfs finds its volume consistent, and codesign verifies the signature of a
+    signed dmg, or of an ad hoc signed copy of an unsigned one, as it must sign the release's dmg."""
+    run(["hdiutil", "verify", dmg])
+    attached = run(["hdiutil", "attach", "-nomount", "-readonly", "-noverify", dmg], capture=True).stdout.splitlines()
+    devices = [line.split()[0] for line in attached if line.startswith("/dev/")]
+    volumes = [line.split()[0] for line in attached if line.startswith("/dev/") and HFS_PARTITION in line]
+    try:
+        if len(volumes) != 1:
+            raise BuildError(f"expected one {HFS_PARTITION} partition in {dmg.name}, found {len(volumes)}")
+        run(["fsck_hfs", "-fn", volumes[0]])
+    finally:
+        if devices:
+            run(["hdiutil", "detach", devices[0]])
+    checked = dmg
+    if not signed:
+        checked = work / f"ad-hoc-{dmg.name}"
+        shutil.copy(dmg, checked)
+        run(["codesign", "--sign", "-", checked])
+    run(["codesign", "--verify", "--strict", "--verbose=2", checked])
 
 
 def java_home() -> Path:
@@ -396,4 +425,5 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         build_dmg(build_libdmg(work), app, java_home(), work, dmg)
         if keychain:
             sign_dmg(dmg, keychain, work)
+        check_dmg(dmg, keychain is not None, work)
         shutil.copy(dmg, out / host.desktop)

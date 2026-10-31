@@ -146,6 +146,7 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("java_home", return_value=self.root / "jdk"),
             patch_all("build_dmg", build_dmg),
             patch_all("sign_dmg") as sign_dmg,
+            patch_all("check_dmg", lambda dmg, signed, work: calls.append(("check", dmg.name, signed))),
             patch_all("sign_mac_libs") as sign_libs,
         ):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
@@ -165,6 +166,7 @@ class HostDesktopTest(unittest.TestCase):
                 ("normalize", self.app),
                 ("sign", None),
                 ("dmg", self.tools, self.app, self.root / "jdk"),
+                ("check", "simplex-desktop-macos-aarch64.dmg", False),
             ],
         )
         sign_dmg.assert_not_called()
@@ -181,6 +183,7 @@ class HostDesktopTest(unittest.TestCase):
         self.assertIn(("app", self.keychain), calls)
         self.assertIn(("sign", self.keychain), calls)
         sign_dmg.assert_called_once_with(work / "simplex-desktop-macos-aarch64.dmg", self.keychain, work)
+        self.assertEqual(calls[-1], ("check", "simplex-desktop-macos-aarch64.dmg", True))
         self.assertEqual((self.out / "simplex-desktop-macos-aarch64.dmg").read_bytes(), b"dmg")
 
     def test_macos_cli_linking_libcrypto_fails(self):
