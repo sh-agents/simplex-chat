@@ -14,14 +14,21 @@ class ParseArgsTest(unittest.TestCase):
     def test_reproduce_defaults_to_desktop_and_both_arches(self):
         self.assertEqual(
             build_script.parse_args(["reproduce", "v7.1.0"]),
-            build_script.Reproduce("v7.1.0", (Target.DESKTOP,), (Arch.AARCH64, Arch.ARMV7A), False),
+            build_script.Reproduce("v7.1.0", "simplex-chat/simplex-chat", (Target.DESKTOP,), (Arch.AARCH64, Arch.ARMV7A), False),
         )
 
     def test_reproduce_android_with_options(self):
         self.assertEqual(
             build_script.parse_args(["reproduce", "v7.1.0", "android", "--arches", "armv7a", "--nix-cache"]),
-            build_script.Reproduce("v7.1.0", (Target.ANDROID,), (Arch.ARMV7A,), True),
+            build_script.Reproduce("v7.1.0", "simplex-chat/simplex-chat", (Target.ANDROID,), (Arch.ARMV7A,), True),
         )
+
+    def test_reproduce_a_release_of_a_fork(self):
+        command = build_script.parse_args(["reproduce", "v7.1.99-test", "--repo", "sh-agents/simplex-chat"])
+        self.assertEqual(command.repo, "sh-agents/simplex-chat")
+        for repo in ("simplex-chat", "https://github.com/a/b", "a/b/c", "a/b c"):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                build_script.parse_args(["reproduce", "v7.1.0", "--repo", repo])
 
     def test_reproduce_rejects_unknown_arch_and_target(self):
         for argv in (["reproduce", "v7.1.0", "android", "--arches", "x86"], ["reproduce", "v7.1.0", "ios"], ["v7.1.0"], []):

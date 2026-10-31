@@ -1,7 +1,7 @@
 """Builds SimpleX Chat release files and reproduces releases.
 
 Reproduce a release (desktop is the default target):
-    simplex-chat-build.py reproduce <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache]
+    simplex-chat-build.py reproduce <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache] [--repo <owner/name>]
 
 Build one commit's release files, as CI does; desktop, libs and openssl build for the machine they run on:
     simplex-chat-build.py build desktop linux <22.04|24.04> --version <x.y.z> --out <dir>
@@ -31,7 +31,7 @@ Install prebuilt core libraries where the apps' builds take them, as the test wo
     simplex-chat-build.py install libs ios <pkg-ios-aarch64-swift-json.zip>
 
 Needs Python 3.12+; the Linux and Android builds need Docker, xcarchive macOS with Xcode and Nix, and reproduce git.
-reproduce writes its results to ./<tag>-simplex-chat.
+reproduce writes its results to ./<tag>-<repository name>.
 The Android builds are signed by Gradle when ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
 ANDROID_KEY_PASSWORD are set, and unsigned otherwise.
 """
@@ -40,6 +40,7 @@ import argparse
 import enum
 import os
 import platform
+import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ from .android import (
     reproduce_android,
 )
 from .common import (
+    SIMPLEX_REPO,
     BuildError,
     Platform,
     add_summary,
@@ -86,6 +88,8 @@ from .openssl import build_host_openssl
 from .smoke import OLD_RELEASE, make_old_database, test_apk, test_cli, test_desktop, test_desktop_upgrade
 from .windows import build_desktop_windows, build_windows_libs
 
+GITHUB_REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+
 
 class Target(enum.StrEnum):
     DESKTOP = "desktop"
@@ -95,6 +99,7 @@ class Target(enum.StrEnum):
 @dataclass(frozen=True, slots=True)
 class Reproduce:
     tag: str
+    repo: str
     targets: tuple[Target, ...]
     arches: tuple[Arch, ...]
     nix_cache: bool
@@ -238,14 +243,14 @@ type Command = Reproduce | Build | InstallLibs | TestRelease | MakeOldDatabase
 
 def reproduce(command: Reproduce) -> None:
     require_tools(["git", "docker"])
-    results = Path.cwd() / f"{command.tag}-simplex-chat"
+    results = Path.cwd() / f"{command.tag}-{command.repo.split('/')[1]}"
     failed: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
-        source = clone(Path(tmp))
+        source = clone(Path(tmp), command.repo)
         if Target.DESKTOP in command.targets:
-            failed += reproduce_desktop(command.tag, source, results)
+            failed += reproduce_desktop(command.tag, command.repo, source, results)
         if Target.ANDROID in command.targets:
-            failed += reproduce_android(command.tag, command.arches, command.nix_cache, source, results)
+            failed += reproduce_android(command.tag, command.repo, command.arches, command.nix_cache, source, results)
     if failed:
         add_summary(f"{command.tag} is not reproduced: {', '.join(f'`{name}`' for name in failed)}\n")
         raise BuildError(f"{command.tag} is not reproduced: {', '.join(failed)}")
@@ -511,6 +516,12 @@ def parse_arches(value: str) -> tuple[Arch, ...]:
         raise argparse.ArgumentTypeError(f"{e}, choose from {', '.join(Arch)}") from e
 
 
+def parse_repo(value: str) -> str:
+    if not GITHUB_REPO.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value} is not a GitHub repository as owner/name")
+    return value
+
+
 def parse_args(argv: Sequence[str]) -> Command:
     match argv[:1]:
         case ["build"]:
@@ -531,10 +542,11 @@ def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:
     )
     parser.add_argument("tag", help="release tag, e.g. v7.1.0")
     parser.add_argument("targets", nargs="*", type=Target, choices=list(Target), help="default: desktop")
+    parser.add_argument("--repo", type=parse_repo, default=SIMPLEX_REPO, help=f"the release's GitHub repository (default: {SIMPLEX_REPO})")
     parser.add_argument("--arches", type=parse_arches, default=tuple(Arch), help="Android arches, e.g. aarch64,armv7a")
     parser.add_argument("--nix-cache", action="store_true", help="substitute the Android toolchains from zw3rk's and IOG's caches")
     args = parser.parse_args(argv)
-    return Reproduce(args.tag, tuple(args.targets) or (Target.DESKTOP,), args.arches, args.nix_cache)
+    return Reproduce(args.tag, args.repo, tuple(args.targets) or (Target.DESKTOP,), args.arches, args.nix_cache)
 
 
 def main(argv: Sequence[str]) -> int:

@@ -15,6 +15,21 @@ class ReleaseDetailsTest(unittest.TestCase):
         self.assertEqual(build_script.tag_version("v7.1.0-beta.7"), "7.1.0")
         self.assertEqual(build_script.tag_version("v6.4.8"), "6.4.8")
 
+    def test_release_url_and_clone_of_simplex_chat_or_a_fork(self):
+        self.assertEqual(
+            build_script.release_url("v7.1.0", "simplex-aarch64.apk"),
+            "https://github.com/simplex-chat/simplex-chat/releases/download/v7.1.0/simplex-aarch64.apk",
+        )
+        self.assertEqual(
+            build_script.release_url("v7.1.99-test", "a.dmg", "owner/fork"), "https://github.com/owner/fork/releases/download/v7.1.99-test/a.dmg"
+        )
+        recorder = Recorder()
+        with patch_all("run", recorder):
+            self.assertEqual(build_script.clone(pathlib.Path("w"), "owner/fork"), pathlib.Path("w/simplex-chat"))
+            build_script.clone(pathlib.Path("w"))
+        self.assertEqual(recorder.commands[0][-2:], ["https://github.com/owner/fork.git", "simplex-chat"])
+        self.assertEqual(recorder.commands[1][-2], "https://github.com/simplex-chat/simplex-chat.git")
+
     def test_android_build_tag(self):
         tags = ["v6.4.0", "v6.4.0-armv7a", "v7.1.0"]
         self.assertEqual(build_script.android_build_tag("v6.4.0", tags, Arch.ARMV7A), "v6.4.0-armv7a")

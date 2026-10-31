@@ -387,7 +387,7 @@ def build_linux_libs(source: Path, image: UbuntuImage, database: Database, dist_
     zip_desktop_libs(libs, [], out / linux_libs_zip(image.arch, database))
 
 
-def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
+def reproduce_desktop(tag: str, repo: str, source: Path, results: Path) -> list[str]:
     built = results / "from-source"
     released = results / "prebuilt"
     built.mkdir(parents=True, exist_ok=True)
@@ -396,7 +396,7 @@ def reproduce_desktop(tag: str, source: Path, results: Path) -> list[str]:
         checkout(source, tag)
         build_desktop_linux(source, image, tag_version(tag), built)
         for name in desktop_files(image):
-            download(release_url(tag, name), released / name)
+            download(release_url(tag, name, repo), released / name)
     mismatched = compare_dirs(built, released)
     for name in mismatched:
         log(f"{name}: sha256 doesn't match")

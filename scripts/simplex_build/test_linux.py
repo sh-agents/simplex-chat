@@ -384,7 +384,10 @@ class DesktopTest(unittest.TestCase):
                 for name in build_script.desktop_files(image):
                     (out / name).write_bytes(name.encode())
 
+            urls = []
+
             def fake_download(url, target):
+                urls.append(url)
                 target.write_bytes(b"other" if target.name.endswith(".AppImage") else target.name.encode())
 
             with (
@@ -392,10 +395,12 @@ class DesktopTest(unittest.TestCase):
                 patch_all("build_desktop_linux", fake_build),
                 patch_all("download", fake_download),
                 patch_all("log"),
+                mock.patch("platform.machine", return_value="x86_64"),
             ):
-                mismatched = build_script.reproduce_desktop("v7.1.0", pathlib.Path(tmp), results)
+                mismatched = build_script.reproduce_desktop("v7.1.0", "owner/fork", pathlib.Path(tmp), results)
             self.assertEqual(mismatched, ["simplex-desktop-x86_64.AppImage"])
             self.assertFalse((results / "_sha256sums").exists())
+            self.assertIn("https://github.com/owner/fork/releases/download/v7.1.0/simplex-desktop-x86_64.AppImage", urls)
 
 
 class LinuxLibsTest(unittest.TestCase):
