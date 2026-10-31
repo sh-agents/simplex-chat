@@ -17,6 +17,11 @@ group=team
 # the snapshot tests after the smoke test may have stopped the app already
 xcrun simctl terminate "$SIM_UDID" "$bundle_id" || true
 container=$(xcrun simctl get_app_container "$SIM_UDID" "$bundle_id" group.chat.simplex.app)
+data=$(xcrun simctl get_app_container "$SIM_UDID" "$bundle_id" data)
+trap '"$ui" shot old-database-failed || true' ERR
+echo "::group::database files before the swap"
+ls -la "$container" "$data/Documents" || true
+echo "::endgroup::"
 rm -f "$container"/simplex_v1_chat.db* "$container"/simplex_v1_agent.db*
 cp "$old/simplex_chat.db" "$container/simplex_v1_chat.db"
 cp "$old/simplex_agent.db" "$container/simplex_v1_agent.db"
