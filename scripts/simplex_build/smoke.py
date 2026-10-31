@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .common import (
     log,
     require_tools,
     run,
+    warn,
 )
 
 # How long an app may take to open its window, and to draw its first screen after that
@@ -196,9 +198,19 @@ def emulator_screenshot(target: Path, work: Path) -> None:
     shutil.move(next(png for png in shots.glob("*.png") if png.stat().st_size), target)
 
 
+def apk_abis(apk: Path) -> set[str]:
+    with zipfile.ZipFile(apk) as z:
+        return {Path(name).parent.name for name in z.namelist() if name.startswith("lib/") and name.endswith(".so")}
+
+
 def test_apk(apk: Path, out: Path) -> None:
     """The APK installs in the running emulator, starts and draws its first screen without exiting."""
     require_tools(["adb", "keytool"])
+    device_abis = set(run(["adb", "shell", "getprop", "ro.product.cpu.abilist"], capture=True).stdout.strip().split(","))
+    if not apk_abis(apk) & device_abis:
+        warn(f"{apk.name} is for {', '.join(sorted(apk_abis(apk)))}, which the emulator can't run ({', '.join(sorted(device_abis))})")
+        add_summary(f"`{apk.name}`: not tested, the emulator runs {', '.join(sorted(device_abis))}\n\n")
+        return
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         unsigned = run([find_apksigner(), "verify", apk], check=False, capture=True).returncode != 0

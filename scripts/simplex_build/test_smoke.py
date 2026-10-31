@@ -1,6 +1,7 @@
 import pathlib
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 from .testing import Recorder, build_script, patch_all
@@ -134,7 +135,7 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("after opening its window", str(raised.exception))
 
     def apk_run(self, verify_returncode, pidof):
-        recorder = Recorder(answers={"pidof": pidof})
+        recorder = Recorder(answers={"pidof": pidof, "abilist": "x86_64,arm64-v8a\n"})
 
         def fake_run(args, **kwargs):
             if [str(a) for a in args[:4]] == ["adb", "emu", "screenrecord", "screenshot"]:
@@ -145,7 +146,8 @@ class SmokeTest(unittest.TestCase):
             return recorder(args, **kwargs)
 
         apk = self.root / "simplex-aarch64.apk"
-        apk.write_bytes(b"apk")
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("lib/arm64-v8a/libsimplex.so", b"lib")
         with (
             patch_all("run", fake_run),
             patch_all("require_tools"),
@@ -166,6 +168,16 @@ class SmokeTest(unittest.TestCase):
         commands = self.apk_run(verify_returncode=0, pidof="1234\n")
         self.assertIn("screenrecord", [c[2] for c in commands if c[:2] == ["adb", "emu"]])
         self.assertEqual((self.out / "simplex-aarch64.apk.png").read_bytes(), b"png")
+
+    def test_apk_for_an_abi_the_emulator_lacks_is_skipped(self):
+        apk = self.root / "simplex-armv7a.apk"
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("lib/armeabi-v7a/libsimplex.so", b"lib")
+        recorder = Recorder(answers={"abilist": "x86_64,arm64-v8a\n"})
+        with patch_all("run", recorder), patch_all("require_tools"), patch_all("warn") as warn:
+            build_script.test_apk(apk, self.out)
+        self.assertIn("armeabi-v7a", warn.call_args.args[0])
+        self.assertFalse(any(c[:2] == ["adb", "install"] for c in recorder.commands))
 
     def test_signed_apk_is_installed_as_it_is(self):
         commands = self.apk_run(verify_returncode=0, pidof="1234\n")

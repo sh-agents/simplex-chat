@@ -6,7 +6,7 @@ Each job runs `scripts/simplex-chat-build.py build` (its code is the `scripts/si
 
 ## Smoke tests
 
-After each build the job runs what it built as users do, with `scripts/simplex-chat-build.py test`: each CLI prints its version; the Linux debs and AppImage, the macOS dmg and the Windows msi are installed and started, and pass when the app keeps running and its screenshot shows a window (on Linux the test also waits for the window); the APKs, signed with a throwaway key, start in an Android emulator. Each app leaves a screenshot, in the artifacts `screens-<platform>`. The iOS archive is built for devices, which the macOS runners can't run.
+After each build the job runs what it built as users do, with `scripts/simplex-chat-build.py test`: each CLI prints its version; the Linux debs and AppImage, the macOS dmg and the Windows msi are installed and started, and pass when the app keeps running and its screenshot shows a window (on Linux the test also waits for the window); the APKs, signed with a throwaway key, start in an Android emulator; it runs Android 14 for x86_64, which runs arm64 apps, so the armv7a APK is skipped with a warning. Each app leaves a screenshot, in the artifacts `screens-<platform>`. The iOS archive is built for devices, which the macOS runners can't run.
 
 ## Running it
 
