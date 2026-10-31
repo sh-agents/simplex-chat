@@ -486,3 +486,30 @@ class VolumeTest(unittest.TestCase):
         self.assertEqual(fake.commands[-1], dmg)
         self.assertEqual((self.root / "out.dmg").read_bytes(), b"dmg")
         self.assertEqual(pathlib.Path(image).read_bytes()[1024:1026], b"H+")
+
+
+def udif(data, signature=b""):
+    """A dmg's data and plist followed by its koly block, with signature before the block as codesign puts it."""
+    koly = bytearray(512)
+    koly[:4] = b"koly"
+    struct.pack_into(">QQ", koly, 0xD8, len(data) - 4, 4)
+    if signature:
+        struct.pack_into(">QQ", koly, 0x128, len(data), len(signature))
+    return data + signature + bytes(koly)
+
+
+class DmgSignatureTest(unittest.TestCase):
+    def test_signature_of_a_release_is_copied_before_the_koly_block(self):
+        built = udif(b"compressed volume" * 10 + b"plst")
+        released = udif(b"compressed volume" * 10 + b"plst", b"\xfa\xde\x0c\xc0 signature and ticket")
+        self.assertEqual(build_script.dmg_signature(built), (0, 0))
+        self.assertEqual(build_script.dmg_signature(released), (174, 25))
+        self.assertEqual(build_script.copy_dmg_signature(released, built), released)
+        self.assertEqual(build_script.copy_dmg_signature(built, built), built)
+
+    def test_other_volume_or_koly_does_not_match(self):
+        released = udif(b"compressed volume" * 10 + b"plst", b"signature")
+        self.assertNotEqual(build_script.copy_dmg_signature(released, udif(b"compressed volumE" * 10 + b"plst")), released)
+        other_koly = bytearray(udif(b"compressed volume" * 10 + b"plst"))
+        other_koly[-4] = 1
+        self.assertNotEqual(build_script.copy_dmg_signature(released, bytes(other_koly)), released)
