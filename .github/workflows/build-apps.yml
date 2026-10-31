@@ -211,6 +211,69 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+  # the archive's core, from Nix, relabelled for the simulator: the same objects as the archive's, in the simulator app
+  ios-test:
+    name: iOS app in the simulator
+    needs: [ios, old-database]
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Use the macOS 26 SDK
+        run: scripts/ci/ios-sim/use-macos26-sdk.sh
+
+      - name: Download the archive's core
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-archive-unsigned
+          path: ${{ runner.temp }}/ios
+
+      - name: Prepare libraries
+        run: scripts/simplex-chat-build.py install libs ios "$RUNNER_TEMP"/ios/pkg-ios-*.zip
+
+      - name: Build app
+        run: |
+          xcodebuild build -quiet \
+            -project apps/ios/SimpleX.xcodeproj \
+            -scheme "SimpleX (iOS)" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            ARCHS=arm64 \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM= \
+            PROVISIONING_PROFILE_SPECIFIER=
+
+      - name: Install AXe
+        run: scripts/ci/ios-sim/install-axe.sh
+
+      - name: Smoke test
+        run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" "$RUNNER_TEMP/screens"
+
+      - name: Download the previous release's database
+        uses: actions/download-artifact@v8
+        with:
+          name: old-database
+          path: ${{ runner.temp }}/old-database
+
+      - name: Open the previous release's database
+        run: scripts/ci/ios-sim/old-database.sh "$RUNNER_TEMP/old-database"
+
+      - name: Upload screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screens-ios
+          path: ${{ runner.temp }}/screens
+          retention-days: 30
+          if-no-files-found: ignore
+
   desktop-linux:
     name: Desktop Ubuntu ${{ matrix.ubuntu }} ${{ matrix.arch }}
     needs: old-database
