@@ -9,7 +9,7 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from .common import BuildError, fetch_pinned, log, run, warn
+from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
 from .macho import simulator_archive
 from .nix import install_nix, nix_env
 from .openssl import host_openssl
@@ -26,7 +26,7 @@ IOS_PROJECT = "apps/ios/SimpleX.xcodeproj"
 IOS_SCHEME = "SimpleX (iOS)"
 
 
-IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "ditto")
+IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "ditto", "git")
 
 
 IOS_LIBRARIES = "apps/ios/Libraries"
@@ -243,6 +243,10 @@ def build_ios_sim_libs(source: Path, out: Path) -> None:
                 z.write(lib, lib.name)
 
 
+def commit_epoch(source: Path) -> str:
+    return run(["git", "-C", source, "log", "-1", "--format=%ct"], capture=True).stdout.strip()
+
+
 def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) -> None:
     """The archive and the Nix core package it links, with the brand assets of art, the simplex-chat-art checkout, or
     else with the default icons."""
@@ -272,6 +276,9 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         settings = build_settings(settings_output, ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
         team = settings["DEVELOPMENT_TEAM"]
         check_minimum_versions(source, settings["IPHONEOS_DEPLOYMENT_TARGET"])
+        epoch = commit_epoch(source)
+        # the modules that Swift embeds in the dSYMs record the modification time of the bridging header
+        touch_tree(source / "apps/ios", epoch)
 
         # Xcode refuses ad-hoc signing for iOS devices ("Ad Hoc code signing is not allowed with SDK"), so the archive
         # is built unsigned and its bundles are signed after.

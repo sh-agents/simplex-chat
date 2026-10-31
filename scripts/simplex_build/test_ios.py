@@ -15,6 +15,8 @@ from .testing import (
     patch_all,
 )
 
+COMMIT_EPOCH = 1700000000
+
 
 class IosDetailsTest(unittest.TestCase):
     def test_minimum_versions_reads_both_load_commands(self):
@@ -107,6 +109,8 @@ class IosArchiveTest(unittest.TestCase):
             (self.source / f"apps/ios/{name}/{name}.entitlements").write_text(ENTITLEMENTS)
         (self.source / "apps/ios/SimpleX (iOS).entitlements").write_text(ENTITLEMENTS)
         (self.source / "apps/ios/Shared/SimpleXAssets.xcassets").mkdir(parents=True)
+        (self.source / "apps/ios/SimpleXChat").mkdir(parents=True)
+        (self.source / "apps/ios/SimpleXChat/SimpleX.h").write_text("")
         (self.source / "apps/ios/Libraries/ios").mkdir(parents=True)
         (self.source / "apps/ios/Libraries/ios/libHSsimplex-chat.a").write_bytes(b"")
         self.out.mkdir()
@@ -132,9 +136,13 @@ class IosArchiveTest(unittest.TestCase):
                 apple.commands.append(args)
                 return mock.Mock(returncode=0, stdout="    DEVELOPMENT_TEAM = 5NN7GUYB6T\n    IPHONEOS_DEPLOYMENT_TARGET = 15.0\n")
             elif args[:2] == ["xcodebuild", "archive"]:
+                self.bridging_header_mtime = (source / "apps/ios/SimpleXChat/SimpleX.h").stat().st_mtime
                 app = pathlib.Path(args[args.index("-archivePath") + 1]) / "Products/Applications/SimpleX.app"
                 for appex in ("SimpleX NSE", "SimpleX SE"):
                     (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
+            elif args[0] == "git":
+                apple.commands.append(args)
+                return mock.Mock(returncode=0, stdout=f"{COMMIT_EPOCH}\n")
             elif args[0] == "ditto":
                 pathlib.Path(args[-1]).write_bytes(b"archive")
             return apple(args, cwd, env, input, check, capture)
@@ -156,7 +164,10 @@ class IosArchiveTest(unittest.TestCase):
         xcconfig = (self.source / "apps/ios/Local.xcconfig").read_text()
         self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", xcconfig)
         self.assertIn(f"SIMPLEX_ASSETS_DIR = {self.art}", xcconfig)
-        self.assertEqual([c[0] for c in commands][:5], ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "xcodebuild"])
+        self.assertEqual(
+            [c[0] for c in commands][:6], ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "git", "xcodebuild"]
+        )
+        self.assertEqual(self.bridging_header_mtime, COMMIT_EPOCH)
         archive = next(c for c in commands if c[:2] == ["xcodebuild", "archive"])
         self.assertIn("CODE_SIGNING_ALLOWED=NO", archive)
         signed = [c[-1] for c in commands if c[0] == "codesign" and "--entitlements" in c and "-d" not in c]
@@ -282,3 +293,18 @@ class IosLibsTest(unittest.TestCase):
         self.assertIn(["cabal", "build", "-j", "lib:simplex-chat"], recorder.commands)
         with zipfile.ZipFile(self.root / build_script.IOS_CORE_ZIP) as z:
             self.assertEqual(sorted(z.namelist()), ["libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a", "libffi.a", "libgmp.a", "libgmpxx.a"])
+
+
+class ReproducibleArchiveTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_commit_epoch_is_the_head_commit_time(self):
+        recorder = Recorder(answers={"log -1 --format=%ct": "1700000000\n"})
+        with patch_all("run", recorder):
+            self.assertEqual(build_script.commit_epoch(self.root), "1700000000")
+        self.assertEqual(recorder.commands, [["git", "-C", str(self.root), "log", "-1", "--format=%ct"]])
