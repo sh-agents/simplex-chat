@@ -173,6 +173,7 @@ class IosArchiveTest(unittest.TestCase):
         signed = [c[-1] for c in commands if c[0] == "codesign" and "--entitlements" in c and "-d" not in c]
         self.assertEqual([pathlib.Path(p).name for p in signed], ["SimpleX NSE.appex", "SimpleX SE.appex", "SimpleX.app"])
         self.assertIn(["plutil", "-replace", "ApplicationProperties.Team", "-string", "5NN7GUYB6T"], [c[:5] for c in commands])
+        self.assertIn(["plutil", "-replace", "CreationDate", "-date", "2023-11-14T22:13:20Z"], [c[:5] for c in commands])
         self.assertEqual((self.out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
         self.assertEqual((self.out / build_script.IOS_CORE_ZIP).read_bytes(), b"core")
 

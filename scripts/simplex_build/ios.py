@@ -5,6 +5,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -72,6 +73,9 @@ package entropy
 
 
 IOS_LOCAL_XCCONFIG = "SIMPLEX_ASSETS_DIR = {art}\nSWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS\n"
+
+
+PLUTIL_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def version_tuple(version: str) -> tuple[int, ...]:
@@ -302,4 +306,6 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         run(["codesign", "--verify", "--deep", "--strict", app])
         # the team Xcode records when it signs an archive, which Organizer shows and distributes for
         run(["plutil", "-replace", "ApplicationProperties.Team", "-string", team, archive / "Info.plist"])
+        creation_date = time.strftime(PLUTIL_DATE_FORMAT, time.gmtime(int(epoch)))
+        run(["plutil", "-replace", "CreationDate", "-date", creation_date, archive / "Info.plist"])
         run(["ditto", "-c", "-k", "--keepParent", archive, out / "SimpleX.xcarchive.zip"])
