@@ -166,7 +166,7 @@ jobs:
 
       - name: Build changelog
         id: build_changelog
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'simplex-chat/simplex-chat'
         uses: simplex-chat/release-changelog-builder-action@v5
         with:
           configuration: .github/changelog_conf.json
@@ -547,7 +547,7 @@ jobs:
           sudo chown $(id -u):$(id -g) tests/tmp
 
       - name: Run tests
-        if: matrix.should_run == true && matrix.arch == 'x86_64'
+        if: matrix.should_run == true && matrix.arch == 'x86_64' && github.repository == 'simplex-chat/simplex-chat'
         timeout-minutes: 120
         shell: bash
         env:
@@ -1122,7 +1122,7 @@ jobs:
           ln -s /Volumes/tests tests/tmp
 
       - name: Run tests
-        if: matrix.should_run == true && matrix.arch == 'aarch64'
+        if: matrix.should_run == true && matrix.arch == 'aarch64' && github.repository == 'simplex-chat/simplex-chat'
         timeout-minutes: 120
         shell: bash
         run: |
