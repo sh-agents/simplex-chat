@@ -6,7 +6,9 @@ Each job runs `scripts/simplex-chat-build.py build` (its code is the `scripts/si
 
 ## Smoke tests
 
-After each build the job runs what it built as users do, with `scripts/simplex-chat-build.py test`: each CLI prints its version; the Linux debs and AppImage, the macOS dmg and the Windows msi are installed and started, and pass when the app keeps running and its screenshot shows a window (on Linux the test also waits for the window); the APKs, signed with a throwaway key, start in an Android emulator; it runs Android 14 for x86_64, which runs arm64 apps, so the armv7a APK is skipped with a warning. Each app leaves a screenshot, in the artifacts `screens-<platform>`. The iOS archive is built for devices, which the macOS runners can't run.
+After each build the job runs what it built as users do, with `scripts/simplex-chat-build.py test`: each CLI prints its version; the Linux debs and AppImage, the macOS dmg and the Windows msi are installed and started, and pass when the app keeps running and its screenshot shows a window (on Linux the test also waits for the window); the APKs, signed with a throwaway key, start in an Android emulator, aarch64 on Android 14 and armv7a on Android 11, the last x86_64 image that runs 32-bit ARM code. The iOS archive's Nix core, relabelled for the simulator, runs in the iOS simulator app (job ios-test). Each app leaves a screenshot, in the artifacts `screens-<platform>`.
+
+The job old-database makes an encrypted database with the previous release's CLI (v7.0.3, pinned by SHA-256), and every build must open it with its key: each CLI opens and migrates it and refuses a wrong key; each desktop app opens and migrates it, which the new CLI then checks; the Android apps open it from the passphrase screen, and the iOS app in the simulator too. Each desktop package is also installed over the v7.0.3 package that the old app started first, and the new app must open the database the old app made (`test desktop --upgrade-from-previous`).
 
 ## Running it
 
