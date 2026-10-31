@@ -137,6 +137,8 @@ class SmokeTest(unittest.TestCase):
         recorder = Recorder(answers={"pidof": pidof})
 
         def fake_run(args, **kwargs):
+            if [str(a) for a in args[:4]] == ["adb", "emu", "screenrecord", "screenshot"]:
+                (pathlib.Path(args[4]) / "Screenshot_1.png").write_bytes(b"png")
             if args[1:2] == ["verify"]:
                 recorder.commands.append([str(a) for a in args])
                 return mock.Mock(returncode=verify_returncode, stdout="")
@@ -159,6 +161,11 @@ class SmokeTest(unittest.TestCase):
         install = next(c for c in commands if c[:2] == ["adb", "install"])
         self.assertNotEqual(install[-1], str(self.root / "simplex-aarch64.apk"))
         self.assertIn(["adb", "shell", "am", "start", "-W", "-n", "chat.simplex.app/.MainActivity"], commands)
+
+    def test_screenshot_comes_from_the_emulator(self):
+        commands = self.apk_run(verify_returncode=0, pidof="1234\n")
+        self.assertIn("screenrecord", [c[2] for c in commands if c[:2] == ["adb", "emu"]])
+        self.assertEqual((self.out / "simplex-aarch64.apk.png").read_bytes(), b"png")
 
     def test_signed_apk_is_installed_as_it_is(self):
         commands = self.apk_run(verify_returncode=0, pidof="1234\n")

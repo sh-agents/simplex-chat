@@ -29,7 +29,7 @@ LINUX_JAVA_OPTIONS = "-Dskiko.renderApi=SOFTWARE"
 DESKTOP_WINDOW_TITLE = "SimpleX"
 ANDROID_PACKAGE = "chat.simplex.app"
 ANDROID_ACTIVITY = f"{ANDROID_PACKAGE}/.MainActivity"
-ANDROID_SCREENSHOT = "/data/local/tmp/screen.png"
+EMULATOR_SCREENSHOT_SECONDS = 10
 # Screenshots with fewer colours are blank, or show only a background
 MIN_SCREENSHOT_COLOURS = 16
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -186,6 +186,16 @@ def signed_for_test(apk: Path, work: Path) -> Path:
     return signed
 
 
+def emulator_screenshot(target: Path, work: Path) -> None:
+    """The emulator's screen: without a window it composes the screen on the host, where the guest's screencap can't
+    read it."""
+    shots = work / "screenshot"
+    shots.mkdir()
+    run(["adb", "emu", "screenrecord", "screenshot", shots], capture=True)
+    wait_until(lambda: any(png.stat().st_size for png in shots.glob("*.png")), EMULATOR_SCREENSHOT_SECONDS, "emulator screenshot")
+    shutil.move(next(png for png in shots.glob("*.png") if png.stat().st_size), target)
+
+
 def test_apk(apk: Path, out: Path) -> None:
     """The APK installs in the running emulator, starts and draws its first screen without exiting."""
     require_tools(["adb", "keytool"])
@@ -195,12 +205,10 @@ def test_apk(apk: Path, out: Path) -> None:
         installable = signed_for_test(apk, work) if unsigned else apk
         run(["adb", "uninstall", ANDROID_PACKAGE], check=False, capture=True)
         run(["adb", "install", installable])
-    run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
-    time.sleep(SETTLE_SECONDS)
-    screen = out / f"{apk.name}.png"
-    # the shell user can always write here, unlike to /sdcard
-    run(["adb", "shell", "screencap", "-p", ANDROID_SCREENSHOT])
-    run(["adb", "pull", ANDROID_SCREENSHOT, screen])
+        run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
+        time.sleep(SETTLE_SECONDS)
+        screen = out / f"{apk.name}.png"
+        emulator_screenshot(screen, work)
     if not run(["adb", "shell", "pidof", ANDROID_PACKAGE], check=False, capture=True).stdout.strip():
         logcat = run(["adb", "logcat", "-d", "-t", "200"], check=False, capture=True).stdout
         record(out, f"{apk.name}.logcat", logcat)
