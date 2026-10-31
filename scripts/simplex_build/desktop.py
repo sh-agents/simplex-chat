@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import BuildError, Platform, host_platform, remove_tree, run
+from .common import BuildError, Platform, edit_lines, host_platform, remove_tree, run, single_file
 from .docker import Step
 
 DESKTOP_ENV = {"ASSETS_DIR": "../../assets"}
@@ -27,6 +27,11 @@ DESKTOP_LIBS_DIR = "apps/multiplatform/common/src/commonMain/cpp/desktop/libs"
 
 
 COMPOSE_ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
+
+
+# Compose rewrites the skiko runtime jar at build time, with the build time as its timestamps; the app loads skiko
+# without it (https://youtrack.jetbrains.com/issue/CMP-1971)
+SKIKO_RUNTIME = "skiko-awt-runtime-"
 
 
 # Android only: Mobile.hs exports them, the desktop library doesn't
@@ -88,6 +93,13 @@ def link_desktop_libs(source: Path, platform_dir: str, compose_dir: str) -> None
         shutil.copytree(desktop_libs(source, platform_dir), link)
     else:
         link.symlink_to(target)
+
+
+def remove_skiko_runtime(app: Path) -> None:
+    """The skiko runtime jar out of jpackage's app directory, which holds the jars and the launcher's cfg."""
+    for jar in app.glob(f"{SKIKO_RUNTIME}*.jar"):
+        jar.unlink()
+    edit_lines(single_file(app, "*.cfg"), lambda line: None if SKIKO_RUNTIME in line else line)
 
 
 CLI_BUILD_STEPS = (Step(("cabal", "clean")), Step(("cabal", "update")), Step(("cabal", "build", "-j")))

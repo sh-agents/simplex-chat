@@ -320,3 +320,21 @@ class HostDesktopTest(unittest.TestCase):
         self.assertFalse(tarball.exists())
         self.assertFalse((self.source / "dist-newstyle/src/simplexmq-abc").exists())
         self.assertTrue(keep.exists())
+
+    def test_skiko_runtime_jar_leaves_the_app_and_its_classpath(self):
+        app = self.root / "SimpleX/app"
+        app.mkdir(parents=True)
+        for jar in ("desktop-jvm-7.1.7-854b.jar", "skiko-awt-runtime-windows-x64-0.9.4.2-1f63.jar", "skiko-awt-0.9.4.2-aa36.jar"):
+            (app / jar).write_bytes(b"jar")
+        (app / "SimpleX.cfg").write_text(
+            "[Application]\r\n"
+            "app.classpath=$APPDIR\\desktop-jvm-7.1.7-854b.jar\r\n"
+            "app.classpath=$APPDIR\\skiko-awt-runtime-windows-x64-0.9.4.2-1f63.jar\r\n"
+            "app.classpath=$APPDIR\\skiko-awt-0.9.4.2-aa36.jar\r\n"
+        )
+        build_script.remove_skiko_runtime(app)
+        self.assertEqual(sorted(p.name for p in app.iterdir()), ["SimpleX.cfg", "desktop-jvm-7.1.7-854b.jar", "skiko-awt-0.9.4.2-aa36.jar"])
+        self.assertEqual(
+            (app / "SimpleX.cfg").read_text().splitlines(),
+            ["[Application]", "app.classpath=$APPDIR\\desktop-jvm-7.1.7-854b.jar", "app.classpath=$APPDIR\\skiko-awt-0.9.4.2-aa36.jar"],
+        )

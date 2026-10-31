@@ -39,6 +39,7 @@ from .desktop import (
     client_library_constraints,
     desktop_libs,
     link_desktop_libs,
+    remove_skiko_runtime,
     zip_desktop_libs,
 )
 from .docker import OUT, PROJECT, Container, HostRunner, Runner, Step
@@ -109,11 +110,6 @@ APPIMAGE_TOOLS = {
 DESKTOP_MIME_TYPES = "MimeType=x-scheme-handler/simplexchat;x-scheme-handler/simplex;"
 
 
-# Compose extracts the skiko runtime jar's library at build time, with the build time as its timestamp; the app loads
-# the library without it (https://youtrack.jetbrains.com/issue/CMP-1971)
-SKIKO_RUNTIME = "skiko-awt-runtime-linux"
-
-
 def build_linux_lib(runner: Runner, source: Path, arch: str, database: Database, dist_dir: str = "dist-newstyle") -> Path:
     """libsimplex.so and the GHC libraries it loads, in the desktop app's libraries directory, which it returns."""
     check_exports(source)
@@ -179,12 +175,6 @@ def build_cli_deb(runner: Runner, binary: Path, version: str, arch: str, work: P
     return build / "simplex-chat.deb"
 
 
-def remove_skiko_runtime(app: Path) -> None:
-    for jar in app.glob(f"lib/app/*{SKIKO_RUNTIME}*"):
-        jar.unlink()
-    edit_lines(app / "lib/app/simplex.cfg", lambda line: None if SKIKO_RUNTIME in line else line)
-
-
 def register_url_schemes(line: str) -> str:
     if line.startswith("Exec=") and "%u" not in line and "%U" not in line:
         return f"{line} %u"
@@ -204,7 +194,7 @@ def package_desktop_deb(runner: Runner, source: Path, arch: str, codename: str) 
     shutil.rmtree(extracted, ignore_errors=True)
     runner.run(Step(("dpkg-deb", "-R", runner.path(jpackage_debs[0]), "./extracted"), runner.path(multiplatform)))
     app = single_dir(extracted / "opt", "*imple*")
-    remove_skiko_runtime(app)
+    remove_skiko_runtime(app / "lib/app")
     edit_lines(extracted / "DEBIAN/control", lambda line: f"{line}~{codename}" if "Version" in line else line)
     for entry in app.glob("lib/*.desktop"):
         edit_lines(entry, register_url_schemes)
@@ -264,7 +254,7 @@ def package_appimage(runner: Runner, source: Path, arch: str, libcrypto: Path, w
         for repo, name, digest in APPIMAGE_TOOLS[arch]
     )
     tool.chmod(0o755)
-    remove_skiko_runtime(appdir / "usr")
+    remove_skiko_runtime(appdir / "usr/lib/app")
     touch_tree(appdir, SOURCE_DATE_EPOCH)
     epoch = {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}
     appimagetool = (runner.path(tool), "--verbose", "--no-appstream", "--runtime-file", runner.path(runtime), ".")
