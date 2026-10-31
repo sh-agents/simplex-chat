@@ -82,6 +82,13 @@ BLOCK_SIZE = 4096
 VOLUME_HEADER_OFFSET = 1024
 
 
+VOLUME_HEADER_SIZE = 512
+
+
+# the volume header's catalog file fork, after its allocation and extents file forks
+CATALOG_FORK_OFFSET = 112 + 2 * 80
+
+
 # block 0, which holds the volume header, and the last block, which holds the alternate one
 HEADER_BLOCKS = 2
 
@@ -126,6 +133,9 @@ HFSPLUS_FOLDER_MODE = 0o755
 NODE_DESCRIPTOR = ">IIbBHH"
 
 
+NODE_DESCRIPTOR_SIZE = 14
+
+
 HEADER_NODE = 1
 
 
@@ -133,6 +143,9 @@ LEAF_NODE = -1
 
 
 FOLDER_RECORD = 1
+
+
+FILE_RECORD = 2
 
 
 FOLDER_THREAD_RECORD = 3
@@ -163,6 +176,19 @@ FREE_SPACE_SHARE = 0.1
 
 
 MIN_FREE_BLOCKS = 8
+
+
+# the offsets in a catalog file or folder record of the fields that the build checks
+RECORD_ID_OFFSET = 8
+
+
+RECORD_MODE_OFFSET = 42
+
+
+RECORD_FINDER_FLAGS_OFFSET = 56
+
+
+HAS_CUSTOM_ICON = 0x0400
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,13 +374,72 @@ def format_hfs(image: Path, volume_name: str, total_blocks: int, catalog: BTree,
             f.write(nodes)
 
 
-def volume_counts(image: Path) -> tuple[int, int]:
-    """The files and folders that the volume header of image counts, without the root folder."""
+@dataclass(frozen=True, slots=True)
+class VolumeCounts:
+    """What a volume header counts: its files and folders, without the root folder, and the next catalog node id."""
+
+    files: int
+    folders: int
+    next_id: int
+
+
+def volume_counts(image: Path) -> VolumeCounts:
     with image.open("rb") as f:
         f.seek(VOLUME_HEADER_OFFSET)
-        header = f.read(48)
+        header = f.read(VOLUME_HEADER_SIZE)
     files, folders = struct.unpack(">II", header[32:40])
-    return files, folders
+    (next_id,) = struct.unpack(">I", header[64:68])
+    return VolumeCounts(files, folders, next_id)
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogEntry:
+    cnid: int
+    mode: int
+    finder_flags: int
+
+
+def catalog_entries(image: Path) -> dict[str, CatalogEntry]:
+    """The folders and files of image by their paths, "/" for the root folder, from the leaf nodes of its catalog,
+    which must be in the extents of its volume header."""
+    with image.open("rb") as f:
+        f.seek(VOLUME_HEADER_OFFSET)
+        header = f.read(VOLUME_HEADER_SIZE)
+        (block_size,) = struct.unpack(">I", header[40:44])
+        fields = struct.unpack(">16I", header[CATALOG_FORK_OFFSET + 16 : CATALOG_FORK_OFFSET + 80])
+        extents = [(fields[i], fields[i + 1]) for i in range(0, 16, 2) if fields[i + 1]]
+
+        def read(position: int, size: int) -> bytes:
+            block, skipped = position // block_size, 0
+            for start, count in extents:
+                if block < skipped + count:
+                    f.seek((start + block - skipped) * block_size + position % block_size)
+                    return f.read(size)
+                skipped += count
+            raise BuildError(f"{image.name}: catalog byte {position} is past the extents in its volume header")
+
+        (first_leaf,) = struct.unpack(">I", read(NODE_DESCRIPTOR_SIZE + 10, 4))
+        (node_size,) = struct.unpack(">H", read(NODE_DESCRIPTOR_SIZE + 18, 2))
+        items: dict[int, tuple[int, str, int, int]] = {}
+        node_number = first_leaf
+        while node_number:
+            node = read(node_number * node_size, node_size)
+            node_number, _, _, _, count, _ = struct.unpack(NODE_DESCRIPTOR, node[:NODE_DESCRIPTOR_SIZE])
+            for offset in struct.unpack(f">{count}H", node[-2 * count :]):
+                key_length, parent, name_length = struct.unpack(">HIH", node[offset : offset + 8])
+                record = node[offset + 2 + key_length :]
+                if struct.unpack(">h", record[:2])[0] in (FOLDER_RECORD, FILE_RECORD):
+                    name = node[offset + 8 : offset + 8 + 2 * name_length].decode("utf-16-be")
+                    (cnid,) = struct.unpack(">I", record[RECORD_ID_OFFSET : RECORD_ID_OFFSET + 4])
+                    (mode,) = struct.unpack(">H", record[RECORD_MODE_OFFSET : RECORD_MODE_OFFSET + 2])
+                    (flags,) = struct.unpack(">H", record[RECORD_FINDER_FLAGS_OFFSET : RECORD_FINDER_FLAGS_OFFSET + 2])
+                    items[cnid] = (parent, name, mode, flags)
+
+    def path(cnid: int) -> str:
+        parent, name = items[cnid][:2]
+        return "/" if parent == ROOT_PARENT_ID else f"{path(parent).rstrip('/')}/{name}"
+
+    return {path(cnid): CatalogEntry(cnid, mode, flags) for cnid, (_, _, mode, flags) in items.items()}
 
 
 def volume_paths(root: Path) -> list[Path]:
@@ -600,32 +685,56 @@ def stage_volume(app: Path, java_home: Path, volume: Path) -> list[Path]:
     return paths
 
 
+def item_mode(source: Path) -> int:
+    """The mode of source in the volume: its own, or the one hfsplus gives symlinks."""
+    mode = source.lstat().st_mode
+    return stat.S_IFLNK | HFSPLUS_FILE_MODE if stat.S_ISLNK(mode) else mode
+
+
+def check_volume(image: Path, root: Path, paths: list[Path]) -> None:
+    """Fails unless image has paths with the modes of their sources, numbered in their order from FIRST_USER_ID, and
+    its header counts them; hfsplus exits with 0 when it fails to add or change an item."""
+    folders = sum(1 for path in paths if (root / path).is_dir() and not (root / path).is_symlink())
+    expected = VolumeCounts(len(paths) - folders, folders, FIRST_USER_ID + len(paths))
+    counted = volume_counts(image)
+    if counted != expected:
+        raise BuildError(f"{image.name} counts {counted}, not {expected}")
+    entries = catalog_entries(image)
+    for number, path in enumerate(paths, FIRST_USER_ID):
+        target = f"/{path.as_posix()}"
+        expected_entry = (number, item_mode(root / path))
+        entry = entries.get(target)
+        if entry is None or (entry.cnid, entry.mode) != expected_entry:
+            raise BuildError(f"{target} in {image.name} is {entry}, not number {number} with mode {expected_entry[1]:o}")
+
+
 def add_to_volume(hfsplus: Path, image: Path, root: Path, paths: list[Path]) -> None:
-    """Adds paths, relative to root, to image in their order, with their modes, and checks that the volume counts them."""
-    files = folders = 0
+    """Adds paths, relative to root, to image in their order, with their modes, then checks the volume."""
     for path in paths:
         source = root / path
         target = f"/{path.as_posix()}"
         if not target.isascii():
             raise BuildError(f"hfsplus can't add {target}: its name isn't ASCII")
-        mode = stat.S_IMODE(source.lstat().st_mode)
         if source.is_symlink():
             run([hfsplus, image, "symlink", target, os.readlink(source)], capture=True)
-            files += 1
             continue
         if source.is_dir():
             run([hfsplus, image, "mkdir", target], capture=True)
-            folders += 1
             default = HFSPLUS_FOLDER_MODE
         else:
             run([hfsplus, image, "add", source, target], capture=True)
-            files += 1
             default = HFSPLUS_FILE_MODE
+        mode = stat.S_IMODE(source.stat().st_mode)
         if mode != default:
             run([hfsplus, image, "chmod", f"{mode:o}", target], capture=True)
-    counted = volume_counts(image)
-    if counted != (files, folders):
-        raise BuildError(f"{image.name} counts {counted[0]} files and {counted[1]} folders, not {files} and {folders}")
+    check_volume(image, root, paths)
+
+
+def set_custom_icon(hfsplus: Path, image: Path) -> None:
+    """Has Finder show .VolumeIcon.icns as the volume's icon, which it does when the root folder has a custom icon."""
+    run([hfsplus, image, "attr", "/", "C"], capture=True)
+    if not catalog_entries(image)["/"].finder_flags & HAS_CUSTOM_ICON:
+        raise BuildError(f"hfsplus did not mark the root folder of {image.name} as having a custom icon")
 
 
 def build_dmg(tools: DmgTools, app: Path, java_home: Path, work: Path, target: Path) -> None:
@@ -636,6 +745,5 @@ def build_dmg(tools: DmgTools, app: Path, java_home: Path, work: Path, target: P
     image = work / "volume.hfs"
     format_hfs(image, VOLUME_NAME, volume_blocks(volume, paths, catalog), catalog, volume_id(volume, paths))
     add_to_volume(tools.hfsplus, image, volume, paths)
-    # Finder shows .VolumeIcon.icns as the volume's icon when its root folder has a custom icon
-    run([tools.hfsplus, image, "attr", "/", "C"], capture=True)
+    set_custom_icon(tools.hfsplus, image)
     run([tools.dmg, *DMG_COMPRESSION, "build", image, target])

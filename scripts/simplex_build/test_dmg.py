@@ -1,3 +1,4 @@
+import contextlib
 import io
 import os
 import pathlib
@@ -194,7 +195,46 @@ class HfsTest(unittest.TestCase):
         self.assertEqual(len(data), 1000 * 4096)
         self.assertEqual(data[1024:1536], data[-1024:-512])
         self.assertEqual(data[10 * 4096 + 4096 + 8], 0xFF)
-        self.assertEqual(build_script.volume_counts(image), (0, 0))
+        self.assertEqual(build_script.volume_counts(image), build_script.VolumeCounts(0, 0, 16))
+        self.assertEqual(build_script.catalog_entries(image), {"/": build_script.CatalogEntry(2, 0o40755, 0)})
+
+    def record(self, parent, name, kind, cnid, mode, flags=0):
+        key = struct.pack(">I", parent) + build_script.hfs_name(name)
+        fields = struct.pack(">hHII20x", kind, 0, 0, cnid) + struct.pack(">IIBBHI", 0, 0, 0, 0, mode, 0)
+        return struct.pack(">H", len(key)) + key + fields + struct.pack(">8xH6x16x8x", flags)
+
+    def test_catalog_entries_follow_the_leaves_and_name_items_by_path(self):
+        image = self.root / "volume.hfs"
+        catalog = build_script.catalog_tree(10)
+        build_script.format_hfs(image, "SimpleX", 1000, catalog, b"12345678")
+        thread = struct.pack(">HIH", 6, 16, 0) + struct.pack(">hhI", 3, 0, 2) + build_script.hfs_name("a")
+        first = bytearray(
+            build_script.btree_node(
+                -1, 1, [self.record(1, "SimpleX", 1, 2, 0o40755, 0x0400), self.record(2, "a", 1, 16, 0o40700), thread], 4096
+            )
+        )
+        first[0:4] = struct.pack(">I", 2)
+        second = build_script.btree_node(-1, 1, [self.record(16, "b", 2, 17, 0o100755)], 4096)
+        data = bytearray(image.read_bytes())
+        data[11 * 4096 : 13 * 4096] = bytes(first) + second
+        image.write_bytes(data)
+        self.assertEqual(
+            build_script.catalog_entries(image),
+            {
+                "/": build_script.CatalogEntry(2, 0o40755, 0x0400),
+                "/a": build_script.CatalogEntry(16, 0o40700, 0),
+                "/a/b": build_script.CatalogEntry(17, 0o100755, 0),
+            },
+        )
+
+    def test_catalog_nodes_past_the_header_extents_fail(self):
+        image = self.root / "volume.hfs"
+        build_script.format_hfs(image, "SimpleX", 1000, build_script.catalog_tree(10), b"12345678")
+        data = bytearray(image.read_bytes())
+        data[11 * 4096 : 11 * 4096 + 4] = struct.pack(">I", 99)
+        image.write_bytes(data)
+        with self.assertRaises(build_script.BuildError):
+            build_script.catalog_entries(image)
 
     def test_paths_are_sorted_with_folders_before_their_content(self):
         (self.root / "a/b").mkdir(parents=True)
@@ -224,6 +264,8 @@ class HfsTest(unittest.TestCase):
         catalog = build_script.catalog_tree(3)
         blocks = build_script.volume_blocks(self.root, build_script.volume_paths(self.root), catalog)
         self.assertEqual(blocks, 2 + 1 + 8 + 8 + 16 + 102 + 11 + 8)
+        self.assertEqual(build_script.item_mode(self.root / "l"), 0o120644)
+        self.assertEqual(build_script.item_mode(self.root / "d"), (self.root / "d").stat().st_mode)
 
 
 class DsStoreTest(unittest.TestCase):
@@ -281,24 +323,47 @@ class DsStoreTest(unittest.TestCase):
 
 
 class FakeHfsplus:
-    """Stands in for run(): records commands, counts what hfsplus adds in the image's header, writes dmg's output."""
+    """Stands in for run(), catalog_entries and volume_counts: numbers and counts the items hfsplus adds, takes their
+    chmod and attr, except for the target that it misses, and writes dmg's output."""
 
     def __init__(self, miss=None):
         self.commands = []
         self.miss = miss
+        self.entries = {"/": build_script.CatalogEntry(2, 0o40755, 0)}
+        self.files = self.folders = 0
 
     def __call__(self, args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
         args = [str(a) for a in args]
         self.commands.append(args)
-        if pathlib.Path(args[0]).name == "hfsplus" and args[2] in ("mkdir", "add", "symlink") and args[-1] != self.miss:
-            image = pathlib.Path(args[1])
-            data = bytearray(image.read_bytes())
-            files, folders = struct.unpack(">II", data[1056:1064])
-            data[1056:1064] = struct.pack(">II", files + (args[2] != "mkdir"), folders + (args[2] == "mkdir"))
-            image.write_bytes(data)
         if pathlib.Path(args[0]).name == "dmg":
             pathlib.Path(args[-1]).write_bytes(b"dmg")
+        else:
+            verb = args[2]
+            target = args[4] if verb in ("add", "chmod") else args[3]
+            modes = {"mkdir": 0o40755, "add": 0o100644, "symlink": 0o120644}
+            if (verb, target) == self.miss:
+                pass
+            elif verb in modes:
+                self.entries[target] = build_script.CatalogEntry(16 + self.files + self.folders, modes[verb], 0)
+                self.folders += verb == "mkdir"
+                self.files += verb != "mkdir"
+            elif verb == "chmod" and target in self.entries:
+                entry = self.entries[target]
+                self.entries[target] = build_script.CatalogEntry(entry.cnid, entry.mode & 0o170000 | int(args[3], 8), 0)
+            elif verb == "attr":
+                self.entries[target] = build_script.CatalogEntry(2, 0o40755, 0x0400)
         return mock.Mock(returncode=0, stdout="")
+
+    def catalog_entries(self, image):
+        return dict(self.entries)
+
+    def volume_counts(self, image):
+        return build_script.VolumeCounts(self.files, self.folders, 16 + self.files + self.folders)
+
+    @contextlib.contextmanager
+    def patched(self):
+        with patch_all("run", self), patch_all("catalog_entries", self.catalog_entries), patch_all("volume_counts", self.volume_counts):
+            yield
 
     def hfsplus(self, verb):
         return [c[3:] for c in self.commands if pathlib.Path(c[0]).name == "hfsplus" and c[2] == verb]
@@ -355,7 +420,7 @@ class VolumeTest(unittest.TestCase):
         image = self.root / "volume.hfs"
         build_script.format_hfs(image, "SimpleX", 1000, build_script.catalog_tree(len(paths)), bytes(8))
         fake = FakeHfsplus()
-        with patch_all("run", fake):
+        with fake.patched():
             build_script.add_to_volume(self.tools.hfsplus, image, volume, paths)
         added = [c[-1] for c in fake.commands if c[2] in ("mkdir", "add", "symlink")]
         first = ["/.DS_Store", "/.VolumeIcon.icns", "/.background", "/.background/background.tiff", "/Applications", "/SimpleX.app"]
@@ -363,30 +428,57 @@ class VolumeTest(unittest.TestCase):
         self.assertIn(["/Applications", "/Applications"], fake.hfsplus("symlink"))
         self.assertIn(["/SimpleX.app/Contents/Resources/link", "SimpleX.icns"], fake.hfsplus("symlink"))
         self.assertEqual(fake.hfsplus("chmod"), [["755", "/SimpleX.app/Contents/MacOS/SimpleX"]])
-        self.assertEqual(build_script.volume_counts(image), (7, 5))
+        self.assertEqual(fake.volume_counts(image), build_script.VolumeCounts(7, 5, 28))
+
+    def test_an_item_numbered_out_of_order_fails(self):
+        volume = self.root / "volume"
+        paths = build_script.stage_volume(self.app, self.java, volume)
+        fake = FakeHfsplus()
+        with fake.patched():
+            build_script.add_to_volume(self.tools.hfsplus, self.root / "volume.hfs", volume, paths)
+            first, second = (f"/{p.as_posix()}" for p in paths[:2])
+            fake.entries[first], fake.entries[second] = fake.entries[second], fake.entries[first]
+            with self.assertRaises(build_script.BuildError) as raised:
+                build_script.check_volume(self.root / "volume.hfs", volume, paths)
+        self.assertIn("/.DS_Store", str(raised.exception))
+
+    def test_a_chmod_that_hfsplus_did_not_make_fails(self):
+        volume = self.root / "volume"
+        paths = build_script.stage_volume(self.app, self.java, volume)
+        with (
+            FakeHfsplus(miss=("chmod", "/SimpleX.app/Contents/MacOS/SimpleX")).patched(),
+            self.assertRaises(build_script.BuildError) as raised,
+        ):
+            build_script.add_to_volume(self.tools.hfsplus, self.root / "volume.hfs", volume, paths)
+        self.assertIn("/SimpleX.app/Contents/MacOS/SimpleX", str(raised.exception))
+
+    def test_a_custom_icon_that_hfsplus_did_not_set_fails(self):
+        fake = FakeHfsplus()
+        with fake.patched():
+            build_script.set_custom_icon(self.tools.hfsplus, self.root / "volume.hfs")
+        self.assertEqual(fake.hfsplus("attr"), [["/", "C"]])
+        with FakeHfsplus(miss=("attr", "/")).patched(), self.assertRaises(build_script.BuildError):
+            build_script.set_custom_icon(self.tools.hfsplus, self.root / "volume.hfs")
 
     def test_an_item_that_hfsplus_did_not_add_fails(self):
         volume = self.root / "volume"
         paths = build_script.stage_volume(self.app, self.java, volume)
-        image = self.root / "volume.hfs"
-        build_script.format_hfs(image, "SimpleX", 1000, build_script.catalog_tree(len(paths)), bytes(8))
-        with patch_all("run", FakeHfsplus(miss="/SimpleX.app/Contents/MacOS/SimpleX")), self.assertRaises(build_script.BuildError):
-            build_script.add_to_volume(self.tools.hfsplus, image, volume, paths)
+        fake = FakeHfsplus(miss=("add", "/SimpleX.app/Contents/MacOS/SimpleX"))
+        with fake.patched(), self.assertRaises(build_script.BuildError):
+            build_script.add_to_volume(self.tools.hfsplus, self.root / "volume.hfs", volume, paths)
 
     def test_non_ascii_names_are_rejected(self):
         (self.app / "Contents/Resources/é").write_text("x")
         volume = self.root / "volume"
         paths = build_script.stage_volume(self.app, self.java, volume)
-        image = self.root / "volume.hfs"
-        build_script.format_hfs(image, "SimpleX", 1000, build_script.catalog_tree(len(paths)), bytes(8))
-        with patch_all("run", FakeHfsplus()), self.assertRaises(build_script.BuildError):
-            build_script.add_to_volume(self.tools.hfsplus, image, volume, paths)
+        with FakeHfsplus().patched(), self.assertRaises(build_script.BuildError):
+            build_script.add_to_volume(self.tools.hfsplus, self.root / "volume.hfs", volume, paths)
 
     def test_dmg_is_compressed_from_the_volume_with_its_custom_icon(self):
         work = self.root / "work"
         work.mkdir()
         fake = FakeHfsplus()
-        with patch_all("run", fake):
+        with fake.patched():
             build_script.build_dmg(self.tools, self.app, self.java, work, self.root / "out.dmg")
         self.assertEqual(fake.hfsplus("attr"), [["/", "C"]])
         image = str(work / "volume.hfs")
