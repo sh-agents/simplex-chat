@@ -39,7 +39,10 @@ class WindowsLibTest(unittest.TestCase):
         disable.assert_called_once()
         cabal_local = (self.source / "cabal.project.local").read_text()
         self.assertIn(f"extra-include-dirs: {openssl.as_posix()}/include", cabal_local)
-        options = f"-shared -threaded -optl-L{openssl.as_posix()} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
+        options = (
+            f"-shared -threaded -optl-Wl,--no-insert-timestamp -optl-L{openssl.as_posix()} -optl-lcrypto-3-x64 "
+            "-o libsimplex.dll libsimplex.dll.def"
+        )
         self.assertIn(f"ghc-options: {options}", cabal_local)
         self.assertIn("simplex-chat +client_library", recorder.commands[-1])
         self.assertEqual(sorted(p.name for p in libs.iterdir()), ["libcrypto-3-x64.dll", "libsimplex.dll"])

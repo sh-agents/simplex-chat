@@ -28,6 +28,10 @@ from .openssl import OpenSsl, check_static_openssl, host_openssl, openssl_work, 
 OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
 
 
+# the linker writes the time of the link into each executable and DLL unless told not to
+WINDOWS_NO_TIMESTAMP = "-optl-Wl,--no-insert-timestamp"
+
+
 def disable_ghc_lld() -> None:
     """With GHC's lld, linking libsimplex.dll can't find the exported symbols; a missing linker makes GHC use ld."""
     settings = Path(run(["ghc", "--print-libdir"], capture=True).stdout.strip()) / "settings"
@@ -39,7 +43,10 @@ def build_windows_lib(source: Path, openssl: OpenSsl) -> Path:
     check_exports(source)
     for old in source.glob("dist-newstyle/build/x86_64-windows/ghc-*/simplex-chat-*"):
         remove_tree(old)
-    options = f"-shared -threaded -optl-L{openssl.lib.as_posix()} -optl-lcrypto-3-x64 -o libsimplex.dll libsimplex.dll.def"
+    options = (
+        f"-shared -threaded {WINDOWS_NO_TIMESTAMP} -optl-L{openssl.lib.as_posix()} -optl-lcrypto-3-x64 "
+        "-o libsimplex.dll libsimplex.dll.def"
+    )
     (source / "cabal.project.local").write_text(openssl.cabal_local(options))
     disable_ghc_lld()
     run_cabal(source, ["build", "lib:simplex-chat", *client_library_constraints(Database.SQLITE)])
@@ -89,7 +96,7 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         openssl_dir = openssl_work(source)
         openssl = host_openssl(openssl_dir)
         static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, openssl_dir))
-        cli = build_host_cli(source, static.cabal_local(OPENSSL_WINDOWS_STATIC_LINK))
+        cli = build_host_cli(source, static.cabal_local(f"{OPENSSL_WINDOWS_STATIC_LINK} {WINDOWS_NO_TIMESTAMP}"))
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
         libs = release_windows_libs(source, openssl, out)

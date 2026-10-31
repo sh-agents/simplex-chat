@@ -217,7 +217,7 @@ class HostDesktopTest(unittest.TestCase):
         ):
             build_script.build_desktop_windows(self.source, self.out)
         self.assertIn("/openssl-static\n", cabal_locals[0])
-        self.assertIn("ghc-options: -optl-lws2_32 -optl-lgdi32 -optl-lcrypt32", cabal_locals[0])
+        self.assertIn("ghc-options: -optl-lws2_32 -optl-lgdi32 -optl-lcrypt32 -optl-Wl,--no-insert-timestamp\n", cabal_locals[0])
 
     def test_host_cli_build_removes_dist_newstyle_instead_of_cabal_clean(self):
         pack = self.source / "dist-newstyle/src/zip-8e3e/.git/objects/pack/p.rev"
