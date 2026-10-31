@@ -218,11 +218,11 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # the desktop deb's post-install script adds the app to the menu directories of desktop systems, which runners lack
+      # the desktop deb's post-install script runs xdg-desktop-menu, which fails without this directory
       - name: Install a display for the smoke tests
         run: |
           sudo apt-get install -y --no-install-recommends xvfb openbox xdotool imagemagick
-          sudo mkdir -p /usr/share/applications /etc/xdg/menus
+          sudo mkdir -p /usr/share/desktop-directories
 
       # each file runs as its users run it, and the apps leave screenshots
       - name: Smoke test
