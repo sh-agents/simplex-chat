@@ -30,7 +30,16 @@ cp "$old/simplex_agent.db" "$container/simplex_v1_agent.db"
 xcrun simctl privacy "$SIM_UDID" grant camera "$bundle_id"
 # the keychain still has the key of the smoke test's database, so the app asks for the right one
 xcrun simctl launch "$SIM_UDID" "$bundle_id"
-"$ui" wait "Save passphrase and open chat" 180
+# the camera alert can still come up over the passphrase screen, and the tree then shows only the alert
+deadline=$((SECONDS + 180))
+until "$ui" find "Save passphrase and open chat" > /dev/null; do
+  "$ui" tap Allow 1 || true
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "error: \"Save passphrase and open chat\" not shown after 180 s"
+    exit 1
+  fi
+  sleep 2
+done
 "$ui" shot old-database-passphrase
 "$ui" tap-value "Enter passphrase…"
 "$ui" type "$key"
