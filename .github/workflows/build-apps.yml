@@ -209,6 +209,15 @@ jobs:
           version=$(sed -n 's/^version: *//p' simplex-chat.cabal)
           python3 scripts/simplex-chat-build.py build desktop linux ${{ matrix.ubuntu }} --version "$version" --out "$RUNNER_TEMP/out"
 
+      - name: Upload apps
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-ubuntu-${{ matrix.ubuntu }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
       # the desktop deb's post-install script adds the app to the menu directories of desktop systems, which runners lack
       - name: Install a display for the smoke tests
         run: |
@@ -235,15 +244,6 @@ jobs:
           path: ${{ runner.temp }}/screens
           retention-days: 30
           if-no-files-found: ignore
-
-      - name: Upload apps
-        uses: actions/upload-artifact@v7
-        with:
-          name: desktop-ubuntu-${{ matrix.ubuntu }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/out
-          compression-level: 0
-          retention-days: 30
-          if-no-files-found: error
 
   desktop-macos:
     name: Desktop macOS ${{ matrix.arch }}
@@ -285,6 +285,15 @@ jobs:
       - name: Build CLI, desktop app and libraries
         run: python3 scripts/simplex-chat-build.py build desktop macos --out "$RUNNER_TEMP/out"
 
+      - name: Upload apps
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macos-${{ matrix.arch }}-unsigned
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Smoke test
         run: |
           out=$RUNNER_TEMP/out
@@ -300,15 +309,6 @@ jobs:
           path: ${{ runner.temp }}/screens
           retention-days: 30
           if-no-files-found: ignore
-
-      - name: Upload apps
-        uses: actions/upload-artifact@v7
-        with:
-          name: desktop-macos-${{ matrix.arch }}-unsigned
-          path: ${{ runner.temp }}/out
-          compression-level: 0
-          retention-days: 30
-          if-no-files-found: error
 
   desktop-windows:
     name: Desktop Windows
@@ -361,6 +361,15 @@ jobs:
           export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
           python scripts/simplex-chat-build.py build desktop windows --out "$(cygpath -w "$RUNNER_TEMP")/out"
 
+      - name: Upload apps
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-windows-unsigned
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Smoke test
         run: |
           out="$(cygpath -w "$RUNNER_TEMP")/out"
@@ -376,12 +385,3 @@ jobs:
           path: ${{ runner.temp }}/screens
           retention-days: 30
           if-no-files-found: ignore
-
-      - name: Upload apps
-        uses: actions/upload-artifact@v7
-        with:
-          name: desktop-windows-unsigned
-          path: ${{ runner.temp }}/out
-          compression-level: 0
-          retention-days: 30
-          if-no-files-found: error
