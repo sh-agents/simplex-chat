@@ -1,10 +1,26 @@
 import pathlib
+import struct
 import tempfile
 import unittest
 import zipfile
 from unittest import mock
 
 from .testing import Recorder, build_script, patch_all
+
+# 2024-01-01 00:00 UTC in 100 ns intervals from 1601
+EPOCH_FILETIME = 133_485_408_000_000_000
+
+
+def compound_file(summary, modified):
+    """A compound file with 512-byte sectors, its directory in sector 1 and summary as the data that follows it."""
+    header = bytearray(512)
+    header[:8] = bytes.fromhex("d0cf11e0a1b11ae1")
+    struct.pack_into("<H", header, 0x1E, 9)
+    struct.pack_into("<I", header, 0x30, 1)
+    root = bytearray(128)
+    root[:20] = "Root Entry".encode("utf-16-le")
+    struct.pack_into("<Q", root, 0x6C, modified)
+    return bytes(header) + bytes(512) + bytes(root) + bytes(384) + summary
 
 
 class WindowsLibTest(unittest.TestCase):
@@ -114,13 +130,31 @@ class MsiTest(unittest.TestCase):
         self.msi.write_bytes(b"msi 2")
         self.assertNotEqual(build_script.msi_package_code(self.msi), code)
 
-    def test_package_code_is_derived_from_the_msi_with_the_placeholder(self):
-        recorder, scripts = Recorder(), []
-        with patch_all("run", self.persisting_summary(recorder, scripts)):
+    def test_package_code_is_derived_from_the_msi_with_the_placeholder_and_fixed_time(self):
+        commit_times = iter([1_000, 2_000])
+
+        def persist(args, **kwargs):
+            if args[0] == "powershell":
+                self.msi.write_bytes(compound_file(str(args[-2]).encode(), next(commit_times)))
+            return mock.Mock(returncode=0, stdout="")
+
+        with patch_all("run", persist):
             build_script.normalize_msi_summary(self.msi, self.work)
-        self.msi.write_bytes(b"msi " + build_script.MSI_PLACEHOLDER_PACKAGE_CODE.encode())
+        normalized = self.msi.read_bytes()
+        self.msi.write_bytes(compound_file(build_script.MSI_PLACEHOLDER_PACKAGE_CODE.encode(), EPOCH_FILETIME))
         expected = build_script.msi_package_code(self.msi)
-        self.assertEqual([command[-2] for command in recorder.commands], [build_script.MSI_PLACEHOLDER_PACKAGE_CODE, expected])
+        self.assertEqual(normalized, compound_file(expected.encode(), EPOCH_FILETIME))
+        self.assertIsNone(next(commit_times, None))
+
+    def test_storage_time_is_the_epoch_and_nothing_else_changes(self):
+        self.msi.write_bytes(compound_file(b"{CODE}", 1_000))
+        build_script.set_msi_storage_time(self.msi)
+        self.assertEqual(self.msi.read_bytes(), compound_file(b"{CODE}", EPOCH_FILETIME))
+
+    def test_storage_time_of_a_file_that_is_no_msi_fails(self):
+        with self.assertRaises(build_script.BuildError):
+            build_script.set_msi_storage_time(self.msi)
+        self.assertEqual(self.msi.read_bytes(), b"msi")
 
     def test_msi_packs_the_app_image_without_skiko_runtime_at_the_epoch(self):
         image = self.source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX"

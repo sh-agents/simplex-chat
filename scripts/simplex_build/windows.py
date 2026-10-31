@@ -2,12 +2,13 @@
 
 import os
 import shutil
+import struct
 import tempfile
 import uuid
 import zipfile
 from pathlib import Path, PureWindowsPath
 
-from .common import REPO, edit_lines, fetch_pinned, remove_tree, run, sha256, single_dir, single_file, touch_tree
+from .common import REPO, BuildError, edit_lines, fetch_pinned, remove_tree, run, sha256, single_dir, single_file, touch_tree
 from .desktop import (
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
@@ -56,6 +57,29 @@ MSI_PLACEHOLDER_PACKAGE_CODE = "{00000000-0000-0000-0000-000000000000}"
 
 
 MSI_PACKAGE_CODE_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, REPO)
+
+
+# The compound file header and the root storage's directory entry (MS-CFB 2.2, 2.6.1)
+CFB_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
+
+
+CFB_HEADER_SIZE = 512
+
+
+CFB_SECTOR_SHIFT_OFFSET = 0x1E
+
+
+CFB_FIRST_DIRECTORY_SECTOR_OFFSET = 0x30
+
+
+CFB_MODIFIED_TIME_OFFSET = 0x6C
+
+
+# FILETIME counts 100 ns intervals from 1601
+FILETIME_TICKS_PER_SECOND = 10_000_000
+
+
+FILETIME_AT_UNIX_EPOCH = 11_644_473_600 * FILETIME_TICKS_PER_SECOND
 
 
 # Windows Installer's automation interface has no type information for PowerShell, which reaches it with InvokeMember
@@ -144,9 +168,24 @@ def msi_package_code(msi: Path) -> str:
     return "{" + str(uuid.uuid5(MSI_PACKAGE_CODE_NAMESPACE, sha256(msi))).upper() + "}"
 
 
+def set_msi_storage_time(msi: Path) -> None:
+    """The modification time of the msi's root storage, which each commit sets to its own time, at SOURCE_DATE_EPOCH."""
+    with msi.open("r+b") as f:
+        header = f.read(CFB_HEADER_SIZE)
+        if not header.startswith(CFB_SIGNATURE):
+            raise BuildError(f"{msi} is not a compound file")
+        sector_shift = struct.unpack_from("<H", header, CFB_SECTOR_SHIFT_OFFSET)[0]
+        directory = struct.unpack_from("<I", header, CFB_FIRST_DIRECTORY_SECTOR_OFFSET)[0]
+        # sector n starts after the header, which takes up sector -1
+        f.seek(((directory + 1) << sector_shift) + CFB_MODIFIED_TIME_OFFSET)
+        f.write(struct.pack("<Q", FILETIME_AT_UNIX_EPOCH + int(SOURCE_DATE_EPOCH) * FILETIME_TICKS_PER_SECOND))
+
+
 def normalize_msi_summary(msi: Path, work: Path) -> None:
     set_msi_summary(msi, MSI_PLACEHOLDER_PACKAGE_CODE, work)
+    set_msi_storage_time(msi)
     set_msi_summary(msi, msi_package_code(msi), work)
+    set_msi_storage_time(msi)
 
 
 def package_msi(source: Path, work: Path) -> Path:
