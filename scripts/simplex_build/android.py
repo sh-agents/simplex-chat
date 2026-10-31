@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .apk_zip import apk_padding, copy_v1_flags
 from .common import (
+    SIMPLEX_REPO,
     BuildError,
     checkout,
     download,
@@ -246,20 +247,23 @@ def verify_apk(container: Container, out: Path, released: str, built: str) -> bo
     return copy_signature(container, out, released, f"{built}.aligned") == released_data
 
 
-def reproduce_android(tag: str, arches: Sequence[Arch], nix_cache: bool, source: Path, results: Path) -> list[str]:
+def reproduce_android(tag: str, repo: str, arches: Sequence[Arch], nix_cache: bool, source: Path, results: Path) -> list[str]:
     out = results / "android"
     out.mkdir(parents=True, exist_ok=True)
     tags = run(["git", "-C", source, "tag", "--list"], capture=True).stdout.split()
     for arch in arches:
-        download(release_url(tag, f"simplex-{arch}.apk"), out / f"simplex-{arch}.apk")
+        download(release_url(tag, f"simplex-{arch}.apk", repo), out / f"simplex-{arch}.apk")
     failed = []
     with android_container(source, out, Arch.ARMV7A in arches) as container:
         for arch in arches:
             released = f"simplex-{arch}.apk"
             signer = release_signer(container, released)
-            if signer != SIMPLEX_KEY:
+            if repo != SIMPLEX_REPO:
+                warn(f"{released} of {repo} is signed by {signer}, which is not checked")
+            elif signer != SIMPLEX_KEY:
                 raise BuildError(f"{released} is signed by {signer}, not by the SimpleX key")
-            log(f"{released} is signed by the SimpleX key")
+            else:
+                log(f"{released} is signed by the SimpleX key")
             checkout(source, android_build_tag(tag, tags, arch))
             log(f"building {arch}")
             build_apk(container, source, arch, out, f"{released}.built", nix_cache, keep_libs=False)

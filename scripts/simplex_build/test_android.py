@@ -105,6 +105,32 @@ class AndroidTest(unittest.TestCase):
         with self.assertRaises(build_script.BuildError):
             build_script.build_bundle(self.container(), self.source, self.root / "none", self.out)
 
+    def reproduce(self, repo, signer):
+        with (
+            patch_all("run", Recorder()),
+            patch_all("download"),
+            patch_all("release_signer", return_value=signer),
+            patch_all("checkout"),
+            patch_all("build_apk"),
+            patch_all("verify_apk", return_value=True),
+            patch_all("warn") as warn,
+            patch_all("log"),
+        ):
+            failed = build_script.reproduce_android("v7.1.0", repo, [Arch.AARCH64], False, self.source, self.root / "results")
+        return failed, warn
+
+    def test_reproduce_requires_the_simplex_key_for_simplex_chat_releases(self):
+        failed, warn = self.reproduce("simplex-chat/simplex-chat", build_script.SIMPLEX_KEY)
+        self.assertEqual(failed, [])
+        warn.assert_not_called()
+        with self.assertRaisesRegex(build_script.BuildError, "not by the SimpleX key"):
+            self.reproduce("simplex-chat/simplex-chat", "AA:BB")
+
+    def test_reproduce_of_a_fork_reports_its_signer_without_checking_it(self):
+        failed, warn = self.reproduce("owner/fork", "AA:BB")
+        self.assertEqual(failed, [])
+        self.assertIn("AA:BB, which is not checked", warn.call_args.args[0])
+
     def test_release_signer(self):
         recorder = Recorder(answers={"apksigner": "Signer #1 certificate SHA-256 digest: 3c52c4fd\n"})
         with patch_all("run", recorder):

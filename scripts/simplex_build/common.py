@@ -13,7 +13,10 @@ import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
-REPO = "https://github.com/simplex-chat/simplex-chat"
+SIMPLEX_REPO = "simplex-chat/simplex-chat"
+
+
+REPO = f"https://github.com/{SIMPLEX_REPO}"
 
 
 GHC = "9.6.3"
@@ -199,8 +202,8 @@ def fetch_pinned(url: str, digest: str, target: Path) -> Path:
     return target
 
 
-def release_url(tag: str, name: str) -> str:
-    return f"{REPO}/releases/download/{tag}/{name}"
+def release_url(tag: str, name: str, repo: str = SIMPLEX_REPO) -> str:
+    return f"https://github.com/{repo}/releases/download/{tag}/{name}"
 
 
 def tag_version(tag: str) -> str:
@@ -208,8 +211,8 @@ def tag_version(tag: str) -> str:
     return tag.lstrip("v").split("-")[0]
 
 
-def clone(workdir: Path) -> Path:
-    run(["git", "-C", workdir, "clone", f"{REPO}.git", "simplex-chat"])
+def clone(workdir: Path, repo: str = SIMPLEX_REPO) -> Path:
+    run(["git", "-C", workdir, "clone", f"https://github.com/{repo}.git", "simplex-chat"])
     return workdir / "simplex-chat"
 
 
