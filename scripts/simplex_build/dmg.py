@@ -805,3 +805,31 @@ def build_dmg(tools: DmgTools, app: Path, java_home: Path, work: Path, target: P
     add_to_volume(tools.hfsplus, image, volume, paths)
     set_custom_icon(tools.hfsplus, image)
     run([tools.dmg, *DMG_COMPRESSION, "build", image, target])
+
+
+# The koly block that ends a dmg, and where in it codesign records the offset and length of the signature it puts
+# before the block, which holds the notarization ticket that stapler adds too
+KOLY_SIZE = 512
+
+
+KOLY_CODE_SIGNATURE = 0x128
+
+
+KOLY_CODE_SIGNATURE_FIELDS = ">QQ"
+
+
+def dmg_signature(dmg: bytes) -> tuple[int, int]:
+    """The offset and length of the dmg's signature, a length of 0 when it has none."""
+    offset, length = struct.unpack_from(KOLY_CODE_SIGNATURE_FIELDS, dmg, len(dmg) - KOLY_SIZE + KOLY_CODE_SIGNATURE)
+    return int(offset), int(length)
+
+
+def copy_dmg_signature(released: bytes, built: bytes) -> bytes:
+    """built with released's signature before its koly block, as codesign puts it, and the koly fields that locate it."""
+    offset, length = dmg_signature(released)
+    if not length:
+        return built
+    koly = bytearray(built[-KOLY_SIZE:])
+    fields = slice(KOLY_CODE_SIGNATURE, KOLY_CODE_SIGNATURE + struct.calcsize(KOLY_CODE_SIGNATURE_FIELDS))
+    koly[fields] = released[len(released) - KOLY_SIZE :][fields]
+    return built[:-KOLY_SIZE] + released[offset : offset + length] + bytes(koly)
