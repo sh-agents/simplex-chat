@@ -1,7 +1,9 @@
-"""Relabelling iOS device objects for the arm64 iOS simulator, for objects that mac2ios can't relabel."""
+"""Relabelling iOS device objects for the arm64 iOS simulator, for objects that mac2ios can't relabel, and copying
+the code signature of one Mach-O file onto another."""
 
 import struct
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from .common import BuildError
@@ -133,3 +135,137 @@ def simulator_archive(lib: Path) -> int:
         out += name + new + (b"\n" if size & 1 else b"")
     lib.write_bytes(out)
     return changed
+
+
+LC_CODE_SIGNATURE = 0x1D
+LINKEDIT_DATA = "<IIII"
+LINKEDIT = b"__LINKEDIT"
+SEGMENT_64_NAME = slice(8, 24)
+SEGMENT_64_VMSIZE = 32
+SEGMENT_64_FILESIZE = 48
+MACH_HEADER_NCMDS = 16
+
+FAT_MAGIC = 0xCAFEBABE
+FAT_HEADER = ">II"
+FAT_ARCH = ">iiIII"
+
+CODE_DIFFERS = "it differs by more than its code signature"
+
+# Java class files start with FAT_MAGIC too, followed by their version, which is 45 or more
+JAVA_CLASS_MIN_VERSION = 45
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSignature:
+    """Where the LC_CODE_SIGNATURE command and the signature it points to are in a thin Mach-O file."""
+
+    command: int
+    dataoff: int
+    datasize: int
+
+
+@dataclass(frozen=True, slots=True)
+class FatArch:
+    cputype: int
+    cpusubtype: int
+    offset: int
+    size: int
+    align: int
+
+
+def is_thin_macho(data: bytes) -> bool:
+    return len(data) >= struct.calcsize(MACH_HEADER_64) and struct.unpack_from("<I", data)[0] == MH_MAGIC_64
+
+
+def fat_arches(data: bytes) -> list[FatArch] | None:
+    if len(data) < struct.calcsize(FAT_HEADER):
+        return None
+    magic, count = struct.unpack_from(FAT_HEADER, data)
+    if magic != FAT_MAGIC or not 0 < count < JAVA_CLASS_MIN_VERSION:
+        return None
+    size = struct.calcsize(FAT_ARCH)
+    return [FatArch(*struct.unpack_from(FAT_ARCH, data, struct.calcsize(FAT_HEADER) + i * size)) for i in range(count)]
+
+
+def is_macho(data: bytes) -> bool:
+    return is_thin_macho(data) or fat_arches(data) is not None
+
+
+def load_commands(data: bytes) -> Iterator[tuple[int, int]]:
+    """The offset and type of each load command of a thin 64-bit Mach-O file."""
+    ncmds = struct.unpack_from("<I", data, MACH_HEADER_NCMDS)[0]
+    offset = struct.calcsize(MACH_HEADER_64)
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from(LOAD_COMMAND, data, offset)
+        yield offset, cmd
+        offset += size
+
+
+def code_signature(data: bytes) -> CodeSignature | None:
+    for offset, cmd in load_commands(data):
+        if cmd == LC_CODE_SIGNATURE:
+            _, _, dataoff, datasize = struct.unpack_from(LINKEDIT_DATA, data, offset)
+            return CodeSignature(offset, dataoff, datasize)
+    return None
+
+
+def linkedit_command(data: bytes) -> int:
+    for offset, cmd in load_commands(data):
+        if cmd == LC_SEGMENT_64 and data[offset + SEGMENT_64_NAME.start : offset + SEGMENT_64_NAME.stop].rstrip(b"\0") == LINKEDIT:
+            return offset
+    raise BuildError("the Mach-O file has no __LINKEDIT segment")
+
+
+def copy_thin_signature(released: bytes, built: bytes) -> bytes:
+    """built with released's signature in place of its own, or added after its __LINKEDIT data as codesign adds one,
+    with released's LC_CODE_SIGNATURE and the __LINKEDIT sizes that cover the signature."""
+    signature = code_signature(released)
+    if signature is None:
+        return built
+    size = struct.calcsize(LINKEDIT_DATA)
+    out = bytearray(built)
+    own = code_signature(built)
+    if own:
+        command = own.command
+        del out[own.dataoff :]
+    else:
+        _, _, _, _, ncmds, sizeofcmds, _, _ = struct.unpack_from(MACH_HEADER_64, built)
+        command = struct.calcsize(MACH_HEADER_64) + sizeofcmds
+        # codesign adds the command in the free space after the others, which must not hide a difference of the code
+        if any(built[command : command + size]):
+            return built
+        struct.pack_into("<II", out, MACH_HEADER_NCMDS, ncmds + 1, sizeofcmds + size)
+    out += bytes(max(0, signature.dataoff - len(out)))
+    out[command : command + size] = released[signature.command : signature.command + size]
+    released_linkedit, built_linkedit = linkedit_command(released), linkedit_command(built)
+    for field in (SEGMENT_64_VMSIZE, SEGMENT_64_FILESIZE):
+        out[built_linkedit + field : built_linkedit + field + 8] = released[released_linkedit + field : released_linkedit + field + 8]
+    return bytes(out + released[signature.dataoff : signature.dataoff + signature.datasize])
+
+
+def copy_code_signature(released: bytes, built: bytes) -> bytes:
+    """built signed as released is: each thin file, or each architecture of a universal one, with released's code
+    signature, in the layout of released's architectures; built as it is when the two are not Mach-O files of the
+    same architectures."""
+    if is_thin_macho(released) and is_thin_macho(built):
+        return copy_thin_signature(released, built)
+    released_arches, built_arches = fat_arches(released), fat_arches(built)
+    if released_arches is None or built_arches is None:
+        return built
+    if [(a.cputype, a.cpusubtype) for a in released_arches] != [(a.cputype, a.cpusubtype) for a in built_arches]:
+        return built
+    out = bytearray(released[: struct.calcsize(FAT_HEADER) + len(released_arches) * struct.calcsize(FAT_ARCH)])
+    for ours, theirs in zip(built_arches, released_arches, strict=True):
+        out += bytes(max(0, theirs.offset - len(out)))
+        out += copy_thin_signature(released[theirs.offset : theirs.offset + theirs.size], built[ours.offset : ours.offset + ours.size])
+    return bytes(out)
+
+
+def same_code(released: bytes, built: bytes) -> bool:
+    """Whether released is built, or built with released's code signature."""
+    if released == built:
+        return True
+    try:
+        return is_macho(released) and copy_code_signature(released, built) == released
+    except (struct.error, BuildError):
+        return False
