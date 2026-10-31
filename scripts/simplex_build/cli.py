@@ -4,6 +4,9 @@ Reproduce a release on the platform of each target, Linux for desktop and androi
     simplex-chat-build.py reproduce <tag> [desktop] [android] [macos] [windows] [ios] [--arches aarch64,armv7a] [--nix-cache]
         [--art <simplex-chat-art>] [--install-nix] [--repo <owner/name>]
 
+Compare a released file with the one that build made, allowing only its signature to differ:
+    simplex-chat-build.py compare <released file> <built file> [--repo <owner/name>]
+
 Build one commit's release files, as CI does; desktop, libs and openssl build for the machine they run on:
     simplex-chat-build.py build desktop linux <22.04|24.04> --version <x.y.z> --out <dir>
     simplex-chat-build.py build desktop macos [--require-signing] --out <dir>
@@ -83,11 +86,11 @@ from .linux import (
     linux_image,
     reproduce_desktop,
 )
-from .macos import build_desktop_macos, build_macos_libs, reproduce_macos
+from .macos import build_desktop_macos, build_macos_libs, macos_differences, reproduce_macos
 from .nix import NIX_PROFILE
 from .openssl import build_host_openssl
 from .smoke import OLD_RELEASE, make_old_database, test_apk, test_cli, test_desktop, test_desktop_upgrade
-from .windows import build_desktop_windows, build_windows_libs, reproduce_windows
+from .windows import CFB_SIGNATURE, PE_DOS_MAGIC, build_desktop_windows, build_windows_libs, reproduce_windows, windows_differences
 
 GITHUB_REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
 
@@ -133,6 +136,13 @@ class Reproduce:
     nix_cache: bool
     art: Path | None = None
     install_nix: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Compare:
+    released: Path
+    built: Path
+    repo: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,7 +279,7 @@ class MakeOldDatabase:
     out: Path
 
 
-type Command = Reproduce | Build | InstallLibs | TestRelease | MakeOldDatabase
+type Command = Reproduce | Compare | Build | InstallLibs | TestRelease | MakeOldDatabase
 
 
 def require_nix(install: bool) -> None:
@@ -303,6 +313,30 @@ def reproduce(command: Reproduce) -> None:
         raise BuildError(f"{command.tag} is not reproduced: {', '.join(failed)}")
     add_summary(f"{command.tag} is reproduced: {', '.join(command.targets)}\n")
     log(f"{command.tag} is reproduced: {', '.join(command.targets)}")
+
+
+def release_file_differences(released: Path, built: Path, repo: str, work: Path) -> list[str]:
+    """What differs other than the signature, for the format of the file: a dmg, an msi, a PE or Mach-O file, or
+    another file, which must be the same byte for byte."""
+    with released.open("rb") as f:
+        head = f.read(len(CFB_SIGNATURE))
+    if released.suffix == ".dmg":
+        require_platform(Platform.MACOS)
+        require_tools(["hdiutil", "codesign", "cmake"])
+    elif head.startswith((CFB_SIGNATURE, PE_DOS_MAGIC)):
+        return windows_differences(released, built)
+    return macos_differences(released, built, repo, work)
+
+
+def compare(command: Compare) -> None:
+    released, built = command.released.resolve(), command.built.resolve()
+    with tempfile.TemporaryDirectory() as tmp:
+        differences = release_file_differences(released, built, command.repo, Path(tmp).resolve() / "work")
+    for difference in differences:
+        log(f"{released.name}: {difference}")
+    if differences:
+        raise BuildError(f"{released} differs from {built} other than by its signature")
+    log(f"{released} is {built} with its signature")
 
 
 def prepare_out(out: Path) -> Path:
@@ -412,6 +446,8 @@ def execute(command: Command) -> None:
     match command:
         case Reproduce():
             reproduce(command)
+        case Compare():
+            compare(command)
         case InstallLibs():
             install(command)
         case TestRelease():
@@ -581,8 +617,10 @@ def parse_args(argv: Sequence[str]) -> Command:
             return parse_install_args(argv[1:])
         case ["test"]:
             return parse_test_args(argv[1:])
-    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,install,test,reproduce} ...", description=__doc__)
-    parser.error("the first argument is build, install, test or reproduce")
+        case ["compare"]:
+            return parse_compare_args(argv[1:])
+    parser = argparse.ArgumentParser(usage="simplex-chat-build.py {build,install,test,reproduce,compare} ...", description=__doc__)
+    parser.error("the first argument is build, install, test, reproduce or compare")
 
 
 def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:
@@ -599,6 +637,17 @@ def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:
     args = parser.parse_args(argv)
     targets = tuple(args.targets) or (Target.DESKTOP,)
     return Reproduce(args.tag, args.repo, targets, args.arches, args.nix_cache, args.art, args.install_nix)
+
+
+def parse_compare_args(argv: Sequence[str]) -> Compare:
+    parser = argparse.ArgumentParser(
+        prog="simplex-chat-build.py compare", description="Compare a released file with a built one, allowing only its signature to differ."
+    )
+    parser.add_argument("released", type=Path, help="the release's file: a CLI, dmg, msi, or a file of another release")
+    parser.add_argument("built", type=Path, help="the same file, made by build")
+    parser.add_argument("--repo", type=parse_repo, default=SIMPLEX_REPO, help="the release's repository, whose signer a dmg must have")
+    args = parser.parse_args(argv)
+    return Compare(args.released, args.built, args.repo)
 
 
 def main(argv: Sequence[str]) -> int:
