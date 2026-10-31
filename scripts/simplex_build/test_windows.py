@@ -196,3 +196,144 @@ class MsiTest(unittest.TestCase):
         self.assertEqual(seen["names"], ["SimpleX.exe", "app", "app/SimpleX.cfg", "app/desktop-jvm-7.1.7-854b.jar"])
         self.assertEqual(seen["times"], {1704067200})
         self.assertEqual((image / "app/SimpleX.cfg").read_text(), "")
+
+
+SECTOR = 512
+FREE, END, FAT_SECTOR = 0xFFFFFFFF, 0xFFFFFFFE, 0xFFFFFFFD
+MSI_CLSID = bytes.fromhex("84100c0000000000c000000000000046")
+
+
+def msi_file(streams, root_modified=0):
+    """A version 3 compound file of streams in its root storage, the ones under 4096 bytes in its mini stream, as an
+    msi of Windows Installer is; the root's directory entry lists the streams by their right siblings."""
+    small = {name: data for name, data in streams.items() if len(data) < 4096}
+    mini_stream, mini_fat, mini_starts = b"", [], {}
+    for name, data in small.items():
+        start, count = len(mini_stream) // 64, -(-len(data) // 64)
+        mini_starts[name] = start
+        mini_stream += data + bytes(-len(data) % 64)
+        mini_fat += [start + i + 1 for i in range(count - 1)] + [END]
+    sectors, fat = [], [FAT_SECTOR]
+
+    def allocate(data):
+        start = 1 + len(sectors)
+        count = max(1, -(-len(data) // SECTOR))
+        for i in range(count):
+            sectors.append(data[i * SECTOR : (i + 1) * SECTOR].ljust(SECTOR, b"\0"))
+            fat.append(start + i + 1 if i < count - 1 else END)
+        return start
+
+    entries = [("Root Entry", 5, MSI_CLSID, root_modified)] + [(name, 2, bytes(16), 0) for name in streams]
+    directory_size = -(-len(entries) // 4) * SECTOR
+    directory = allocate(bytes(directory_size))
+    mini_fat_start = allocate(struct.pack(f"<{len(mini_fat)}I", *mini_fat)) if mini_fat else END
+    mini_stream_start = allocate(mini_stream) if mini_stream else END
+    starts = {name: mini_starts[name] if name in small else allocate(data) for name, data in streams.items()}
+    records = b""
+    for i, (name, kind, clsid, modified) in enumerate(entries):
+        encoded = name.encode("utf-16-le") + b"\0\0"
+        right = i + 1 if 0 < i < len(entries) - 1 else FREE
+        child = 1 if i == 0 and len(entries) > 1 else FREE
+        start, size = (mini_stream_start, len(mini_stream)) if i == 0 else (starts[name], len(streams[name]))
+        records += struct.pack("<64sHBBIII16sIQQIQ", encoded, len(encoded), kind, 1, FREE, right, child, clsid, 0, 0, modified, start, size)
+    records = records.ljust(directory_size, b"\0")
+    for i in range(directory_size // SECTOR):
+        sectors[directory - 1 + i] = records[i * SECTOR : (i + 1) * SECTOR]
+    mini_fat_sectors = -(-len(mini_fat) * 4 // SECTOR)
+    header = struct.pack(
+        "<8s16sHHHHH6sIIIIIIIII",
+        *(bytes.fromhex("d0cf11e0a1b11ae1"), bytes(16), 0x3E, 3, 0xFFFE, 9, 6, bytes(6)),
+        *(0, 1, directory, 0, 4096, mini_fat_start, mini_fat_sectors, END, 0),
+    )
+    difat = struct.pack("<109I", 0, *[FREE] * 108)
+    fat_sector = struct.pack(f"<{SECTOR // 4}I", *(fat + [FREE] * (SECTOR // 4 - len(fat))))
+    return header + difat + fat_sector + b"".join(sectors)
+
+
+OPTIONAL_HEADER = 0x80 + 24
+
+
+def pe_file(body=b"code" * 300):
+    """A PE32+ file as MinGW's linker leaves it: no checksum and no certificate table."""
+    data = bytearray(OPTIONAL_HEADER + 240)
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, 0x80)
+    data[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", data, OPTIONAL_HEADER, 0x20B)
+    return bytes(data) + body
+
+
+def reference_checksum(data, at):
+    """CheckSumMappedFile's checksum, one word at a time."""
+    total = 0
+    padded = data + b"\0" * (len(data) % 2)
+    for offset in range(0, len(padded), 2):
+        total += 0 if at <= offset < at + 4 else struct.unpack_from("<H", padded, offset)[0]
+        total = (total & 0xFFFF) + (total >> 16)
+    return total + len(data)
+
+
+def signtool(pe, certificate):
+    """pe signed as signtool signs it: padded to 8 bytes, with a WIN_CERTIFICATE after it and the checksum updated."""
+    data = bytearray(pe) + bytes(-len(pe) % 8)
+    table = struct.pack("<IHH", 8 + len(certificate), 0x200, 2) + certificate
+    table += bytes(-len(table) % 8)
+    struct.pack_into("<II", data, OPTIONAL_HEADER + 112 + 32, len(data), len(table))
+    data += table
+    struct.pack_into("<I", data, OPTIONAL_HEADER + 64, reference_checksum(bytes(data), OPTIONAL_HEADER + 64))
+    return bytes(data)
+
+
+class AuthenticodeTest(unittest.TestCase):
+    def test_checksum_is_the_one_of_check_sum_mapped_file(self):
+        at = OPTIONAL_HEADER + 64
+        for data in (pe_file(), pe_file(body=bytes(range(256)) * 9 + b"odd"), pe_file(body=b"\xff" * 4001)):
+            self.assertEqual(build_script.pe_checksum(data, at), reference_checksum(data, at))
+
+    def test_signature_of_a_release_is_copied_onto_the_build(self):
+        for built in (pe_file(), pe_file(body=b"code" * 300 + b"odd")):
+            released = signtool(built, b"pkcs7 signed data and timestamp")
+            self.assertEqual(build_script.copy_authenticode(released, built), released)
+            self.assertTrue(build_script.same_pe(released, built))
+
+    def test_other_code_or_a_signed_build_does_not_match(self):
+        released = signtool(pe_file(), b"pkcs7")
+        self.assertFalse(build_script.same_pe(released, pe_file(body=b"code" * 299 + b"edoc")))
+        self.assertFalse(build_script.same_pe(released, released[:200]))
+        self.assertFalse(build_script.same_pe(released, signtool(pe_file(), b"pkcs7 of another key")))
+
+    def test_unsigned_release_and_other_files_are_compared_as_they_are(self):
+        self.assertTrue(build_script.same_pe(pe_file(), pe_file()))
+        self.assertFalse(build_script.same_pe(pe_file(), pe_file(body=b"other")))
+        self.assertIsNone(build_script.pe_header(b"MZ" + bytes(100)))
+        self.assertIsNone(build_script.pe_header(b"text"))
+
+
+class MsiComparisonTest(unittest.TestCase):
+    STREAMS = {"䡀㼿": b"summary" * 10, "䡀䵎": b"t" * 5000, "Binary.icon": b"i" * 4096}
+
+    def signed(self, streams):
+        signature, digest = build_script.MSI_SIGNATURE_STREAMS
+        return msi_file({**streams, signature: b"pkcs7", digest: b"hash"}, root_modified=134379596991710000)
+
+    def test_streams_of_a_compound_file_are_read_from_sectors_and_the_mini_stream(self):
+        entries = build_script.compound_entries(msi_file(self.STREAMS, root_modified=7))
+        self.assertEqual((entries["/"].clsid, entries["/"].modified), (MSI_CLSID, 7))
+        streams = {path: entry.data for path, entry in entries.items() if path != "/"}
+        self.assertEqual(streams, {f"/{name}": data for name, data in self.STREAMS.items()})
+
+    def test_signature_streams_are_the_only_allowed_difference(self):
+        self.assertEqual(build_script.msi_differences(self.signed(self.STREAMS), msi_file(self.STREAMS)), [])
+
+    def test_changed_added_or_missing_streams_and_storage_metadata_differ(self):
+        built = msi_file(self.STREAMS)
+        self.assertEqual(build_script.msi_differences(self.signed({**self.STREAMS, "Binary.icon": b"j" * 4096}), built), ["/Binary.icon"])
+        added = msi_file({**self.STREAMS, "Binary.extra": b"x"})
+        self.assertEqual(build_script.msi_differences(added, built), ["/Binary.extra"])
+        self.assertEqual(build_script.msi_differences(built, added), ["/Binary.extra"])
+        self.assertEqual(build_script.msi_differences(msi_file(self.STREAMS, root_modified=1), built), ["/"])
+
+    def test_files_that_are_no_compound_files_differ(self):
+        built = msi_file(self.STREAMS)
+        self.assertEqual(build_script.msi_differences(b"MZ", built), ["not a readable msi: not a compound file"])
+        self.assertTrue(build_script.msi_differences(built[:1100], built)[0].startswith("not a readable msi"))
