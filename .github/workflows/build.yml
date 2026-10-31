@@ -1491,6 +1491,36 @@ jobs:
           TAG: ${{ needs.maybe-release.outputs.libs_tag }}
         run: gh release upload "$TAG" release-libs/*.zip --clobber --repo "${{ github.repository }}-libs"
 
+      # The tests that use OpenSSL: SQLCipher with a key, and sntrup761 (SHA-512) in the PQ ratchet of direct chats
+      - name: Run tests
+        timeout-minutes: 120
+        shell: msys2 {0}
+        env:
+          TESTS: |
+            /Mobile API Tests/mobile API/start new chat
+            /direct tests/maintenance mode/
+            /direct tests/direct messages/add contact and send/receive messages/
+            /direct tests/message errors/
+          ATTEMPTS: ${{ (github.ref == 'refs/heads/stable' || startsWith(github.ref, 'refs/tags/v')) && 3 || 1 }}
+          OPENSSL_DLL: libcrypto-3-x64.dll
+          # MSYS2 turns arguments starting with / into Windows paths, which the patterns are not
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
+          # list-bin clones the source repositories removed after the build, and prints git's output before the path
+          test_exe=$(cabal list-bin simplex-chat-test ${{ env.ghc_options }} | tail -n 1)
+          rm -rf dist-newstyle/src/direct-sq* dist-newstyle/src/simplexmq*
+          test_bin=$(cygpath -u "$test_exe")
+          openssl_lib=$(cygpath -u "$(awk '$1 == "extra-lib-dirs:" {print $2; exit}' cabal.project.local)")
+          # Windows loads DLLs from the executable's directory before PATH, which has MSYS2's OpenSSL
+          dll_copy=$(dirname "$test_bin")/$OPENSSL_DLL
+          cp "$openssl_lib/$OPENSSL_DLL" "$dll_copy"
+          loaded=$(ldd "$test_bin" | awk -v dll="$OPENSSL_DLL" 'tolower($1) == dll {print $3}')
+          echo "$OPENSSL_DLL loaded from: $loaded"
+          [ "$loaded" = "$dll_copy" ]
+          mkdir -p tests/tmp
+          scripts/ci/run-tests.sh timeout 35m "$test_bin"
+
       - name: Setup Node.js
         id: setup-node
         if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.maybe-release.outputs.addon_draft || needs.maybe-release.outputs.publish) }}
