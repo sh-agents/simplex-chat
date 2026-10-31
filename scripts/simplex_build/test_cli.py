@@ -163,6 +163,29 @@ class PrebuiltLibsTest(unittest.TestCase):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 build_script.parse_args(argv)
 
+    def test_desktop_upgrade_command_needs_the_cli_and_no_database(self):
+        self.assertEqual(
+            build_script.parse_args(["test", "desktop", "app.msi", "--out", "o", "--upgrade-from-previous", "--cli", "simplex-chat"]),
+            build_script.TestRelease("desktop", pathlib.Path("app.msi"), pathlib.Path("o"), None, pathlib.Path("simplex-chat"), True),
+        )
+        upgrade = ["test", "desktop", "app.msi", "--out", "o", "--upgrade-from-previous"]
+        for argv in (upgrade, [*upgrade, "--cli", "c", "--database", "old"], ["test", "cli", "x", "--out", "o", "--upgrade-from-previous"]):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                build_script.parse_args(argv)
+
+    def test_desktop_test_commands_go_to_their_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp).resolve()
+            with (
+                patch_all("require_tools"),
+                patch_all("test_desktop") as fresh,
+                patch_all("test_desktop_upgrade") as upgrade,
+            ):
+                build_script.test(build_script.TestRelease("desktop", pathlib.Path("app.dmg"), out, cli=pathlib.Path("cli"), upgrade=True))
+                build_script.test(build_script.TestRelease("desktop", pathlib.Path("app.dmg"), out))
+        upgrade.assert_called_once_with(pathlib.Path("app.dmg").resolve(), out, pathlib.Path("cli").resolve())
+        fresh.assert_called_once_with(pathlib.Path("app.dmg").resolve(), out, None, None)
+
     def test_install_commands(self):
         here = pathlib.Path(".")
         self.assertEqual(

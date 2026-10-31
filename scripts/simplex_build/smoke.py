@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -58,6 +59,21 @@ OLD_DATABASE_USER = "alice"
 OLD_DATABASE_GROUP = "team"
 DESKTOP_DATABASE_PREFIX = "simplex_v1"
 DESKTOP_SETTINGS = "settings.properties"
+DESKTOP_KEY_SETTING = "EncryptedDBPassphrase"
+DEB_PACKAGE = "simplex"
+DESKTOP_APP_BUNDLE = "SimpleX.app"
+# The previous release's desktop packages have the names of the new ones
+OLD_RELEASE_DESKTOP_SHA256 = {
+    "simplex-desktop-ubuntu-22_04-x86_64.deb": "21be1e78c1089c01567ccfec58cdf3e72a2733aa232c5288b8f155e6c7caba0b",
+    "simplex-desktop-ubuntu-24_04-x86_64.deb": "67fa2919fc1bc0e034a9f014e8d4b2ba9072be2056a44436c230fc4a6fa3d839",
+    "simplex-desktop-ubuntu-22_04-aarch64.deb": "0d0fd94404a67e35b9218d5afb1c5fca5f3101782b19aea415f90831d874d5a2",
+    "simplex-desktop-ubuntu-24_04-aarch64.deb": "3720c2428952e53d39b8cd4c76dd8e801e182bba4e40b2010786a6e465153b4e",
+    "simplex-desktop-x86_64.AppImage": "404220f16f1c03879b8d7402e31e8ce525dc3ce7a6904637bd48e19974f2536a",
+    "simplex-desktop-aarch64.AppImage": "8eafda1690c81a10136b5e284d80acfc44b9e8f919fa4a522d32b8ac9ebd915d",
+    "simplex-desktop-macos-aarch64.dmg": "296188f3c54f181d9e4c1e54a035d42788e92f11fed2f5399c705df69f09116e",
+    "simplex-desktop-macos-x86_64.dmg": "8e7be5015dd8b3f96ef08c8752f99d7db517d8461b87db1ac56bd561414219e7",
+    "simplex-desktop-windows-x86_64.msi": "0162d8eb42917b59962203b74527512c6d05eb032cf6e8189b62eb39587fbc79",
+}
 ANDROID_DATA_DIR = f"/data/user/0/{ANDROID_PACKAGE}"
 ANDROID_DATABASE_PREFIX = "files"
 ANDROID_PASSPHRASE_TEXT = "Database passphrase is required"
@@ -98,13 +114,17 @@ def copy_old_database(database: Path, prefix: Path) -> None:
         shutil.copy(database / f"{OLD_DATABASE_PREFIX}{suffix}", f"{prefix}{suffix}")
 
 
-def open_old_database(cli: Path, prefix: Path, out: Path, name: str, migrate: bool) -> None:
-    """The CLI opens the database at prefix with its key and lists the old release's group; without migrate it accepts
-    no migration, so the database must have been migrated already."""
-    args: list[str | Path] = [cli, "-d", prefix, "-k", OLD_DATABASE_KEY, "-e", "/groups", *(["-y"] if migrate else [])]
+def open_old_database(
+    cli: Path, prefix: Path, out: Path, name: str, migrate: bool, key: str = OLD_DATABASE_KEY, expected: str = f"#{OLD_DATABASE_GROUP}"
+) -> None:
+    """The CLI opens the database at prefix with key as the old release's user, which it makes in a database without
+    users, and lists the groups, which must print expected; without migrate it accepts no migration, so the database
+    must have been migrated already."""
+    user = ["--user-display-name", OLD_DATABASE_USER]
+    args: list[str | Path] = [cli, "-d", prefix, "-k", key, *user, "-e", "/groups", *(["-y"] if migrate else [])]
     result = run(args, input="", check=False, capture=True)
     record(out, name, result.stdout)
-    if result.returncode != 0 or f"#{OLD_DATABASE_GROUP}" not in result.stdout:
+    if result.returncode != 0 or expected not in result.stdout:
         raise BuildError(f"{cli.name} did not open the {OLD_RELEASE} database: {name}.txt")
 
 
@@ -174,23 +194,40 @@ def install_desktop(package: Path, work: Path) -> tuple[Path, dict[str, str]]:
             run(["sudo", "apt-get", "install", "-y", "--no-install-recommends", package.resolve()])
             return Path("/opt/simplex/bin/simplex"), {"JAVA_TOOL_OPTIONS": LINUX_JAVA_OPTIONS}
         case ".AppImage":
-            package.chmod(0o755)
-            # runs the AppImage without FUSE, which CI runners lack
-            return package, {"APPIMAGE_EXTRACT_AND_RUN": "1", "JAVA_TOOL_OPTIONS": LINUX_JAVA_OPTIONS}
+            app = work / package.name
+            shutil.copy(package, app)
+            app.chmod(0o755)
+            # runs the AppImage without FUSE, which CI runners lack, extracted in work
+            return app, {"APPIMAGE_EXTRACT_AND_RUN": "1", "TMPDIR": str(work), "JAVA_TOOL_OPTIONS": LINUX_JAVA_OPTIONS}
         case ".dmg":
-            mount = work / "dmg"
+            mount, bundle = work / "dmg", work / DESKTOP_APP_BUNDLE
             run(["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", mount, package])
             try:
-                shutil.copytree(mount / "SimpleX.app", work / "SimpleX.app", symlinks=True)
+                remove_tree(bundle)
+                shutil.copytree(mount / DESKTOP_APP_BUNDLE, bundle, symlinks=True)
             finally:
                 run(["hdiutil", "detach", mount])
-            return work / "SimpleX.app/Contents/MacOS/SimpleX", {}
+            return bundle / "Contents/MacOS/SimpleX", {}
         case ".msi":
-            # msiexec opens only paths with backslashes, and MSYS2's Python joins paths with slashes
-            msi, log_file = (str(path).replace("/", "\\") for path in (package.resolve(), work / "msiexec.log"))
+            msi, log_file = windows_paths(package.resolve(), work / "msiexec.log")
             run(["msiexec", "/i", msi, "/qn", "/l*v", log_file])
             return Path(os.environ["PROGRAMFILES"]) / "SimpleX/SimpleX.exe", {}
     raise BuildError(f"{package.name}: expected a .deb, .AppImage, .dmg or .msi")
+
+
+def windows_paths(*paths: Path) -> list[str]:
+    # msiexec opens only paths with backslashes, and MSYS2's Python joins paths with slashes
+    return [str(path).replace("/", "\\") for path in paths]
+
+
+def uninstall_desktop(package: Path, work: Path) -> None:
+    """Removes the app that install_desktop installed system-wide; the others are in work."""
+    match package.suffix:
+        case ".deb":
+            run(["sudo", "apt-get", "remove", "-y", DEB_PACKAGE])
+        case ".msi":
+            msi, log_file = windows_paths(package.resolve(), work / "msiexec-uninstall.log")
+            run(["msiexec", "/x", msi, "/qn", "/l*v", log_file])
 
 
 def window_open(process: subprocess.Popen[bytes], env: Mapping[str, str]) -> bool:
@@ -237,22 +274,90 @@ def desktop_settings_with_key(key: str) -> str:
     return f"StoreDBPassphrase=true\nEncryptedDBPassphrase={encoded}\nInitializationVectorDBPassphrase={encoded}\n"
 
 
+def java_properties(text: str) -> dict[str, str]:
+    """The entries that java.util.Properties.store wrote, which escapes = and : in keys and values with a backslash."""
+    entries = {}
+    for line in text.splitlines():
+        if entry := re.fullmatch(r"((?:[^\\=:#!]|\\.)+)[=:](.*)", line):
+            key, value = (re.sub(r"\\(.)", r"\1", part) for part in entry.groups())
+            entries[key] = value
+    return entries
+
+
+def desktop_stored_key(config: Path) -> str | None:
+    """The database key that the app made and stored in its settings, where its desktop Cryptor keeps it in base64."""
+    settings = config / DESKTOP_SETTINGS
+    encoded = java_properties(settings.read_text()).get(DESKTOP_KEY_SETTING) if settings.exists() else None
+    return base64.b64decode(encoded).decode() if encoded else None
+
+
+def desktop_database_stored(config: Path, data: Path) -> bool:
+    files = all((data / f"{DESKTOP_DATABASE_PREFIX}{suffix}").exists() for suffix in DATABASE_SUFFIXES)
+    return files and desktop_stored_key(config) is not None
+
+
 @contextlib.contextmanager
-def desktop_old_database(database: Path) -> Iterator[Path]:
-    """The previous release's database where the app opens it, with its key in the app's settings; yields the
-    database prefix and removes both directories after, so it refuses to run where the app has its own data."""
+def desktop_data() -> Iterator[tuple[Path, Path]]:
+    """The app's settings and data directories, which must not exist yet, so that a test never touches the data of an
+    installed app; removed after."""
     dirs = set(desktop_dirs())
     if existing := [d for d in dirs if d.exists()]:
         raise BuildError(f"{', '.join(map(str, existing))} exists: the test would replace this SimpleX app's data")
-    config, data = desktop_dirs()
     try:
+        yield desktop_dirs()
+    finally:
+        for directory in dirs:
+            remove_tree(directory)
+
+
+@contextlib.contextmanager
+def desktop_old_database(database: Path) -> Iterator[Path]:
+    """The previous release's database where the app opens it, with its key in the app's settings; yields the
+    database prefix."""
+    with desktop_data() as (config, data):
         copy_old_database(database, data / DESKTOP_DATABASE_PREFIX)
         config.mkdir(parents=True, exist_ok=True)
         (config / DESKTOP_SETTINGS).write_text(desktop_settings_with_key(OLD_DATABASE_KEY))
         yield data / DESKTOP_DATABASE_PREFIX
-    finally:
-        for directory in dirs:
-            remove_tree(directory)
+
+
+def stop_app(process: subprocess.Popen[bytes]) -> None:
+    """Kills the app with the processes it started: the AppImage's runtime runs the app in a child process."""
+    if host_platform() == Platform.WINDOWS:
+        process.kill()
+    else:
+        # the group is gone when the app and its children exited before
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+
+
+def run_desktop(
+    app: Path,
+    app_env: Mapping[str, str],
+    env: Mapping[str, str],
+    out: Path,
+    name: str,
+    ready: tuple[Callable[[], bool], str] | None = None,
+) -> Path:
+    """Runs the installed app until its window is open, ready's condition holds and it has drawn its screen, then stops
+    it; the app must not exit by itself. Returns the screenshot, out/name.png."""
+    with open(out / f"{name}.log", "w") as app_log:
+        process_env = {**os.environ, **env, **app_env}
+        process = subprocess.Popen([app], env=process_env, stdout=app_log, stderr=app_log, start_new_session=True)
+        try:
+            wait_until(lambda: window_open(process, env), WINDOW_TIMEOUT_SECONDS, "app window")
+            if ready:
+                condition, what = ready
+                wait_until(lambda: window_open(process, env) and condition(), WINDOW_TIMEOUT_SECONDS, what)
+            time.sleep(SETTLE_SECONDS)
+            screen = out / f"{name}.png"
+            screenshot(screen, env)
+            if process.poll() is not None:
+                raise BuildError(f"the app exited with {process.returncode} after opening its window")
+        finally:
+            stop_app(process)
+    return screen
 
 
 def test_desktop(package: Path, out: Path, database: Path | None = None, cli: Path | None = None) -> None:
@@ -262,26 +367,49 @@ def test_desktop(package: Path, out: Path, database: Path | None = None, cli: Pa
         raise BuildError("the old database test needs both the database and the CLI that checks it")
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
-        prefix = stack.enter_context(desktop_old_database(database)) if database else None
+        prefix = None
+        if database:
+            prefix = stack.enter_context(desktop_old_database(database))
+        else:
+            stack.enter_context(desktop_data())
         app, app_env = install_desktop(package, work)
         env = stack.enter_context(linux_display(out)) if host_platform() == Platform.LINUX else {}
-        with open(out / f"{package.name}.log", "w") as app_log:
-            process = subprocess.Popen([app], env={**os.environ, **env, **app_env}, stdout=app_log, stderr=app_log)
-            try:
-                wait_until(lambda: window_open(process, env), WINDOW_TIMEOUT_SECONDS, "app window")
-                time.sleep(SETTLE_SECONDS)
-                screen = out / f"{package.name}.png"
-                screenshot(screen, env)
-                if process.poll() is not None:
-                    raise BuildError(f"the app exited with {process.returncode} after opening its window")
-            finally:
-                process.kill()
-                process.wait()
+        screen = run_desktop(app, app_env, env, out, package.name)
         if prefix and cli:
             open_old_database(runnable_cli(cli, work), prefix, out, f"{package.name}.database", migrate=False)
     opened = f", opens and migrates the {OLD_RELEASE} database" if database else ""
     log(f"{package.name}: the app runs{opened}, {screen.name}")
     add_summary(f"`{package.name}`: the app runs{opened}, screenshot `{screen.name}`\n\n")
+
+
+def test_desktop_upgrade(package: Path, out: Path, cli: Path | None) -> None:
+    """The previous release's app installs from its package of the same name, makes its encrypted database and stores
+    its key in its settings; package then installs over it as users upgrade, and its app must open and migrate that
+    database, which the new CLI then opens without migrations."""
+    if not cli:
+        raise BuildError("the upgrade test needs the CLI that checks the database")
+    if package.name not in OLD_RELEASE_DESKTOP_SHA256:
+        raise BuildError(f"no {OLD_RELEASE} package is pinned for {package.name}")
+    with tempfile.TemporaryDirectory() as tmp, desktop_data() as (config, data), contextlib.ExitStack() as stack:
+        work = Path(tmp).resolve()
+        (work / OLD_RELEASE).mkdir()
+        old_url = release_url(OLD_RELEASE, package.name)
+        old_package = fetch_pinned(old_url, OLD_RELEASE_DESKTOP_SHA256[package.name], work / OLD_RELEASE / package.name)
+        env = stack.enter_context(linux_display(out)) if host_platform() == Platform.LINUX else {}
+        old_app, old_env = install_desktop(old_package, work)
+        stack.callback(uninstall_desktop, package, work)
+        stored = (lambda: desktop_database_stored(config, data), "database with its key in the app's settings")
+        old_screen = run_desktop(old_app, old_env, env, out, f"{package.name}.{OLD_RELEASE}", stored)
+        key = desktop_stored_key(config)
+        if key is None:
+            raise BuildError(f"the {OLD_RELEASE} app removed its database key from {DESKTOP_SETTINGS}")
+        app, app_env = install_desktop(package, work)
+        screen = run_desktop(app, app_env, env, out, f"{package.name}.upgrade")
+        prefix, checked, user = data / DESKTOP_DATABASE_PREFIX, f"{package.name}.upgrade.database", f"Current user: {OLD_DATABASE_USER}"
+        open_old_database(runnable_cli(cli, work), prefix, out, checked, migrate=False, key=key, expected=user)
+    upgraded = f"upgrades from {OLD_RELEASE} and opens and migrates the database that {OLD_RELEASE} made"
+    log(f"{package.name}: the app {upgraded}, {old_screen.name}, {screen.name}")
+    add_summary(f"`{package.name}`: the app {upgraded}, screenshots `{old_screen.name}`, `{screen.name}`\n\n")
 
 
 def find_apksigner() -> str:

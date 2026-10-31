@@ -22,6 +22,7 @@ Each build takes --source <dir>, the simplex-chat checkout, by default the curre
 Run release files as their users do, with screenshots of the apps; apk needs a running emulator:
     simplex-chat-build.py test cli <binary> --out <dir>
     simplex-chat-build.py test desktop <.deb|.AppImage|.dmg|.msi> --out <dir>
+    simplex-chat-build.py test desktop <.deb|.AppImage|.dmg|.msi> --out <dir> --upgrade-from-previous --cli <cli>
     simplex-chat-build.py test apk <apk> --out <dir>
 
 Install prebuilt core libraries where the apps' builds take them, as the test workflows do:
@@ -82,7 +83,7 @@ from .linux import (
 from .macos import build_desktop_macos, build_macos_libs
 from .nix import NIX_PROFILE
 from .openssl import build_host_openssl
-from .smoke import OLD_RELEASE, make_old_database, test_apk, test_cli, test_desktop
+from .smoke import OLD_RELEASE, make_old_database, test_apk, test_cli, test_desktop, test_desktop_upgrade
 from .windows import build_desktop_windows, build_windows_libs
 
 
@@ -217,13 +218,14 @@ type Build = (
 @dataclass(frozen=True, slots=True)
 class TestRelease:
     """A smoke test of a release file: what it is, the file, and the previous release's database it must open, with
-    the CLI that checks it after a desktop app."""
+    the CLI that checks it after a desktop app; or a desktop package installed over the previous release's app."""
 
     kind: str
     file: Path
     out: Path
     database: Path | None = None
     cli: Path | None = None
+    upgrade: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +349,10 @@ def test(command: TestRelease) -> None:
                 Platform.WINDOWS: ["msiexec", "powershell"],
             }
             require_tools(tools[host_platform()])
-            test_desktop(file, out, database, cli)
+            if command.upgrade:
+                test_desktop_upgrade(file, out, cli)
+            else:
+                test_desktop(file, out, database, cli)
         case _:
             test_apk(file, out, database)
 
@@ -483,12 +488,20 @@ def parse_test_args(argv: Sequence[str]) -> TestRelease | MakeOldDatabase:
         sub.add_argument("--database", type=Path, help=f"the directory of test old-database: the file must open {OLD_RELEASE}'s database")
         if name == "desktop":
             sub.add_argument("--cli", type=Path, help="the new CLI, which checks that the app migrated the database")
+            sub.add_argument(
+                "--upgrade-from-previous",
+                action="store_true",
+                help=f"install the file over {OLD_RELEASE}'s app, which makes its database first; needs --cli and no --database",
+            )
     old = kinds.add_parser("old-database", help=f"an encrypted database made by {OLD_RELEASE}'s CLI, on Linux")
     old.add_argument("--out", type=Path, required=True, help="where the database goes")
     args = parser.parse_args(argv)
     if args.kind == "old-database":
         return MakeOldDatabase(args.out)
-    return TestRelease(args.kind, args.file, args.out, args.database, getattr(args, "cli", None))
+    upgrade = getattr(args, "upgrade_from_previous", False)
+    if upgrade and (args.database or not args.cli):
+        parser.error("--upgrade-from-previous needs --cli, and the app makes its own database instead of --database")
+    return TestRelease(args.kind, args.file, args.out, args.database, getattr(args, "cli", None), upgrade)
 
 
 def parse_arches(value: str) -> tuple[Arch, ...]:
