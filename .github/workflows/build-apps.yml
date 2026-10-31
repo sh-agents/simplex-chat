@@ -384,10 +384,7 @@ jobs:
           cabal-version: 3.10.2.0
 
       - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: corretto
-          java-version: 17
+        uses: ./.github/actions/setup-corretto
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -460,10 +457,7 @@ jobs:
           cabal-version: 3.10.2.0
 
       - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: corretto
-          java-version: 17
+        uses: ./.github/actions/setup-corretto
 
       - name: Setup MSYS2
         uses: simplex-chat/setup-msys2@v2
