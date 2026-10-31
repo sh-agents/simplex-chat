@@ -1,6 +1,6 @@
 # iOS app in the simulator on GitHub's runners
 
-`.github/workflows/ios-sim.yml` builds the core library and the iOS app from the branch's code on a macOS runner, starts the app in an iPhone 17 simulator, and drives it through onboarding to the chat list with a scripted smoke test. On request it also runs a Claude session that follows a device test plan, and a test backend (relay, directory, names server, contacts) for tests that need servers and peers.
+`.github/workflows/ios-sim.yml` builds the core library and the iOS app from the branch's code on a macOS runner, starts the app in an iPhone 17 simulator, and drives it through onboarding to the chat list with a scripted smoke test. `old-database.sh` then gives the app an encrypted database made by the previous release's CLI and checks that it opens it with its key. On request it also runs a Claude session that follows a device test plan, and a test backend (relay, directory, names server, contacts) for tests that need servers and peers.
 
 ## Running it
 

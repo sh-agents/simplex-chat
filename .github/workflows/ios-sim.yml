@@ -180,9 +180,29 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+  # the app must open this encrypted database, made by the previous release with its own OpenSSL
+  old-database:
+    name: previous release's database
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Make the database
+        run: python3 scripts/simplex-chat-build.py test old-database --out "$RUNNER_TEMP/old-database"
+
+      - name: Upload the database
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-sim-old-database
+          path: ${{ runner.temp }}/old-database
+          retention-days: 3
+          if-no-files-found: error
+
   app:
     name: app in the iOS simulator
-    needs: [plan, core, backend]
+    needs: [plan, core, backend, old-database]
     # core and backend are skipped when an earlier run built them, and backend also when the run doesn't start it
     if: ${{ !cancelled() && !failure() && needs.plan.result == 'success' && needs.core.result != 'cancelled' && needs.backend.result != 'cancelled' }}
     runs-on: macos-26
@@ -265,6 +285,15 @@ jobs:
 
       - name: Run smoke test
         run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" "$RUNNER_TEMP/smoke-test"
+
+      - name: Download the previous release's database
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-sim-old-database
+          path: ${{ runner.temp }}/old-database
+
+      - name: Open the previous release's database
+        run: scripts/ci/ios-sim/old-database.sh "$RUNNER_TEMP/old-database"
 
       - name: Stop test backend
         if: ${{ !cancelled() && env.START_BACKEND == 'true' }}
