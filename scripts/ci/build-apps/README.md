@@ -46,6 +46,10 @@ To sign for the App Store: on a Mac with the distribution certificate, unzip the
 
 It also fails when an object of the core library is marked for a newer iOS than the app's deployment target: mac2ios relabels the library's macOS objects as iOS and keeps their minimum version.
 
+## macOS: reproducibility
+
+Two unsigned macOS builds of one commit on the same runner image give byte-identical files (the dmg, the CLI and the libraries zip); signed releases, whose Developer ID signatures and notarization tickets differ on each signing, are compared with such a build after their signatures are removed.
+
 ## Known limits
 
 - **The core libraries rely on cache.zw3rk.com** for the cross-compiling toolchains and dependencies, as android-emu does: without it they take 12 to 24 hours, longer than a job may run. On a recent master commit only simplexmq and simplex-chat are built. armv7a uses GHC 8.10.7, whose Template Haskell runs under qemu, so it takes longer than aarch64.
