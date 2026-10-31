@@ -82,7 +82,7 @@ from .linux import (
 from .macos import build_desktop_macos, build_macos_libs
 from .nix import NIX_PROFILE
 from .openssl import build_host_openssl
-from .smoke import test_apk, test_cli, test_desktop
+from .smoke import OLD_RELEASE, make_old_database, test_apk, test_cli, test_desktop
 from .windows import build_desktop_windows, build_windows_libs
 
 
@@ -216,14 +216,22 @@ type Build = (
 
 @dataclass(frozen=True, slots=True)
 class TestRelease:
-    """A smoke test of a release file: what it is, and the file."""
+    """A smoke test of a release file: what it is, the file, and the previous release's database it must open, with
+    the CLI that checks it after a desktop app."""
 
     kind: str
     file: Path
     out: Path
+    database: Path | None = None
+    cli: Path | None = None
 
 
-type Command = Reproduce | Build | InstallLibs | TestRelease
+@dataclass(frozen=True, slots=True)
+class MakeOldDatabase:
+    out: Path
+
+
+type Command = Reproduce | Build | InstallLibs | TestRelease | MakeOldDatabase
 
 
 def reproduce(command: Reproduce) -> None:
@@ -327,9 +335,11 @@ def install(command: InstallLibs) -> None:
 def test(command: TestRelease) -> None:
     out = prepare_out(command.out)
     file = command.file.resolve()
+    database = command.database.resolve() if command.database else None
+    cli = command.cli.resolve() if command.cli else None
     match command.kind:
         case "cli":
-            test_cli(file, out)
+            test_cli(file, out, database)
         case "desktop":
             tools = {
                 Platform.LINUX: ["Xvfb", "openbox", "xdotool", "import", "identify"],
@@ -337,9 +347,9 @@ def test(command: TestRelease) -> None:
                 Platform.WINDOWS: ["msiexec", "powershell"],
             }
             require_tools(tools[host_platform()])
-            test_desktop(file, out)
+            test_desktop(file, out, database, cli)
         case _:
-            test_apk(file, out)
+            test_apk(file, out, database)
 
 
 def execute(command: Command) -> None:
@@ -350,6 +360,9 @@ def execute(command: Command) -> None:
             install(command)
         case TestRelease():
             test(command)
+        case MakeOldDatabase():
+            require_platform(Platform.LINUX)
+            make_old_database(command.out.resolve())
         case _:
             build(command)
 
@@ -456,7 +469,7 @@ def parse_install_args(argv: Sequence[str]) -> InstallLibs:
     return InstallLibs(args.platform, args.package, getattr(args, "arch", Arch.AARCH64), args.source)
 
 
-def parse_test_args(argv: Sequence[str]) -> TestRelease:
+def parse_test_args(argv: Sequence[str]) -> TestRelease | MakeOldDatabase:
     parser = argparse.ArgumentParser(prog="simplex-chat-build.py test", description="Run a release file as its users do.")
     kinds = parser.add_subparsers(dest="kind", required=True)
     for name, file, help in (
@@ -467,8 +480,15 @@ def parse_test_args(argv: Sequence[str]) -> TestRelease:
         sub = kinds.add_parser(name, help=help)
         sub.add_argument("file", type=Path, help=file)
         sub.add_argument("--out", type=Path, required=True, help="where the screenshots and logs go")
+        sub.add_argument("--database", type=Path, help=f"the directory of test old-database: the file must open {OLD_RELEASE}'s database")
+        if name == "desktop":
+            sub.add_argument("--cli", type=Path, help="the new CLI, which checks that the app migrated the database")
+    old = kinds.add_parser("old-database", help=f"an encrypted database made by {OLD_RELEASE}'s CLI, on Linux")
+    old.add_argument("--out", type=Path, required=True, help="where the database goes")
     args = parser.parse_args(argv)
-    return TestRelease(args.kind, args.file, args.out)
+    if args.kind == "old-database":
+        return MakeOldDatabase(args.out)
+    return TestRelease(args.kind, args.file, args.out, args.database, getattr(args, "cli", None))
 
 
 def parse_arches(value: str) -> tuple[Arch, ...]:

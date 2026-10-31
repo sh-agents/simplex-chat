@@ -146,7 +146,20 @@ class PrebuiltLibsTest(unittest.TestCase):
             build_script.parse_args(["test", "desktop", "simplex-desktop-x86_64.AppImage", "--out", "screens"]),
             build_script.TestRelease("desktop", pathlib.Path("simplex-desktop-x86_64.AppImage"), pathlib.Path("screens")),
         )
-        for argv in (["test", "desktop", "app.deb"], ["test", "ios", "x", "--out", "o"]):
+        self.assertEqual(
+            build_script.parse_args(["test", "desktop", "app.deb", "--out", "o", "--database", "old", "--cli", "simplex-chat"]),
+            build_script.TestRelease(
+                "desktop", pathlib.Path("app.deb"), pathlib.Path("o"), pathlib.Path("old"), pathlib.Path("simplex-chat")
+            ),
+        )
+        self.assertEqual(
+            build_script.parse_args(["test", "apk", "simplex-armv7a.apk", "--out", "o", "--database", "old"]),
+            build_script.TestRelease("apk", pathlib.Path("simplex-armv7a.apk"), pathlib.Path("o"), pathlib.Path("old")),
+        )
+        self.assertEqual(
+            build_script.parse_args(["test", "old-database", "--out", "old"]), build_script.MakeOldDatabase(pathlib.Path("old"))
+        )
+        for argv in (["test", "desktop", "app.deb"], ["test", "ios", "x", "--out", "o"], ["test", "cli", "x", "--out", "o", "--cli", "y"]):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 build_script.parse_args(argv)
 

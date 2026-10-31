@@ -1,7 +1,10 @@
 """Smoke tests of the release files: each runs as a user installs it, and the apps leave a screenshot."""
 
+import base64
 import contextlib
 import os
+import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -9,13 +12,17 @@ import time
 import zipfile
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from xml.etree import ElementTree
 
 from .common import (
     BuildError,
     Platform,
     add_summary,
+    fetch_pinned,
     host_platform,
     log,
+    release_url,
+    remove_tree,
     require_tools,
     run,
     warn,
@@ -37,6 +44,24 @@ ANDROID_FIRST_SCREEN_SECONDS = 300
 ANDROID_LOADING_TEXT = "Opening database"
 # Screenshots with fewer colours are blank, or show only a background
 MIN_SCREENSHOT_COLOURS = 16
+# The release before the pinned OpenSSL: its CLI makes the encrypted database that every new build must open
+OLD_RELEASE = "v7.0.3"
+OLD_RELEASE_CLI_SHA256 = {
+    "x86_64": "5afb1d25efe5ccf564a1ab124bc7f410a7a73171c974a4d8b7f4d8f2e3d62e77",
+    "aarch64": "91f332edc813cab78a848da7ba75ed91bcb8d09abf1fc92eca74330dc29ec970",
+}
+# adb types text without quoting, so the key has no spaces
+OLD_DATABASE_KEY = "old-release-key"
+OLD_DATABASE_PREFIX = "simplex"
+DATABASE_SUFFIXES = ("_chat.db", "_agent.db")
+OLD_DATABASE_USER = "alice"
+OLD_DATABASE_GROUP = "team"
+DESKTOP_DATABASE_PREFIX = "simplex_v1"
+DESKTOP_SETTINGS = "settings.properties"
+ANDROID_DATA_DIR = f"/data/user/0/{ANDROID_PACKAGE}"
+ANDROID_DATABASE_PREFIX = "files"
+ANDROID_PASSPHRASE_TEXT = "Database passphrase is required"
+ANDROID_UPGRADE_BUTTON = "Upgrade and open chat"
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
@@ -50,20 +75,65 @@ def record(out: Path, name: str, text: str) -> None:
     log(f"{name}: {text.strip().splitlines()[0] if text.strip() else '(no output)'}")
 
 
-def test_cli(binary: Path, out: Path) -> None:
-    """The CLI starts and prints its version."""
+def make_old_database(out: Path) -> None:
+    """An encrypted database with a user and a group, made by the previous release's CLI with its own OpenSSL."""
+    arch = platform.machine()
+    if arch not in OLD_RELEASE_CLI_SHA256:
+        raise BuildError(f"no {OLD_RELEASE} CLI is pinned for {arch}")
+    out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        runnable = binary
-        if host_platform() == Platform.WINDOWS and binary.suffix != ".exe":
-            # Windows runs only files named .exe
-            runnable = Path(tmp) / f"{binary.name}.exe"
-            shutil.copy(binary, runnable)
-        runnable.chmod(0o755)
+        name = f"simplex-chat-ubuntu-22_04-{arch}"
+        cli = fetch_pinned(release_url(OLD_RELEASE, name), OLD_RELEASE_CLI_SHA256[arch], Path(tmp) / name)
+        cli.chmod(0o755)
+        old: list[str | Path] = [cli, "-d", out / OLD_DATABASE_PREFIX, "-k", OLD_DATABASE_KEY, "--user-display-name", OLD_DATABASE_USER]
+        run([*old, "-e", f"/g {OLD_DATABASE_GROUP}"], input="")
+    log(f"{OLD_RELEASE} made an encrypted database in {out}")
+
+
+def copy_old_database(database: Path, prefix: Path) -> None:
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in DATABASE_SUFFIXES:
+        shutil.copy(database / f"{OLD_DATABASE_PREFIX}{suffix}", f"{prefix}{suffix}")
+
+
+def open_old_database(cli: Path, prefix: Path, out: Path, name: str, migrate: bool) -> None:
+    """The CLI opens the database at prefix with its key and lists the old release's group; without migrate it accepts
+    no migration, so the database must have been migrated already."""
+    args: list[str | Path] = [cli, "-d", prefix, "-k", OLD_DATABASE_KEY, "-e", "/groups", *(["-y"] if migrate else [])]
+    result = run(args, input="", check=False, capture=True)
+    record(out, name, result.stdout)
+    if result.returncode != 0 or f"#{OLD_DATABASE_GROUP}" not in result.stdout:
+        raise BuildError(f"{cli.name} did not open the {OLD_RELEASE} database: {name}.txt")
+
+
+def runnable_cli(binary: Path, work: Path) -> Path:
+    runnable = binary
+    if host_platform() == Platform.WINDOWS and binary.suffix != ".exe":
+        # Windows runs only files named .exe
+        runnable = work / f"{binary.name}.exe"
+        shutil.copy(binary, runnable)
+    runnable.chmod(0o755)
+    return runnable
+
+
+def test_cli(binary: Path, out: Path, database: Path | None = None) -> None:
+    """The CLI starts and prints its version, and opens the previous release's database when it is given."""
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        runnable = runnable_cli(binary, work)
         version = run([runnable, "--version"], capture=True).stdout
-    record(out, binary.name, version)
-    if "SimpleX Chat" not in version:
-        raise BuildError(f"{binary.name} --version printed no SimpleX Chat version: {version!r}")
-    add_summary(f"`{binary.name}`: {version.strip()}\n\n")
+        record(out, binary.name, version)
+        if "SimpleX Chat" not in version:
+            raise BuildError(f"{binary.name} --version printed no SimpleX Chat version: {version!r}")
+        if database:
+            prefix = work / "db" / OLD_DATABASE_PREFIX
+            copy_old_database(database, prefix)
+            open_old_database(runnable, prefix, out, f"{binary.name}.database", migrate=True)
+            wrong_key: list[str | Path] = [runnable, "-d", prefix, "-k", f"not-{OLD_DATABASE_KEY}", "-e", "/groups"]
+            if run(wrong_key, input="", check=False, capture=True).returncode == 0:
+                raise BuildError(f"{binary.name} opened the encrypted database with a wrong key")
+    opened = f", opens the {OLD_RELEASE} database" if database else ""
+    add_summary(f"`{binary.name}`: {version.strip()}{opened}\n\n")
 
 
 @contextlib.contextmanager
@@ -148,10 +218,49 @@ def screenshot(target: Path, env: Mapping[str, str]) -> None:
             script.unlink()
 
 
-def test_desktop(package: Path, out: Path) -> None:
-    """The desktop app installs from package, opens its window and draws its first screen without exiting."""
+def desktop_dirs() -> tuple[Path, Path]:
+    """The app's settings and data directories, as Platform.desktop.kt finds them."""
+    if host_platform() == Platform.WINDOWS:
+        appdata = Path(os.environ["APPDATA"]) / "SimpleX"
+        return appdata, appdata
+    home = Path.home()
+    config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "simplex"
+    data = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share")) / "simplex"
+    return config, data
+
+
+def desktop_settings_with_key(key: str) -> str:
+    """The app's settings with the stored database key: on desktop its Cryptor keeps the key itself, in base64."""
+    encoded = base64.b64encode(key.encode()).decode()
+    return f"StoreDBPassphrase=true\nEncryptedDBPassphrase={encoded}\nInitializationVectorDBPassphrase={encoded}\n"
+
+
+@contextlib.contextmanager
+def desktop_old_database(database: Path) -> Iterator[Path]:
+    """The previous release's database where the app opens it, with its key in the app's settings; yields the
+    database prefix and removes both directories after, so it refuses to run where the app has its own data."""
+    dirs = set(desktop_dirs())
+    if existing := [d for d in dirs if d.exists()]:
+        raise BuildError(f"{', '.join(map(str, existing))} exists: the test would replace this SimpleX app's data")
+    config, data = desktop_dirs()
+    try:
+        copy_old_database(database, data / DESKTOP_DATABASE_PREFIX)
+        config.mkdir(parents=True, exist_ok=True)
+        (config / DESKTOP_SETTINGS).write_text(desktop_settings_with_key(OLD_DATABASE_KEY))
+        yield data / DESKTOP_DATABASE_PREFIX
+    finally:
+        for directory in dirs:
+            remove_tree(directory)
+
+
+def test_desktop(package: Path, out: Path, database: Path | None = None, cli: Path | None = None) -> None:
+    """The desktop app installs from package, opens its window and draws its first screen without exiting; given the
+    previous release's database and the new CLI, the app must open and migrate that database."""
+    if bool(database) != bool(cli):
+        raise BuildError("the old database test needs both the database and the CLI that checks it")
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
+        prefix = stack.enter_context(desktop_old_database(database)) if database else None
         app, app_env = install_desktop(package, work)
         env = stack.enter_context(linux_display(out)) if host_platform() == Platform.LINUX else {}
         with open(out / f"{package.name}.log", "w") as app_log:
@@ -166,8 +275,11 @@ def test_desktop(package: Path, out: Path) -> None:
             finally:
                 process.kill()
                 process.wait()
-    log(f"{package.name}: the app runs, {screen.name}")
-    add_summary(f"`{package.name}`: the app runs, screenshot `{screen.name}`\n\n")
+        if prefix and cli:
+            open_old_database(runnable_cli(cli, work), prefix, out, f"{package.name}.database", migrate=False)
+    opened = f", opens and migrates the {OLD_RELEASE} database" if database else ""
+    log(f"{package.name}: the app runs{opened}, {screen.name}")
+    add_summary(f"`{package.name}`: the app runs{opened}, screenshot `{screen.name}`\n\n")
 
 
 def find_apksigner() -> str:
@@ -206,13 +318,65 @@ def apk_abis(apk: Path) -> set[str]:
         return {Path(name).parent.name for name in z.namelist() if name.startswith("lib/") and name.endswith(".so")}
 
 
+def android_screen() -> str:
+    return run(["adb", "exec-out", "uiautomator", "dump", "/dev/tty"], check=False, capture=True).stdout
+
+
 def android_screen_loaded() -> bool:
-    ui = run(["adb", "exec-out", "uiautomator", "dump", "/dev/tty"], check=False, capture=True).stdout
+    ui = android_screen()
     return "<node" in ui and ANDROID_LOADING_TEXT not in ui
 
 
-def test_apk(apk: Path, out: Path) -> None:
-    """The APK installs in the running emulator, starts and draws its first screen without exiting."""
+def android_node_centre(ui: str, text: str) -> tuple[int, int] | None:
+    """The centre of the first node whose text starts with text, from uiautomator's dump."""
+    hierarchy = ElementTree.fromstring(ui[ui.index("<?xml") : ui.rindex(">") + 1])
+    for node in hierarchy.iter("node"):
+        bounds = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
+        if node.get("text", "").startswith(text) and bounds:
+            left, top, right, bottom = map(int, bounds.groups())
+            return (left + right) // 2, (top + bottom) // 2
+    return None
+
+
+def android_tap(text: str) -> bool:
+    if centre := android_node_centre(android_screen(), text):
+        run(["adb", "shell", "input", "tap", str(centre[0]), str(centre[1])])
+        return True
+    return False
+
+
+def push_android_old_database(database: Path) -> None:
+    """The previous release's database in the installed app's data directory, owned by the app as Android requires;
+    adb runs as root on the emulator's Google APIs image."""
+    run(["adb", "root"])
+    run(["adb", "wait-for-device"])
+    owner = run(["adb", "shell", "stat", "-c", "%u:%g", ANDROID_DATA_DIR], capture=True).stdout.strip()
+    for suffix in DATABASE_SUFFIXES:
+        target = f"{ANDROID_DATA_DIR}/{ANDROID_DATABASE_PREFIX}{suffix}"
+        run(["adb", "push", database / f"{OLD_DATABASE_PREFIX}{suffix}", target])
+        run(["adb", "shell", "chown", owner, target])
+        run(["adb", "shell", "restorecon", target])
+
+
+def open_android_old_database() -> None:
+    """Enters the key on the app's passphrase screen and waits for the chat list with the previous release's group."""
+    wait_until(lambda: ANDROID_PASSPHRASE_TEXT in android_screen(), ANDROID_FIRST_SCREEN_SECONDS, "passphrase screen")
+    run(["adb", "shell", "input", "text", OLD_DATABASE_KEY])
+    # the passphrase field opens the chat on Enter, while the keyboard may cover the button
+    run(["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"])
+
+    def chat_list_shown() -> bool:
+        ui = android_screen()
+        if ANDROID_UPGRADE_BUTTON in ui:
+            android_tap(ANDROID_UPGRADE_BUTTON)
+        return f'text="{OLD_DATABASE_GROUP}"' in ui
+
+    wait_until(chat_list_shown, ANDROID_FIRST_SCREEN_SECONDS, f"chat list with the group {OLD_DATABASE_GROUP}")
+
+
+def test_apk(apk: Path, out: Path, database: Path | None = None) -> None:
+    """The APK installs in the running emulator, starts and draws its first screen without exiting; given the previous
+    release's database, the app opens it with its key and shows its chat list."""
     require_tools(["adb", "keytool"])
     device_abis = set(run(["adb", "shell", "getprop", "ro.product.cpu.abilist"], capture=True).stdout.strip().split(","))
     if not apk_abis(apk) & device_abis:
@@ -224,9 +388,14 @@ def test_apk(apk: Path, out: Path) -> None:
         unsigned = run([find_apksigner(), "verify", apk], check=False, capture=True).returncode != 0
         installable = signed_for_test(apk, work) if unsigned else apk
         run(["adb", "uninstall", ANDROID_PACKAGE], check=False, capture=True)
-        run(["adb", "install", installable])
+        run(["adb", "install", "-g", installable])
+        if database:
+            push_android_old_database(database)
         run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
-        wait_until(android_screen_loaded, ANDROID_FIRST_SCREEN_SECONDS, "screen past the database loading")
+        if database:
+            open_android_old_database()
+        else:
+            wait_until(android_screen_loaded, ANDROID_FIRST_SCREEN_SECONDS, "screen past the database loading")
         time.sleep(SETTLE_SECONDS)
         screen = out / f"{apk.name}.png"
         emulator_screenshot(screen, work)
@@ -234,5 +403,6 @@ def test_apk(apk: Path, out: Path) -> None:
         logcat = run(["adb", "logcat", "-d", "-t", "200"], check=False, capture=True).stdout
         record(out, f"{apk.name}.logcat", logcat)
         raise BuildError(f"{ANDROID_PACKAGE} is not running after it started: logcat in {apk.name}.logcat.txt")
-    log(f"{apk.name}: the app runs, {screen.name}")
-    add_summary(f"`{apk.name}`: the app runs, screenshot `{screen.name}`\n\n")
+    opened = f", opens the {OLD_RELEASE} database" if database else ""
+    log(f"{apk.name}: the app runs{opened}, {screen.name}")
+    add_summary(f"`{apk.name}`: the app runs{opened}, screenshot `{screen.name}`\n\n")
