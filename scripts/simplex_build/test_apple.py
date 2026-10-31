@@ -2,6 +2,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 from .testing import XCODE_DEVELOPER, Recorder, build_script, patch_all
@@ -108,3 +109,69 @@ class BuildRootTest(unittest.TestCase):
         with self.patched(), self.assertRaises(build_script.BuildError), build_script.build_root(inside, {}):
             pass
         self.assertTrue(inside.is_dir())
+
+
+USER_TEMP = "/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/"
+
+
+USER_CACHE = "/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/C/"
+
+
+class MachinePathsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def paths(self, developer, home="/Users/runner"):
+        recorder = Recorder(answers={"DARWIN_USER_TEMP_DIR": USER_TEMP, "DARWIN_USER_CACHE_DIR": USER_CACHE})
+        with patch_all("run", recorder), mock.patch.dict(os.environ, {"HOME": home, "TMPDIR": USER_TEMP}):
+            return build_script.machine_paths(pathlib.Path("/Users/runner/work/simplex-chat/simplex-chat"), developer)
+
+    def test_the_checkout_home_temporary_directories_and_xcode_are_paths_of_the_machine(self):
+        self.assertEqual(
+            self.paths(XCODE_DEVELOPER),
+            [
+                "/Applications/Xcode_26.3.app",
+                "/Users/runner",
+                "/Users/runner/work/simplex-chat/simplex-chat",
+                USER_CACHE.rstrip("/"),
+                USER_TEMP.rstrip("/"),
+            ],
+        )
+
+    def test_xcode_in_its_usual_place_and_a_home_of_the_root_directory_are_not(self):
+        paths = self.paths(build_script.CANONICAL_DEVELOPER_DIR, home="/")
+        self.assertEqual(paths, ["/Users/runner/work/simplex-chat/simplex-chat", USER_CACHE.rstrip("/"), USER_TEMP.rstrip("/")])
+
+    def test_paths_are_found_in_files_and_in_the_entries_of_jars(self):
+        app = self.root / "SimpleX.app/Contents"
+        (app / "MacOS").mkdir(parents=True)
+        (app / "MacOS/SimpleX").write_bytes(b"\0/Users/runner/.cabal/bin\0")
+        (app / "MacOS/clean").write_bytes(b"/Users/other\0")
+        (app / "link").symlink_to("MacOS/SimpleX")
+        with zipfile.ZipFile(app / "app.jar", "w", zipfile.ZIP_DEFLATED) as jar:
+            jar.writestr("chat/simplex/Paths.class", b"\x01/var/folders/n6/x/T/kotlin\x01")
+        cli = self.root / "simplex-chat"
+        cli.write_bytes(b"/Users/runner/work/simplex-chat/simplex-chat/dist-newstyle")
+        resources = app / "app/resources/vlc"
+        resources.mkdir(parents=True)
+        (resources / "libvlccore.dylib").write_bytes(b"/Users/runner/work/vlc/vlc/src")
+        paths = ["/Users/runner", "/var/folders/n6"]
+        found = build_script.find_machine_paths([cli, self.root / "SimpleX.app"], paths, skip=[app / "app/resources"])
+        self.assertEqual(
+            found,
+            [
+                f"{cli}: /Users/runner",
+                f"{app / 'MacOS/SimpleX'}: /Users/runner",
+                f"{app / 'app.jar'}!chat/simplex/Paths.class: /var/folders/n6",
+            ],
+        )
+
+    def test_found_paths_fail_and_are_listed(self):
+        build_script.check_machine_paths([])
+        with self.assertRaises(build_script.BuildError) as raised:
+            build_script.check_machine_paths(["a: /Users/runner", "b: /Users/runner"])
+        self.assertIn("a: /Users/runner\nb: /Users/runner", str(raised.exception))

@@ -11,7 +11,7 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from .apple import build_root, require_xcode
+from .apple import build_root, check_machine_paths, find_machine_paths, machine_paths, require_xcode
 from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
 from .macho import simulator_archive
 from .nix import install_nix, nix_env
@@ -287,7 +287,7 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         warn("no simplex-chat-art checkout (--art): the archive has the default icons, not the release's brand assets")
     elif not (art / "ios/Assets.xcassets").is_dir():
         raise BuildError(f"no ios/Assets.xcassets in {art}")
-    require_xcode()
+    paths = machine_paths(source, require_xcode())
     with build_root(source, {}) as root:
         work = root.work
         if install:
@@ -341,4 +341,6 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         run(["plutil", "-replace", "ApplicationProperties.Team", "-string", team, archive / "Info.plist"])
         creation_date = time.strftime(PLUTIL_DATE_FORMAT, time.gmtime(int(epoch)))
         run(["plutil", "-replace", "CreationDate", "-date", creation_date, archive / "Info.plist"])
+        found = find_machine_paths([archive], paths)
         zip_tree(archive, out / "SimpleX.xcarchive.zip", epoch)
+    check_machine_paths(found)

@@ -5,7 +5,8 @@ import contextlib
 import os
 import re
 import shutil
-from collections.abc import Iterator, Mapping
+import zipfile
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,3 +104,47 @@ def build_root(source: Path, env: Mapping[str, str]) -> Iterator[BuildRoot]:
             else:
                 os.environ[name] = value
         clear_build_root()
+
+
+# Xcode's usual place, which the builds don't report as a path of the machine
+CANONICAL_DEVELOPER_DIR = Path("/Applications/Xcode.app/Contents/Developer")
+
+
+# the user's temporary and cache directories, which the system names per machine and user
+DARWIN_USER_DIRS = ("DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR")
+
+
+# fewer parts would match unrelated paths, as / would match every path
+MIN_MACHINE_PATH_PARTS = 3
+
+
+def machine_paths(source: Path, developer: Path) -> list[str]:
+    """The paths of this machine and user, which release files built on other machines can't contain: the checkout, the
+    home and temporary directories, and the Xcode of developer unless it is in CANONICAL_DEVELOPER_DIR."""
+    paths = {str(source), str(Path.home()), os.environ.get("TMPDIR", "")}
+    paths |= {run(["getconf", name], capture=True).stdout.strip() for name in DARWIN_USER_DIRS}
+    if developer != CANONICAL_DEVELOPER_DIR:
+        paths.add(str(developer.parents[1]))
+    return sorted({path.rstrip("/") for path in paths if len(Path(path).parts) >= MIN_MACHINE_PATH_PARTS})
+
+
+def find_machine_paths(roots: Sequence[Path], paths: Sequence[str], skip: Sequence[Path] = ()) -> list[str]:
+    """'<file>: <path>' for each of paths in each file of roots, and in each entry of their jars, except in skip."""
+    encoded = [(path, path.encode()) for path in paths]
+    files = []
+    for root in roots:
+        files += [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+    files = [file for file in files if not any(file.is_relative_to(directory) for directory in skip)]
+    found = []
+    for file in files:
+        contents = [(str(file), file.read_bytes())]
+        if file.suffix == ".jar":
+            with zipfile.ZipFile(file) as jar:
+                contents += [(f"{file}!{name}", jar.read(name)) for name in jar.namelist()]
+        found += [f"{name}: {path}" for name, data in contents for path, raw in encoded if raw in data]
+    return found
+
+
+def check_machine_paths(found: Sequence[str]) -> None:
+    if found:
+        raise BuildError("these files contain paths of the machine that built them:\n" + "\n".join(found))

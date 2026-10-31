@@ -146,8 +146,9 @@ class IosArchiveTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def build(self, art):
-        """build_ios_archive with art, against stand-ins of nix, Xcode and codesign; returns their commands and warn."""
+    def build(self, art, binary=b"app"):
+        """build_ios_archive with art, against stand-ins of nix, Xcode and codesign, with binary as the app's executable;
+        returns their commands and warn."""
         apple = FakeApple()
         source = self.build_root / "simplex-chat"
         self.xcconfig = None
@@ -173,7 +174,7 @@ class IosArchiveTest(unittest.TestCase):
                 app = archive / "Products/Applications/SimpleX.app"
                 for appex in ("SimpleX NSE", "SimpleX SE"):
                     (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
-                (app / "SimpleX").write_bytes(b"app")
+                (app / "SimpleX").write_bytes(binary)
                 (archive / "Info.plist").write_bytes(b"plist")
             elif args[0] == "git":
                 apple.commands.append(args)
@@ -187,12 +188,14 @@ class IosArchiveTest(unittest.TestCase):
             patch_all("install_ios_libs") as install_libs,
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
             patch_all("BUILD_ROOT", self.build_root),
+            patch_all("machine_paths", return_value=["/Users/builder"]) as paths,
             patch_all("warn") as warn,
         ):
             build_script.build_ios_archive(self.source, art, self.out, install=False)
         self.assertEqual(install_libs.call_args.args[0], source)
         self.assertEqual(install_libs.call_args.args[1].name, build_script.IOS_CORE_ZIP)
         self.assertEqual(self.cwd, source)
+        self.assertEqual(paths.call_args.args, (self.source, XCODE_DEVELOPER))
         self.assertFalse(self.build_root.exists())
         return apple.commands, warn
 
@@ -227,6 +230,12 @@ class IosArchiveTest(unittest.TestCase):
         self.assertIn("default icons", warn.call_args.args[0])
         self.assertIsNone(self.xcconfig)
         self.assertNotIn("scripts/ios/copy-assets.sh", [c[0] for c in commands])
+        self.assert_archive_zip()
+
+    def test_an_archive_with_a_path_of_the_machine_fails_after_it_is_zipped(self):
+        with self.assertRaises(build_script.BuildError) as raised:
+            self.build(None, binary=b"app /Users/builder/simplex-chat/apps/ios/Shared/AppDelegate.swift")
+        self.assertIn("SimpleX.app/SimpleX: /Users/builder", str(raised.exception))
         self.assert_archive_zip()
 
     def test_art_checkout_without_the_assets_fails(self):

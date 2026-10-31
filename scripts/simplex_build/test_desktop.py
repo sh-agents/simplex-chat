@@ -101,8 +101,9 @@ class HostDesktopTest(unittest.TestCase):
             self.assertFalse(build_script.apple_signing(require=False))
         self.assertIn("unsigned", warn.call_args.args[0])
 
-    def build_macos(self, signed):
-        """build_desktop_macos with its builds standing in; returns its calls, the sign_dmg mock and the work directory."""
+    def build_macos(self, signed, cli=b"cli"):
+        """build_desktop_macos with its builds standing in, and cli as the CLI; returns its calls, the sign_dmg mock and
+        the work directory."""
         libs = self.root / "libs-app"
         libs.mkdir()
         (libs / "libsimplex.dylib").write_bytes(b"lib")
@@ -115,7 +116,7 @@ class HostDesktopTest(unittest.TestCase):
         answers = {"list-bin": f"{self.root}/dist/simplex-chat\n", "otool -L": "\t/usr/lib/libSystem.B.dylib\n"}
         recorder = Recorder(answers={**answers, "show-sdk-path": "/X/MacOSX.sdk\n"})
         (self.root / "dist").mkdir()
-        (self.root / "dist/simplex-chat").write_bytes(b"cli")
+        (self.root / "dist/simplex-chat").write_bytes(cli)
         calls = []
         self.cabal_locals = []
         self.openssl_dirs = []
@@ -126,8 +127,13 @@ class HostDesktopTest(unittest.TestCase):
             self.cabal_locals.append(cabal_local)
             return original_cli(source, cabal_local)
 
+        def add_vlc(libs, arch, work):
+            (libs / "vlc").mkdir()
+            (libs / "vlc/libvlccore.dylib").write_bytes(b"/Users/builder/work/vlc")
+
         def build_app(source, keychain):
             calls.append(("app", keychain))
+            shutil.copytree(libs, self.app / build_script.COMPOSE_RESOURCES)
             self.app_env = {name: os.environ.get(name) for name in ("CABAL_DIR", "SDKROOT", "LC_ALL", "TZ")}
             self.app_umask = os.umask(0o077)
             os.umask(self.app_umask)
@@ -147,8 +153,9 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
             patch_all("apple_keychain", lambda work: contextlib.nullcontext(self.keychain)),
             patch_all("BUILD_ROOT", self.build_root),
+            patch_all("machine_paths", return_value=["/Users/builder"]),
             patch_all("build_mac_lib", lambda source, arch, database, work: calls.append(("lib", arch)) or libs),
-            patch_all("add_vlc_mac", lambda libs, arch, work: (libs / "vlc").mkdir()),
+            patch_all("add_vlc_mac", add_vlc),
             patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
             patch_all("build_app", build_app),
             patch_all("normalize_app", lambda app: calls.append(("normalize", app))),
@@ -195,6 +202,14 @@ class HostDesktopTest(unittest.TestCase):
             ["simplex-chat-libs-macos-aarch64.zip", "simplex-chat-macos-aarch64", "simplex-desktop-macos-aarch64.dmg"],
         )
         self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.dylib"])
+
+    def test_macos_build_with_a_path_of_the_machine_fails_after_its_files_are_written(self):
+        with self.assertRaises(build_script.BuildError) as raised:
+            self.build_macos(signed=False, cli=b"cli /Users/builder/.cabal/bin")
+        self.assertIn("simplex-chat-macos-aarch64: /Users/builder", str(raised.exception))
+        self.assertNotIn("vlc", str(raised.exception))
+        self.assertEqual((self.out / "simplex-desktop-macos-aarch64.dmg").read_bytes(), b"dmg")
+        self.assertFalse(self.build_root.exists())
 
     def test_macos_signed_build_signs_the_app_and_notarizes_the_dmg(self):
         calls, sign_dmg, work = self.build_macos(signed=True)

@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .apk_zip import LOCAL_HEADER, central_directory
-from .apple import build_root, require_xcode
+from .apple import build_root, check_machine_paths, find_machine_paths, machine_paths, require_xcode
 from .common import GHC, BuildError, edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file, touch_tree, warn
 from .desktop import (
     COMPOSE_ARCHES,
@@ -45,6 +45,11 @@ LIBFFI_URL = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3
 
 
 LIBFFI_SHA256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
+
+
+# where Compose copies the libraries directory into the app; VLC's libraries there have the paths of the machine that
+# built them, which is GitHub's, as this one can be
+COMPOSE_RESOURCES = "Contents/app/resources"
 
 
 # the jars that Compose copies into the app, named with a hash of the jar it copied, and the classpath that lists them
@@ -421,18 +426,20 @@ def install_macos_libs(libs: Path, source: Path) -> None:
 
 def build_macos_libs(source: Path, database: Database, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
-    require_xcode()
+    paths = machine_paths(source, require_xcode())
     with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
         keychain = stack.enter_context(apple_keychain(root.work)) if signed else None
         openssl = host_openssl(openssl_work(root.source))
         libs = release_macos_libs(root.source, openssl, database, keychain, root.work, out)
+        found = find_machine_paths([libs], paths)
         install_macos_libs(libs, source)
+    check_machine_paths(found)
 
 
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     host = macos_desktop()
     signed = apple_signing(require_signing)
-    require_xcode()
+    paths = machine_paths(source, require_xcode())
     with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
         work = root.work
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
@@ -443,13 +450,16 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
         libs = release_macos_libs(root.source, openssl, Database.SQLITE, keychain, work, out)
+        found = find_machine_paths([out / host.cli, libs], paths)
         add_vlc_mac(libs, host.arch, work)
         app = build_app(root.source, keychain)
         normalize_app(app)
         sign_app(app, keychain)
+        found += find_machine_paths([app], paths, skip=[app / COMPOSE_RESOURCES])
         dmg = work / host.desktop
         build_dmg(build_libdmg(work), app, java_home(), work, dmg)
         if keychain:
             sign_dmg(dmg, keychain, work)
         check_dmg(dmg, keychain is not None, work)
         shutil.copy(dmg, out / host.desktop)
+    check_machine_paths(found)
