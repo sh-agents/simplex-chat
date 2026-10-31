@@ -114,6 +114,7 @@
           chmod +w $pkg
           ${mac2ios.packages.${system}.mac2ios}/bin/mac2ios $pkg
           [[ "$pkg" == *simplex-chat* ]] && ${pkgs.stdenv.cc.targetPrefix}strip -x $pkg
+          ${pkgs.python3}/bin/python3 ${./scripts/nix/zero-ar-headers.py} $pkg
           chmod -w $pkg
         done
 
@@ -123,7 +124,8 @@
 
         sha256sum $out/_pkg/*.a
 
-        (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/${bundleName}.zip *)
+        find "$out/_pkg" -exec touch -h -d '@1764547200' {} +
+        (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 -X $out/${bundleName}.zip *)
         rm -fR $out/_pkg
         mkdir -p $out/nix-support
         echo "file binary-dist \"$(echo $out/*.zip)\"" \

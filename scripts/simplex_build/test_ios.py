@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import pathlib
 import shutil
@@ -10,6 +11,7 @@ from .testing import (
     ENTITLEMENTS,
     OTOOL,
     PBXPROJ,
+    REPO_ROOT,
     FakeApple,
     Recorder,
     build_script,
@@ -17,6 +19,29 @@ from .testing import (
 )
 
 COMMIT_EPOCH = 1700000000
+
+
+def load_zero_ar_headers():
+    """scripts/nix/zero-ar-headers.py, which flake.nix runs on the iOS core libraries."""
+    spec = importlib.util.spec_from_file_location("zero_ar_headers", REPO_ROOT / "scripts/nix/zero-ar-headers.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+zero_ar_headers = load_zero_ar_headers()
+
+
+def ar_member(name, data, date=b"1761912000", uid=b"351", gid=b"30000", mode=b"100444"):
+    """A BSD ar member, its name after the header as Apple's ar writes names longer than 16 bytes."""
+    name_field = f"#1/{len(name)}".encode() if len(name) > 16 else name.encode()
+    body = (name.encode() if len(name) > 16 else b"") + data
+    header = name_field.ljust(16) + date.ljust(12) + uid.ljust(6) + gid.ljust(6) + mode.ljust(8) + str(len(body)).encode().ljust(10)
+    return header + b"`\n" + body + b"\n" * (len(body) % 2)
+
+
+def ar_archive(*members):
+    return b"!<arch>\n" + b"".join(members)
 
 
 class IosDetailsTest(unittest.TestCase):
@@ -357,3 +382,37 @@ class ReproducibleArchiveTest(unittest.TestCase):
             self.assertEqual(z.read(f"{app}/Frameworks/Current"), b"SimpleXChat.framework")
             self.assertEqual(z.read(f"{app}/SimpleX"), b"binary" * 100)
             self.assertEqual(infos[f"{app}/SimpleX"].compress_type, zipfile.ZIP_DEFLATED)
+
+
+class ZeroArHeadersTest(unittest.TestCase):
+    def test_zeroes_dates_and_owners_and_keeps_the_members(self):
+        long_name = "M20220812_incognito_profiles.o"
+        built = ar_archive(ar_member("__.SYMDEF SORTED", b"toc!"), ar_member(long_name, b"odd"), ar_member("a.o", b"even"))
+        zero = {"date": b"0", "uid": b"0", "gid": b"0", "mode": b"644"}
+        members = (ar_member("__.SYMDEF SORTED", b"toc!", **zero), ar_member(long_name, b"odd", **zero), ar_member("a.o", b"even", **zero))
+        self.assertEqual(zero_ar_headers.zero_headers(built), ar_archive(*members))
+
+    def test_rejects_other_files(self):
+        cases = {
+            "not an ar archive": b"\xcf\xfa\xed\xfe",
+            "ends in a member header": ar_archive(ar_member("a.o", b"x"))[:-20],
+            "no member header": ar_archive(ar_member("a.o", b"xy")).replace(b"`\n", b"!!"),
+        }
+        for message, data in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(zero_ar_headers.ArchiveError, message):
+                zero_ar_headers.zero_headers(data)
+
+    def test_main_rewrites_each_archive_and_exits_on_other_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            libs = [pathlib.Path(tmp, name) for name in ("libffi.a", "libgmp.a")]
+            for lib in libs:
+                lib.write_bytes(ar_archive(ar_member("a.o", b"x")))
+            zero_ar_headers.main([str(lib) for lib in libs])
+            expected = ar_archive(ar_member("a.o", b"x", date=b"0", uid=b"0", gid=b"0", mode=b"644"))
+            self.assertEqual([lib.read_bytes() for lib in libs], [expected, expected])
+            other = pathlib.Path(tmp, "SimpleX.h")
+            other.write_bytes(b"#import")
+            with self.assertRaises(SystemExit) as exit:
+                zero_ar_headers.main([str(other)])
+            self.assertIn("SimpleX.h: not an ar archive", str(exit.exception.code))
+            self.assertEqual(other.read_bytes(), b"#import")
