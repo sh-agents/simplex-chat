@@ -6,6 +6,8 @@ Three workflows build the apps from a branch's own code and test them, only when
 
 GitHub runs the reduced build of `build.yml` on a dispatch (workflow_dispatch), on each push to a draft pull request and on a push to master or stable in a fork. Once the pull request is marked ready for review, GitHub runs the full matrix, as on a push to master or stable in simplex-chat/simplex-chat.
 
+In the full matrix, simplex-chat-test runs the whole suite on Linux x86_64 and macOS aarch64. On Windows, build-windows runs only the tests that use OpenSSL (step "Run tests"): SQLCipher with a key (mobile API, maintenance mode) and the post-quantum ratchet of direct chats. They run against the pinned OpenSSL that the Windows release bundles (`OPENSSL_VERSION` in scripts/simplex_build/openssl.py): the step copies libcrypto-3-x64.dll beside the test binary, prints where it was loaded from and fails if it loads another one, such as MSYS2's OpenSSL on PATH. The reduced build has no Windows job.
+
 On a push to master or stable in a fork, the release steps and tests are skipped; build-linux saves the -O0 build caches, and on master the Docker image cache, that the fork's dispatches restore.
 
 On a draft pull request, the tests are selected by a fenced block with the info string `ci-tests` in the description, one hspec match pattern per line; the block is read at each push. `/` runs the whole suite; without a block, the reduced build runs no tests.
