@@ -134,8 +134,8 @@ class SmokeTest(unittest.TestCase):
             self.desktop_run(app)
         self.assertIn("after opening its window", str(raised.exception))
 
-    def apk_run(self, verify_returncode, pidof):
-        recorder = Recorder(answers={"pidof": pidof, "abilist": "x86_64,arm64-v8a\n"})
+    def apk_run(self, verify_returncode, pidof, screen='<hierarchy><node text="Get started"/></hierarchy>'):
+        recorder = Recorder(answers={"pidof": pidof, "abilist": "x86_64,arm64-v8a\n", "uiautomator": screen})
 
         def fake_run(args, **kwargs):
             if [str(a) for a in args[:4]] == ["adb", "emu", "screenrecord", "screenshot"]:
@@ -178,6 +178,18 @@ class SmokeTest(unittest.TestCase):
             build_script.test_apk(apk, self.out)
         self.assertIn("armeabi-v7a", warn.call_args.args[0])
         self.assertFalse(any(c[:2] == ["adb", "install"] for c in recorder.commands))
+
+    def test_apk_still_opening_its_database_fails_without_a_screenshot(self):
+        with patch_all("ANDROID_FIRST_SCREEN_SECONDS", 0), self.assertRaises(build_script.BuildError) as raised:
+            self.apk_run(verify_returncode=0, pidof="1234\n", screen='<hierarchy><node text="Opening database..."/></hierarchy>')
+        self.assertIn("database loading", str(raised.exception))
+        self.assertFalse((self.out / "simplex-aarch64.apk.png").exists())
+
+    def test_screenshot_waits_for_the_screen_after_the_database_loading(self):
+        commands = self.apk_run(verify_returncode=0, pidof="1234\n")
+        dump = commands.index(["adb", "exec-out", "uiautomator", "dump", "/dev/tty"])
+        screenshot = next(i for i, c in enumerate(commands) if c[:3] == ["adb", "emu", "screenrecord"])
+        self.assertLess(dump, screenshot)
 
     def test_signed_apk_is_installed_as_it_is(self):
         commands = self.apk_run(verify_returncode=0, pidof="1234\n")

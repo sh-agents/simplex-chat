@@ -32,6 +32,9 @@ DESKTOP_WINDOW_TITLE = "SimpleX"
 ANDROID_PACKAGE = "chat.simplex.app"
 ANDROID_ACTIVITY = f"{ANDROID_PACKAGE}/.MainActivity"
 EMULATOR_SCREENSHOT_SECONDS = 10
+# the x86_64 image translates the armv7a APK's ARM code, which opens the database several times slower
+ANDROID_FIRST_SCREEN_SECONDS = 300
+ANDROID_LOADING_TEXT = "Opening database"
 # Screenshots with fewer colours are blank, or show only a background
 MIN_SCREENSHOT_COLOURS = 16
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -203,6 +206,11 @@ def apk_abis(apk: Path) -> set[str]:
         return {Path(name).parent.name for name in z.namelist() if name.startswith("lib/") and name.endswith(".so")}
 
 
+def android_screen_loaded() -> bool:
+    ui = run(["adb", "exec-out", "uiautomator", "dump", "/dev/tty"], check=False, capture=True).stdout
+    return "<node" in ui and ANDROID_LOADING_TEXT not in ui
+
+
 def test_apk(apk: Path, out: Path) -> None:
     """The APK installs in the running emulator, starts and draws its first screen without exiting."""
     require_tools(["adb", "keytool"])
@@ -218,6 +226,7 @@ def test_apk(apk: Path, out: Path) -> None:
         run(["adb", "uninstall", ANDROID_PACKAGE], check=False, capture=True)
         run(["adb", "install", installable])
         run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
+        wait_until(android_screen_loaded, ANDROID_FIRST_SCREEN_SECONDS, "screen past the database loading")
         time.sleep(SETTLE_SECONDS)
         screen = out / f"{apk.name}.png"
         emulator_screenshot(screen, work)
