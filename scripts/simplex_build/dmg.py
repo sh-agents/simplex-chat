@@ -5,6 +5,7 @@ import hashlib
 import math
 import os
 import plistlib
+import re
 import shutil
 import stat
 import struct
@@ -30,6 +31,17 @@ LIBDMG_CLOCK = "time(NULL)"
 
 
 LIBDMG_CLOCK_CALLS = 2
+
+
+# dmg numbers each image with four calls of the unseeded rand(), in buildDmg and in convertToDMG of dmg/dmglib.c
+LIBDMG_SEGMENT_ID = re.compile(r"(fUDIFSegmentID\.data)([1-4]) = rand\(\);")
+
+
+LIBDMG_SEGMENT_ID_CALLS = 8
+
+
+# the first four values of macOS's unseeded rand(), 16807^n mod 2^31-1, which the dmgs built before had as their id
+UDIF_SEGMENT_ID = (16807, 282475249, 1622650073, 984943658)
 
 
 DMG_COMPRESSION = ("--compression", "zlib", "--level", "9")
@@ -227,12 +239,21 @@ def pin_clock(catalog: Path, epoch: str) -> None:
     catalog.write_text(text.replace(LIBDMG_CLOCK, f"((time_t) {epoch})"))
 
 
+def pin_segment_id(dmglib: Path) -> None:
+    text = dmglib.read_text()
+    if len(LIBDMG_SEGMENT_ID.findall(text)) != LIBDMG_SEGMENT_ID_CALLS or text.count("rand()") != LIBDMG_SEGMENT_ID_CALLS:
+        raise BuildError(f"expected {LIBDMG_SEGMENT_ID_CALLS} calls of rand(), each for the segment id, in {dmglib}")
+    dmglib.write_text(LIBDMG_SEGMENT_ID.sub(lambda m: f"{m[1]}{m[2]} = {UDIF_SEGMENT_ID[int(m[2]) - 1]};", text))
+
+
 def build_libdmg(work: Path) -> DmgTools:
-    """hfsplus and dmg of libdmg-hfsplus, which date what they add with SOURCE_DATE_EPOCH."""
+    """hfsplus and dmg of libdmg-hfsplus, which date what they add with SOURCE_DATE_EPOCH and number the image with
+    UDIF_SEGMENT_ID."""
     with tarfile.open(fetch_pinned(LIBDMG_URL, LIBDMG_SHA256, work / "libdmg-hfsplus.tar.gz")) as tar:
         tar.extractall(work, filter="data")
     source = work / f"libdmg-hfsplus-{LIBDMG_COMMIT}"
     pin_clock(source / "hfs/catalog.c", SOURCE_DATE_EPOCH)
+    pin_segment_id(source / "dmg/dmglib.c")
     build = source / "build"
     run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release"])
     run(["cmake", "--build", build, "--target", "hfsplus", "dmg-bin"])

@@ -15,6 +15,9 @@ from .testing import Recorder, build_script, patch_all
 HFS_2024 = 0xE1B7B100
 
 
+SEGMENT_ID_CALLS = "".join(f"koly.fUDIFSegmentID.data{n} = rand();\n" for n in range(1, 5))
+
+
 def read_ds_store(data):
     """(name, code, type, value) of the records in the single leaf of a .DS_Store, and its root block's fields."""
     space = data[4:]
@@ -86,16 +89,37 @@ class LibdmgTest(unittest.TestCase):
         with self.assertRaises(build_script.BuildError):
             build_script.pin_clock(catalog, "1704067200")
 
-    def test_libdmg_is_built_from_the_pinned_source_with_its_clock_pinned(self):
+    def test_each_segment_id_call_is_pinned_to_the_ids_of_earlier_dmgs_and_a_changed_source_is_rejected(self):
+        dmglib = self.root / "dmglib.c"
+        dmglib.write_text(SEGMENT_ID_CALLS * 2)
+        build_script.pin_segment_id(dmglib)
+        pinned = dmglib.read_text()
+        self.assertNotIn("rand()", pinned)
+        expected = "".join(f"koly.fUDIFSegmentID.data{n} = {value};\n" for n, value in enumerate(build_script.UDIF_SEGMENT_ID, 1))
+        self.assertEqual(pinned, expected * 2)
+        for changed in (SEGMENT_ID_CALLS, SEGMENT_ID_CALLS * 2 + "seed = rand();\n"):
+            dmglib.write_text(changed)
+            with self.assertRaises(build_script.BuildError):
+                build_script.pin_segment_id(dmglib)
+
+    def test_the_pinned_segment_id_is_the_minimal_standard_sequence_of_macos_rand(self):
+        state, values = 1, []
+        for _ in build_script.UDIF_SEGMENT_ID:
+            state = state * 16807 % (2**31 - 1)
+            values.append(state)
+        self.assertEqual(tuple(values), build_script.UDIF_SEGMENT_ID)
+
+    def test_libdmg_is_built_from_the_pinned_source_with_its_clock_and_id_pinned(self):
         top = f"libdmg-hfsplus-{build_script.LIBDMG_COMMIT}"
 
         def fetch(url, digest, target):
             self.assertEqual((url, digest), (build_script.LIBDMG_URL, build_script.LIBDMG_SHA256))
             with tarfile.open(target, "w:gz") as tar:
-                data = b"x = time(NULL); y = time(NULL);\n"
-                info = tarfile.TarInfo(f"{top}/hfs/catalog.c")
-                info.size = len(data)
-                tar.addfile(info, io.BytesIO(data))
+                files = {"hfs/catalog.c": b"x = time(NULL); y = time(NULL);\n", "dmg/dmglib.c": SEGMENT_ID_CALLS.encode() * 2}
+                for name, data in files.items():
+                    info = tarfile.TarInfo(f"{top}/{name}")
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
             return target
 
         recorder = Recorder()
@@ -103,6 +127,7 @@ class LibdmgTest(unittest.TestCase):
             tools = build_script.build_libdmg(self.root)
         source = self.root / top
         self.assertIn("((time_t) 1704067200)", (source / "hfs/catalog.c").read_text())
+        self.assertNotIn("rand()", (source / "dmg/dmglib.c").read_text())
         self.assertEqual(recorder.commands[-1], ["cmake", "--build", str(source / "build"), "--target", "hfsplus", "dmg-bin"])
         self.assertEqual(tools, build_script.DmgTools(source / "build/hfs/hfsplus", source / "build/dmg/dmg"))
 
