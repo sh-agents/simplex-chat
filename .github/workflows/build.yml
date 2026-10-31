@@ -87,7 +87,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       GHC_VER: 9.6.3
-      JAVA_VER: 17
     steps:
       - name: Dummy job when we have just simple variables
         if: false
@@ -997,7 +996,6 @@ jobs:
         if: matrix.should_run == true
         uses: ./.github/actions/prepare-build
         with:
-          java_ver: ${{ needs.variables.outputs.JAVA_VER }}
           ghc_ver: ${{ matrix.ghc }}
           github_ref: ${{ github.ref }}
 
@@ -1353,7 +1351,6 @@ jobs:
         id: prepare
         uses: ./.github/actions/prepare-build
         with:
-          java_ver: ${{ needs.variables.outputs.JAVA_VER }}
           ghc_ver: ${{ matrix.ghc }}
           github_ref: ${{ github.ref }}
 
