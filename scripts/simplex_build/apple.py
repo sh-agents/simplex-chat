@@ -45,8 +45,9 @@ def require_xcode() -> Path:
     return developer
 
 
-# The release builds run in a copy of the checkout here, with cabal's directory beside it: the binaries contain the paths
-# of the checkout, of OpenSSL's build in it and of cabal's package store
+# The release builds run in a copy of the checkout here, with cabal's directory and the temporary directory beside it:
+# the binaries contain the paths of the checkout, of OpenSSL's build in it and of cabal's package store, and the iOS
+# debug information those of the checkout and of the macro expansions that Swift writes in TMPDIR
 BUILD_ROOT = Path("/private/tmp/simplex-chat-build")
 
 
@@ -62,14 +63,16 @@ BUILD_TIMEZONE = "UTC"
 
 @dataclass(frozen=True, slots=True)
 class BuildRoot:
-    """The copy of the checkout that a release builds in, and an empty directory for the rest of its build."""
+    """The copy of the checkout that a release builds in, an empty directory for the rest of its build, and its
+    temporary directory."""
 
     source: Path
     work: Path
+    tmp: Path
 
 
-def build_env(root: Path) -> dict[str, str]:
-    return {"CABAL_DIR": str(root / "cabal"), "LC_ALL": BUILD_LOCALE, "TZ": BUILD_TIMEZONE}
+def build_env(root: BuildRoot) -> dict[str, str]:
+    return {"CABAL_DIR": str(BUILD_ROOT / "cabal"), "TMPDIR": str(root.tmp), "LC_ALL": BUILD_LOCALE, "TZ": BUILD_TIMEZONE}
 
 
 def clear_build_root() -> None:
@@ -85,12 +88,13 @@ def build_root(source: Path, env: Mapping[str, str]) -> Iterator[BuildRoot]:
     build_env and env set while it is used; BUILD_ROOT is removed before and after."""
     if source.is_relative_to(BUILD_ROOT):
         raise BuildError(f"{source} is in {BUILD_ROOT}, which the build replaces: build from a checkout elsewhere")
-    root = BuildRoot(BUILD_ROOT / "simplex-chat", BUILD_ROOT / "work")
+    root = BuildRoot(BUILD_ROOT / "simplex-chat", BUILD_ROOT / "work", BUILD_ROOT / "tmp")
     clear_build_root()
     root.work.mkdir(parents=True)
+    root.tmp.mkdir()
     shutil.copytree(source, root.source, symlinks=True)
     normalize_permissions(root.source)
-    settings = {**build_env(BUILD_ROOT), **env}
+    settings = {**build_env(root), **env}
     saved = {name: os.environ.get(name) for name in settings}
     umask = os.umask(BUILD_UMASK)
     os.environ.update(settings)

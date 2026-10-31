@@ -55,7 +55,7 @@ class BuildRootTest(unittest.TestCase):
         (self.source / "apps/script.sh").write_text("")
         (self.source / "apps/script.sh").chmod(0o700)
         self.fixed = self.root / "fixed"
-        self.environment = {"TZ": "Europe/London", "LC_ALL": "de_DE.UTF-8"}
+        self.environment = {"TZ": "Europe/London", "LC_ALL": "de_DE.UTF-8", "TMPDIR": "/var/folders/n6/x/T/"}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -68,13 +68,15 @@ class BuildRootTest(unittest.TestCase):
         with self.patched(), mock.patch.dict(os.environ, self.environment):
             os.environ.pop("SDKROOT", None)
             with build_script.build_root(self.source, {"SDKROOT": "/sdk"}) as root:
-                self.assertEqual(root, build_script.BuildRoot(self.fixed / "simplex-chat", self.fixed / "work"))
+                self.assertEqual(root, build_script.BuildRoot(self.fixed / "simplex-chat", self.fixed / "work", self.fixed / "tmp"))
                 self.assertEqual((root.source / "apps/file").read_text(), "source")
                 self.assertEqual(os.readlink(root.source / "link"), "apps/file")
                 modes = {name: (root.source / name).stat().st_mode & 0o777 for name in ("apps", "apps/private", "apps/script.sh")}
                 self.assertEqual(modes, {"apps": 0o755, "apps/private": 0o644, "apps/script.sh": 0o755})
                 self.assertEqual(list(root.work.iterdir()), [])
                 self.assertEqual(os.environ["CABAL_DIR"], str(self.fixed / "cabal"))
+                self.assertEqual(os.environ["TMPDIR"], str(root.tmp))
+                self.assertTrue(root.tmp.is_dir())
                 self.assertEqual((os.environ["LC_ALL"], os.environ["TZ"], os.environ["SDKROOT"]), ("en_US.UTF-8", "UTC", "/sdk"))
                 self.assertEqual(current_umask(), 0o022)
             self.assertFalse(self.fixed.exists())
