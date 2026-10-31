@@ -71,6 +71,7 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(recorder.commands[0][:4], ["sudo", "apt-get", "install", "-y"])
         self.assertEqual(msi_app, pathlib.Path("C:/Program Files/SimpleX/SimpleX.exe"))
         self.assertEqual(recorder.commands[1][:2], ["msiexec", "/i"])
+        self.assertNotIn("/", recorder.commands[1][2])
         self.assertIn("/qn", recorder.commands[1])
 
     def test_appimage_runs_without_fuse(self):

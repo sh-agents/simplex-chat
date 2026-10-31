@@ -108,7 +108,9 @@ def install_desktop(package: Path, work: Path) -> tuple[Path, dict[str, str]]:
                 run(["hdiutil", "detach", mount])
             return work / "SimpleX.app/Contents/MacOS/SimpleX", {}
         case ".msi":
-            run(["msiexec", "/i", package.resolve(), "/qn", "/l*v", work / "msiexec.log"])
+            # msiexec opens only paths with backslashes, and MSYS2's Python joins paths with slashes
+            msi, log_file = (str(path).replace("/", "\\") for path in (package.resolve(), work / "msiexec.log"))
+            run(["msiexec", "/i", msi, "/qn", "/l*v", log_file])
             return Path(os.environ["PROGRAMFILES"]) / "SimpleX/SimpleX.exe", {}
     raise BuildError(f"{package.name}: expected a .deb, .AppImage, .dmg or .msi")
 
