@@ -97,6 +97,7 @@ main = do
 #if !defined(dbPostgres)
       around (tmpTestBracket chatQueryStats agentQueryStats portBases) $ describe "names tests" chatNamesTests
       around (tmpTestBracket chatQueryStats agentQueryStats portBases) $ describe "SimpleX Directory names" directoryNameTests
+      around (tmpTestBracket chatQueryStats agentQueryStats portBases) $ describe "Remote control server" remoteServerTests
 #endif
 #if defined(dbPostgres)
       around (testBracket portBases)

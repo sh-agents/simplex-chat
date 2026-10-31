@@ -16,9 +16,11 @@ import qualified Data.Aeson as J
 import qualified Data.ByteString as B
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Lazy.Char8 as LB
+import Data.Either (isRight)
 import Data.List (find, isPrefixOf)
 import qualified Data.Map.Strict as M
 import Data.Word (Word32)
+import qualified Network.Socket as N
 import Simplex.Chat.Controller (ChatCommand (..), ChatConfig (..), versionNumber)
 import Simplex.Chat.Files (safeFileNameStr)
 import Simplex.Chat.Library.Commands (parseChatCommand)
@@ -41,6 +43,28 @@ import Test.Hspec hiding (it)
 import UnliftIO
 import UnliftIO.Concurrent
 import UnliftIO.Directory
+
+remoteServerTests :: SpecWith TestParams
+remoteServerTests = it "stops new remote host and closes its port" remoteHostStopTest
+
+remoteHostStopTest :: HasCallStack => TestParams -> IO ()
+remoteHostStopTest ps = withNewTestChat ps "desktop" aliceDesktopProfile $ \desktop -> do
+  let port = remoteTestPort desktop
+  desktop ##> ("/start remote host new port=" <> port)
+  desktop <##. "new remote host started on "
+  skipToInvitation desktop
+  void $ getTermLine desktop
+  localPortOpen port `shouldReturn` True
+  desktop ##> "/stop remote host new"
+  desktop <## "ok"
+  localPortOpen port `shouldReturn` False
+  where
+    skipToInvitation cc = getTermLine cc >>= \l -> unless (l == "Remote session invitation:") $ skipToInvitation cc
+
+localPortOpen :: N.ServiceName -> IO Bool
+localPortOpen port = do
+  addr : _ <- N.getAddrInfo (Just N.defaultHints {N.addrSocketType = N.Stream}) (Just "127.0.0.1") (Just port)
+  isRight <$> tryIO (bracket (N.openSocket addr) N.close (`N.connect` N.addrAddress addr))
 
 remoteTests :: SpecWith TestParams
 remoteTests = describe "Remote" $ do
