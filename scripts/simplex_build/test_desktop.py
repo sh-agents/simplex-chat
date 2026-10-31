@@ -17,6 +17,7 @@ class HostDesktopTest(unittest.TestCase):
         self.source, self.out = self.root / "src", self.root / "out"
         self.source.mkdir()
         self.out.mkdir()
+        self.build_root = self.root / "fixed"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -108,21 +109,30 @@ class HostDesktopTest(unittest.TestCase):
         self.app = self.root / "SimpleX.app"
         self.tools = build_script.DmgTools(self.root / "hfsplus", self.root / "dmg")
         self.keychain = self.root / "k.keychain" if signed else None
-        work = self.root / "work"
-        (work / "openssl/lib").mkdir(parents=True)
-        (work / "openssl/lib/libcrypto.a").write_bytes(b"static")
-        recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat\n", "otool -L": "\t/usr/lib/libSystem.B.dylib\n"})
+        built = self.root / "openssl-build"
+        (built / "openssl/lib").mkdir(parents=True)
+        (built / "openssl/lib/libcrypto.a").write_bytes(b"static")
+        answers = {"list-bin": f"{self.root}/dist/simplex-chat\n", "otool -L": "\t/usr/lib/libSystem.B.dylib\n"}
+        recorder = Recorder(answers={**answers, "show-sdk-path": "/X/MacOSX.sdk\n"})
         (self.root / "dist").mkdir()
         (self.root / "dist/simplex-chat").write_bytes(b"cli")
         calls = []
         self.cabal_locals = []
         self.openssl_dirs = []
-        openssl = build_script.OpenSsl(work / "openssl/include", work / "openssl/lib")
+        openssl = build_script.OpenSsl(built / "openssl/include", built / "openssl/lib")
         original_cli = build_script.build_host_cli
 
         def build_cli(source, cabal_local):
             self.cabal_locals.append(cabal_local)
             return original_cli(source, cabal_local)
+
+        def build_app(source, keychain):
+            calls.append(("app", keychain))
+            self.app_env = {name: os.environ.get(name) for name in ("CABAL_DIR", "SDKROOT", "LC_ALL", "TZ")}
+            self.app_umask = os.umask(0o077)
+            os.umask(self.app_umask)
+            self.app_cabal_local = (source / "cabal.project.local").read_text()
+            return self.app
 
         def build_dmg(tools, app, java_home, work, target):
             calls.append(("dmg", tools, app, java_home))
@@ -136,11 +146,11 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("apple_signing", return_value=signed),
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
             patch_all("apple_keychain", lambda work: contextlib.nullcontext(self.keychain)),
-            mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(work))),
+            patch_all("BUILD_ROOT", self.build_root),
             patch_all("build_mac_lib", lambda source, arch, database, work: calls.append(("lib", arch)) or libs),
             patch_all("add_vlc_mac", lambda libs, arch, work: (libs / "vlc").mkdir()),
             patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
-            patch_all("build_app", lambda source, keychain: calls.append(("app", keychain)) or self.app),
+            patch_all("build_app", build_app),
             patch_all("normalize_app", lambda app: calls.append(("normalize", app))),
             patch_all("sign_app", lambda app, keychain: calls.append(("sign", keychain))),
             patch_all("build_libdmg", return_value=self.tools),
@@ -152,12 +162,15 @@ class HostDesktopTest(unittest.TestCase):
         ):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
         self.assertEqual(sign_libs.called, signed)
-        return calls, sign_dmg, work
+        self.assertFalse(self.build_root.exists())
+        return calls, sign_dmg, self.build_root / "work"
 
     def test_macos_unsigned_build(self):
         calls, sign_dmg, work = self.build_macos(signed=False)
-        self.assertEqual(self.openssl_dirs, [self.source / "dist-openssl"])
-        self.assertIn(f"extra-lib-dirs: {self.source / 'dist-openssl/openssl-static'}", self.cabal_locals[0])
+        copy = self.build_root / "simplex-chat"
+        self.assertEqual(self.openssl_dirs, [copy / "dist-openssl"])
+        self.assertIn(f"extra-lib-dirs: {copy / 'dist-openssl/openssl-static'}", self.cabal_locals[0])
+        self.assertFalse((self.source / "cabal.project.local").exists())
         self.assertEqual(
             calls,
             [
@@ -172,7 +185,11 @@ class HostDesktopTest(unittest.TestCase):
         )
         sign_dmg.assert_not_called()
         self.assertEqual((self.out / "simplex-desktop-macos-aarch64.dmg").read_bytes(), b"dmg")
-        self.assertIn(f"extra-lib-dirs: {work / 'openssl/lib'}", (self.source / "cabal.project.local").read_text())
+        self.assertIn(f"extra-lib-dirs: {self.root / 'openssl-build/openssl/lib'}", self.app_cabal_local)
+        cabal_dir = str(self.build_root / "cabal")
+        self.assertEqual(self.app_env, {"CABAL_DIR": cabal_dir, "SDKROOT": "/X/MacOSX.sdk", "LC_ALL": "en_US.UTF-8", "TZ": "UTC"})
+        self.assertEqual(self.app_umask, 0o022)
+        self.assertNotIn(cabal_dir, os.environ.values())
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-macos-aarch64.zip", "simplex-chat-macos-aarch64", "simplex-desktop-macos-aarch64.dmg"],
@@ -187,6 +204,41 @@ class HostDesktopTest(unittest.TestCase):
         self.assertEqual(calls[-1], ("check", "simplex-desktop-macos-aarch64.dmg", True))
         self.assertEqual((self.out / "simplex-desktop-macos-aarch64.dmg").read_bytes(), b"dmg")
 
+    def test_macos_libs_are_built_in_the_copy_and_installed_in_the_checkout(self):
+        released = self.root / "libs-app"
+        released.mkdir()
+        (released / "libsimplex.dylib").write_bytes(b"lib")
+        stale = build_script.desktop_libs(self.source, "mac-aarch64")
+        stale.mkdir(parents=True)
+        (stale / "libold.dylib").write_bytes(b"old")
+        calls = []
+
+        def release(source, openssl, database, keychain, work, out):
+            calls.append(("release", source, database, keychain, work, out))
+            return released
+
+        with (
+            patch_all("run", Recorder(answers={"show-sdk-path": "/X/MacOSX.sdk\n"})),
+            patch_all("host_openssl", return_value=build_script.OpenSsl(self.root, self.root)),
+            mock.patch.object(build_script.platform, "machine", return_value="arm64"),
+            patch_all("apple_signing", return_value=False),
+            patch_all("require_xcode", return_value=XCODE_DEVELOPER),
+            patch_all("BUILD_ROOT", self.build_root),
+            patch_all("release_macos_libs", release),
+            patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args))),
+        ):
+            build_script.build_macos_libs(self.source, build_script.Database.POSTGRES, self.out, require_signing=False)
+        copy = self.build_root / "simplex-chat"
+        self.assertEqual(
+            calls,
+            [
+                ("release", copy, build_script.Database.POSTGRES, None, self.build_root / "work", self.out),
+                ("link", self.source, "mac-aarch64", "macos-arm64"),
+            ],
+        )
+        self.assertEqual(sorted(p.name for p in stale.iterdir()), ["libsimplex.dylib"])
+        self.assertFalse(self.build_root.exists())
+
     def test_macos_cli_linking_libcrypto_fails(self):
         recorder = Recorder(answers={"list-bin": f"{self.root}/cli\n", "otool -L": "\t@rpath/libcrypto.3.dylib\n"})
         with (
@@ -195,6 +247,7 @@ class HostDesktopTest(unittest.TestCase):
             mock.patch.object(build_script.platform, "machine", return_value="x86_64"),
             patch_all("apple_signing", return_value=False),
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
+            patch_all("BUILD_ROOT", self.build_root),
             patch_all("static_libcrypto", return_value=self.root),
             self.assertRaises(build_script.BuildError),
         ):

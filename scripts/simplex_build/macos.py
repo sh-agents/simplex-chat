@@ -9,14 +9,13 @@ import re
 import shutil
 import struct
 import tarfile
-import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
 from .apk_zip import LOCAL_HEADER, central_directory
-from .apple import require_xcode
-from .common import GHC, BuildError, edit_lines, fetch_pinned, run, single_dir, single_file, touch_tree, warn
+from .apple import build_root, require_xcode
+from .common import GHC, BuildError, edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file, touch_tree, warn
 from .desktop import (
     COMPOSE_ARCHES,
     DESKTOP_ENV,
@@ -406,31 +405,46 @@ def release_macos_libs(
     return libs
 
 
+def macos_sdk_env() -> dict[str, str]:
+    # GHC's links find the Command Line Tools' SDK without it, which needn't be the selected Xcode's
+    return {"SDKROOT": run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture=True).stdout.strip()}
+
+
+def install_macos_libs(libs: Path, source: Path) -> None:
+    """libs in the desktop app's libraries directory of source, linked for its Gradle build."""
+    host = macos_desktop()
+    installed = desktop_libs(source, host.libs_dir)
+    remove_tree(installed)
+    shutil.copytree(libs, installed, symlinks=True)
+    link_desktop_libs(source, host.libs_dir, f"macos-{COMPOSE_ARCHES[host.arch]}")
+
+
 def build_macos_libs(source: Path, database: Database, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
     require_xcode()
-    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
-        work = Path(tmp).resolve()
-        keychain = stack.enter_context(apple_keychain(work)) if signed else None
-        release_macos_libs(source, host_openssl(openssl_work(source)), database, keychain, work, out)
+    with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
+        keychain = stack.enter_context(apple_keychain(root.work)) if signed else None
+        openssl = host_openssl(openssl_work(root.source))
+        libs = release_macos_libs(root.source, openssl, database, keychain, root.work, out)
+        install_macos_libs(libs, source)
 
 
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     host = macos_desktop()
     signed = apple_signing(require_signing)
     require_xcode()
-    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
-        work = Path(tmp).resolve()
+    with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
+        work = root.work
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
-        openssl_dir = openssl_work(source)
+        openssl_dir = openssl_work(root.source)
         openssl = host_openssl(openssl_dir)
         static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, openssl_dir))
-        cli = build_host_cli(source, static.cabal_local())
+        cli = build_host_cli(root.source, static.cabal_local())
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        libs = release_macos_libs(source, openssl, Database.SQLITE, keychain, work, out)
+        libs = release_macos_libs(root.source, openssl, Database.SQLITE, keychain, work, out)
         add_vlc_mac(libs, host.arch, work)
-        app = build_app(source, keychain)
+        app = build_app(root.source, keychain)
         normalize_app(app)
         sign_app(app, keychain)
         dmg = work / host.desktop

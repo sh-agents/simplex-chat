@@ -34,7 +34,7 @@ OPENSSL_WINDOWS_DIR = "C:/Program Files/Common Files/SSL"
 
 
 # Release builds keep OpenSSL at one path in the checkout: cabal hashes its directories into the package ids that the
-# binaries contain, and the macOS build records its prefix there, under the runner's home
+# binaries contain, and the macOS build records its prefix there
 OPENSSL_BUILD_DIR = "dist-openssl"
 
 
