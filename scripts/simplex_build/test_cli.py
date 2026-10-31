@@ -322,3 +322,52 @@ class ReproduceTest(unittest.TestCase):
         command = build_script.Reproduce("v7.1.0", "a/b", (Target.MACOS,), (), False)
         with self.assertRaisesRegex(build_script.BuildError, "simplex-desktop-macos-aarch64.dmg"):
             self.run_reproduce(command, build_script.Platform.MACOS, ["simplex-desktop-macos-aarch64.dmg"])
+
+
+class CompareTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def file(self, name, data):
+        (self.root / name).write_bytes(data)
+        return self.root / name
+
+    def test_compare_parses_both_files_and_the_repository(self):
+        self.assertEqual(
+            build_script.parse_args(["compare", "r.dmg", "b.dmg", "--repo", "a/b"]),
+            build_script.Compare(pathlib.Path("r.dmg"), pathlib.Path("b.dmg"), "a/b"),
+        )
+        self.assertEqual(build_script.parse_args(["compare", "r", "b"]).repo, "simplex-chat/simplex-chat")
+
+    def test_files_are_compared_by_their_format(self):
+        msi, pe, other = (self.file(name, data) for name, data in (("a.msi", bytes.fromhex("d0cf11e0a1b11ae1")), ("a", b"MZ"), ("b", b"x")))
+        dmg = self.file("a.dmg", b"koly")
+        work = self.root / "work"
+        with (
+            patch_all("windows_differences", return_value=["w"]),
+            patch_all("macos_differences", return_value=["m"]) as macos,
+            patch_all("host_platform", return_value=build_script.Platform.MACOS),
+            patch_all("require_tools") as require,
+        ):
+            self.assertEqual(build_script.release_file_differences(msi, other, "a/b", work), ["w"])
+            self.assertEqual(build_script.release_file_differences(pe, other, "a/b", work), ["w"])
+            self.assertEqual(build_script.release_file_differences(other, pe, "a/b", work), ["m"])
+            self.assertEqual(build_script.release_file_differences(dmg, dmg, "a/b", work), ["m"])
+        self.assertEqual(macos.call_args.args, (dmg, dmg, "a/b", work))
+        self.assertIn("hdiutil", require.call_args.args[0])
+        with patch_all("host_platform", return_value=build_script.Platform.LINUX), self.assertRaises(build_script.BuildError):
+            build_script.release_file_differences(dmg, dmg, "a/b", work)
+
+    def test_compare_fails_on_any_difference(self):
+        released, built = self.file("cli", b"code"), self.file("cli.built", b"code")
+        with patch_all("log") as log:
+            build_script.compare(build_script.Compare(released, built, "a/b"))
+            self.assertIn("with its signature", log.call_args.args[0])
+            built.write_bytes(b"other")
+            with self.assertRaisesRegex(build_script.BuildError, "other than by its signature"):
+                build_script.compare(build_script.Compare(released, built, "a/b"))
+        self.assertIn(build_script.CODE_DIFFERS, log.call_args.args[0])
