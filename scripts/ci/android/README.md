@@ -23,7 +23,7 @@ Results are artifacts: `android-smoke-test` (numbered screenshots, the accessibi
 
 ## The emulator
 
-A Google APIs x86_64 system image of API 34 (revision 14) with KVM, on the x86_64 runner: the arm64 runner has no KVM, and Google publishes no Linux arm64 emulator. The image's ARM translation (`libndk_translation`) runs the app's arm64-v8a code, the only ABI besides armeabi-v7a the core is built for. `install-sdk.sh` installs the emulator, platform-tools and the image at pinned revisions from Google's repository, checking each archive's SHA-1 and SHA-256, and writes the AVD itself; `emulator.sh` boots it without a window. Screenshots come from the emulator console (`adb emu screenrecord screenshot`): without a window, the guest's `screencap` returns an empty or black image.
+A Google APIs x86_64 system image of API 34 (revision 14) with KVM, on the x86_64 runner: the arm64 runner has no KVM, and Google publishes no Linux arm64 emulator. The image's ARM translation (`libndk_translation`) runs the app's arm64-v8a code, the only ABI besides armeabi-v7a the core is built for. The armv7a APK of build-apps.yml runs on the API 30 image (revision 16), the last x86_64 image whose translation also runs 32-bit ARM code (`install-sdk.sh <sdk dir> 30`). `install-sdk.sh` installs the emulator, platform-tools and the image at pinned revisions from Google's repository, checking each archive's SHA-1 and SHA-256, and writes the AVD itself; `emulator.sh` boots it without a window. Screenshots come from the emulator console (`adb emu screenrecord screenshot`): without a window, the guest's `screencap` returns an empty or black image.
 
 ## Scripts
 

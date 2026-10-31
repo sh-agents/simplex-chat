@@ -95,41 +95,46 @@ jobs:
           if-no-files-found: error
 
   android-test:
-    name: Android APKs in the emulator
+    name: Android ${{ matrix.arch }} APK in the emulator
     needs: android
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            api: 34
+          - arch: armv7a
+            api: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Download APKs
+      - name: Download APK
         uses: actions/download-artifact@v8
         with:
-          pattern: android-*-unsigned
+          name: android-${{ matrix.arch }}-unsigned
           path: ${{ runner.temp }}/apks
 
       # the emulator's qemu needs libpulse0 and libegl1
       - name: Install emulator and system image
         run: |
           sudo apt-get install -y libpulse0 libegl1
-          scripts/ci/android/install-sdk.sh "$RUNNER_TEMP/android-sdk"
+          scripts/ci/android/install-sdk.sh "$RUNNER_TEMP/android-sdk" ${{ matrix.api }}
 
       - name: Boot emulator
         run: scripts/ci/android/emulator.sh start "$RUNNER_TEMP/screens"
 
       # the unsigned APKs are signed with a throwaway key, which Android needs to install them
       - name: Smoke test
-        run: |
-          for apk in "$RUNNER_TEMP"/apks/*/simplex-*.apk; do
-            python3 scripts/simplex-chat-build.py test apk "$apk" --out "$RUNNER_TEMP/screens"
-          done
+        run: python3 scripts/simplex-chat-build.py test apk "$RUNNER_TEMP/apks/simplex-${{ matrix.arch }}.apk" --out "$RUNNER_TEMP/screens"
 
       - name: Upload screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: screens-android
+          name: screens-android-${{ matrix.arch }}
           path: ${{ runner.temp }}/screens
           retention-days: 30
           if-no-files-found: ignore
