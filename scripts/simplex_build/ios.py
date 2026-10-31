@@ -1,5 +1,6 @@
 """The iOS archive and core libraries."""
 
+import os
 import plistlib
 import re
 import shutil
@@ -27,7 +28,7 @@ IOS_PROJECT = "apps/ios/SimpleX.xcodeproj"
 IOS_SCHEME = "SimpleX (iOS)"
 
 
-IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "ditto", "git")
+IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "git")
 
 
 IOS_LIBRARIES = "apps/ios/Libraries"
@@ -251,6 +252,29 @@ def commit_epoch(source: Path) -> str:
     return run(["git", "-C", source, "log", "-1", "--format=%ct"], capture=True).stdout.strip()
 
 
+def zip_tree(root: Path, target: Path, epoch: str) -> None:
+    """root under its own name, as ditto --keepParent zips it, in name order, with epoch's date and normalized modes."""
+    date_time = time.gmtime(int(epoch))[:6]
+    paths = [root]
+    for directory, dirs, files in os.walk(root):
+        paths += [Path(directory, name) for name in dirs + files]
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+        for path in sorted(paths):
+            name = path.relative_to(root.parent).as_posix()
+            mode = path.lstat().st_mode
+            kind = stat.S_IFMT(mode)
+            permissions = 0o755 if kind == stat.S_IFDIR or mode & 0o111 else 0o644
+            info = zipfile.ZipInfo(f"{name}/" if kind == stat.S_IFDIR else name, date_time)
+            info.external_attr = (kind | permissions) << 16
+            if kind == stat.S_IFREG:
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.file_size = path.stat().st_size
+                with path.open("rb") as source, z.open(info, "w") as entry:
+                    shutil.copyfileobj(source, entry)
+            else:
+                z.writestr(info, os.readlink(path) if kind == stat.S_IFLNK else b"")
+
+
 def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) -> None:
     """The archive and the Nix core package it links, with the brand assets of art, the simplex-chat-art checkout, or
     else with the default icons."""
@@ -308,4 +332,4 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         run(["plutil", "-replace", "ApplicationProperties.Team", "-string", team, archive / "Info.plist"])
         creation_date = time.strftime(PLUTIL_DATE_FORMAT, time.gmtime(int(epoch)))
         run(["plutil", "-replace", "CreationDate", "-date", creation_date, archive / "Info.plist"])
-        run(["ditto", "-c", "-k", "--keepParent", archive, out / "SimpleX.xcarchive.zip"])
+        zip_tree(archive, out / "SimpleX.xcarchive.zip", epoch)

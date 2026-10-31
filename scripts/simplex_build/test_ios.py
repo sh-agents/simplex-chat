@@ -1,5 +1,6 @@
 import os
 import pathlib
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -136,15 +137,16 @@ class IosArchiveTest(unittest.TestCase):
                 apple.commands.append(args)
                 return mock.Mock(returncode=0, stdout="    DEVELOPMENT_TEAM = 5NN7GUYB6T\n    IPHONEOS_DEPLOYMENT_TARGET = 15.0\n")
             elif args[:2] == ["xcodebuild", "archive"]:
+                archive = pathlib.Path(args[args.index("-archivePath") + 1])
                 self.bridging_header_mtime = (source / "apps/ios/SimpleXChat/SimpleX.h").stat().st_mtime
-                app = pathlib.Path(args[args.index("-archivePath") + 1]) / "Products/Applications/SimpleX.app"
+                app = archive / "Products/Applications/SimpleX.app"
                 for appex in ("SimpleX NSE", "SimpleX SE"):
                     (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
+                (app / "SimpleX").write_bytes(b"app")
+                (archive / "Info.plist").write_bytes(b"plist")
             elif args[0] == "git":
                 apple.commands.append(args)
                 return mock.Mock(returncode=0, stdout=f"{COMMIT_EPOCH}\n")
-            elif args[0] == "ditto":
-                pathlib.Path(args[-1]).write_bytes(b"archive")
             return apple(args, cwd, env, input, check, capture)
 
         with (
@@ -167,22 +169,28 @@ class IosArchiveTest(unittest.TestCase):
         self.assertEqual(
             [c[0] for c in commands][:6], ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "git", "xcodebuild"]
         )
-        self.assertEqual(self.bridging_header_mtime, COMMIT_EPOCH)
         archive = next(c for c in commands if c[:2] == ["xcodebuild", "archive"])
         self.assertIn("CODE_SIGNING_ALLOWED=NO", archive)
         signed = [c[-1] for c in commands if c[0] == "codesign" and "--entitlements" in c and "-d" not in c]
         self.assertEqual([pathlib.Path(p).name for p in signed], ["SimpleX NSE.appex", "SimpleX SE.appex", "SimpleX.app"])
         self.assertIn(["plutil", "-replace", "ApplicationProperties.Team", "-string", "5NN7GUYB6T"], [c[:5] for c in commands])
         self.assertIn(["plutil", "-replace", "CreationDate", "-date", "2023-11-14T22:13:20Z"], [c[:5] for c in commands])
-        self.assertEqual((self.out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
+        self.assertEqual(self.bridging_header_mtime, COMMIT_EPOCH)
+        self.assert_archive_zip()
         self.assertEqual((self.out / build_script.IOS_CORE_ZIP).read_bytes(), b"core")
+
+    def assert_archive_zip(self):
+        with zipfile.ZipFile(self.out / "SimpleX.xcarchive.zip") as z:
+            self.assertEqual(z.namelist()[0], "SimpleX.xcarchive/")
+            self.assertIn("SimpleX.xcarchive/Products/Applications/SimpleX.app/SimpleX", z.namelist())
+            self.assertEqual({i.date_time for i in z.infolist()}, {(2023, 11, 14, 22, 13, 20)})
 
     def test_without_the_art_checkout_the_archive_has_the_default_icons(self):
         commands, warn = self.build(None)
         self.assertIn("default icons", warn.call_args.args[0])
         self.assertFalse((self.source / "apps/ios/Local.xcconfig").exists())
         self.assertNotIn("scripts/ios/copy-assets.sh", [c[0] for c in commands])
-        self.assertEqual((self.out / "SimpleX.xcarchive.zip").read_bytes(), b"archive")
+        self.assert_archive_zip()
 
     def test_art_checkout_without_the_assets_fails(self):
         with self.assertRaises(build_script.BuildError):
@@ -309,3 +317,43 @@ class ReproducibleArchiveTest(unittest.TestCase):
         with patch_all("run", recorder):
             self.assertEqual(build_script.commit_epoch(self.root), "1700000000")
         self.assertEqual(recorder.commands, [["git", "-C", str(self.root), "log", "-1", "--format=%ct"]])
+
+    def make_archive(self, group_writable):
+        archive = self.root / "build" / "SimpleX.xcarchive"
+        app = archive / "Products/Applications/SimpleX.app"
+        (app / "Frameworks/SimpleXChat.framework").mkdir(parents=True)
+        (app / "SimpleX").write_bytes(b"binary" * 100)
+        (app / "SimpleX").chmod(0o775 if group_writable else 0o755)
+        (app / "Info.plist").write_bytes(b"plist")
+        (app / "Info.plist").chmod(0o664 if group_writable else 0o644)
+        (app / "Frameworks/SimpleXChat.framework/SimpleXChat").write_bytes(b"framework")
+        (app / "Frameworks/Current").symlink_to("SimpleXChat.framework")
+        (archive / "Info.plist").write_bytes(b"archive plist")
+        return archive
+
+    def test_zip_tree_does_not_depend_on_times_or_umask(self):
+        first, second = self.root / "first.zip", self.root / "second.zip"
+        build_script.zip_tree(self.make_archive(group_writable=False), first, "1700000000")
+        shutil.rmtree(self.root / "build")
+        archive = self.make_archive(group_writable=True)
+        build_script.touch_tree(archive, "1800000000")
+        build_script.zip_tree(archive, second, "1700000000")
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_zip_tree_keeps_the_parent_name_modes_and_symlinks(self):
+        target = self.root / "SimpleX.xcarchive.zip"
+        build_script.zip_tree(self.make_archive(group_writable=True), target, "1700000000")
+        app = "SimpleX.xcarchive/Products/Applications/SimpleX.app"
+        with zipfile.ZipFile(target) as z:
+            infos = {i.filename: i for i in z.infolist()}
+            self.assertEqual(z.namelist(), sorted(z.namelist(), key=lambda name: name.rstrip("/").split("/")))
+            self.assertEqual(z.namelist()[0], "SimpleX.xcarchive/")
+            self.assertEqual({i.date_time for i in infos.values()}, {(2023, 11, 14, 22, 13, 20)})
+            modes = {name: oct(info.external_attr >> 16) for name, info in infos.items()}
+            self.assertEqual(modes["SimpleX.xcarchive/"], "0o40755")
+            self.assertEqual(modes[f"{app}/SimpleX"], "0o100755")
+            self.assertEqual(modes[f"{app}/Info.plist"], "0o100644")
+            self.assertEqual(modes[f"{app}/Frameworks/Current"], "0o120755")
+            self.assertEqual(z.read(f"{app}/Frameworks/Current"), b"SimpleXChat.framework")
+            self.assertEqual(z.read(f"{app}/SimpleX"), b"binary" * 100)
+            self.assertEqual(infos[f"{app}/SimpleX"].compress_type, zipfile.ZIP_DEFLATED)
