@@ -130,6 +130,7 @@ class IosArchiveTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = pathlib.Path(self.tmp.name)
         self.source, self.art, self.out = root / "src", root / "art", root / "out"
+        self.build_root = root / "fixed"
         (self.art / "ios/Assets.xcassets/logo.imageset").mkdir(parents=True)
         for name in ("SimpleX NSE", "SimpleX SE"):
             (self.source / f"apps/ios/{name}").mkdir(parents=True)
@@ -148,7 +149,8 @@ class IosArchiveTest(unittest.TestCase):
     def build(self, art):
         """build_ios_archive with art, against stand-ins of nix, Xcode and codesign; returns their commands and warn."""
         apple = FakeApple()
-        source = self.source
+        source = self.build_root / "simplex-chat"
+        self.xcconfig = None
 
         def fake_run(args, cwd=None, env=None, input=None, check=True, capture=False, title=None):
             args = [str(a) for a in args]
@@ -165,6 +167,9 @@ class IosArchiveTest(unittest.TestCase):
             elif args[:2] == ["xcodebuild", "archive"]:
                 archive = pathlib.Path(args[args.index("-archivePath") + 1])
                 self.bridging_header_mtime = (source / "apps/ios/SimpleXChat/SimpleX.h").stat().st_mtime
+                xcconfig = source / "apps/ios/Local.xcconfig"
+                self.xcconfig = xcconfig.read_text() if xcconfig.exists() else None
+                self.cwd = cwd
                 app = archive / "Products/Applications/SimpleX.app"
                 for appex in ("SimpleX NSE", "SimpleX SE"):
                     (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
@@ -181,23 +186,28 @@ class IosArchiveTest(unittest.TestCase):
             patch_all("nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
             patch_all("install_ios_libs") as install_libs,
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
+            patch_all("BUILD_ROOT", self.build_root),
             patch_all("warn") as warn,
         ):
-            build_script.build_ios_archive(source, art, self.out, install=False)
+            build_script.build_ios_archive(self.source, art, self.out, install=False)
+        self.assertEqual(install_libs.call_args.args[0], source)
         self.assertEqual(install_libs.call_args.args[1].name, build_script.IOS_CORE_ZIP)
+        self.assertEqual(self.cwd, source)
+        self.assertFalse(self.build_root.exists())
         return apple.commands, warn
 
     def test_build_flow(self):
         commands, warn = self.build(self.art)
         warn.assert_not_called()
-        xcconfig = (self.source / "apps/ios/Local.xcconfig").read_text()
-        self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", xcconfig)
-        self.assertIn(f"SIMPLEX_ASSETS_DIR = {self.art}", xcconfig)
+        self.assertIn("SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS", self.xcconfig)
+        self.assertIn(f"SIMPLEX_ASSETS_DIR = {self.build_root / 'work/simplex-chat-art'}", self.xcconfig)
+        self.assertFalse((self.source / "apps/ios/Local.xcconfig").exists())
         self.assertEqual(
             [c[0] for c in commands][:6], ["nix", "scripts/ios/copy-assets.sh", "xcodebuild", "otool", "git", "xcodebuild"]
         )
         archive = next(c for c in commands if c[:2] == ["xcodebuild", "archive"])
         self.assertIn("CODE_SIGNING_ALLOWED=NO", archive)
+        self.assertEqual(archive[archive.index("-derivedDataPath") + 1], str(self.build_root / "work/DerivedData"))
         signed = [c[-1] for c in commands if c[0] == "codesign" and "--entitlements" in c and "-d" not in c]
         self.assertEqual([pathlib.Path(p).name for p in signed], ["SimpleX NSE.appex", "SimpleX SE.appex", "SimpleX.app"])
         self.assertIn(["plutil", "-replace", "ApplicationProperties.Team", "-string", "5NN7GUYB6T"], [c[:5] for c in commands])
@@ -215,7 +225,7 @@ class IosArchiveTest(unittest.TestCase):
     def test_without_the_art_checkout_the_archive_has_the_default_icons(self):
         commands, warn = self.build(None)
         self.assertIn("default icons", warn.call_args.args[0])
-        self.assertFalse((self.source / "apps/ios/Local.xcconfig").exists())
+        self.assertIsNone(self.xcconfig)
         self.assertNotIn("scripts/ios/copy-assets.sh", [c[0] for c in commands])
         self.assert_archive_zip()
 

@@ -11,7 +11,7 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from .apple import require_xcode
+from .apple import build_root, require_xcode
 from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
 from .macho import simulator_archive
 from .nix import install_nix, nix_env
@@ -72,6 +72,10 @@ package direct-sqlcipher
 package entropy
     flags: +DoNotGetEntropy
 """
+
+
+# where the build copies the simplex-chat-art checkout, in its work directory
+IOS_ART_COPY = "simplex-chat-art"
 
 
 IOS_LOCAL_XCCONFIG = "SIMPLEX_ASSETS_DIR = {art}\nSWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SIMPLEX_ASSETS\n"
@@ -284,31 +288,33 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
     elif not (art / "ios/Assets.xcassets").is_dir():
         raise BuildError(f"no ios/Assets.xcassets in {art}")
     require_xcode()
-    with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp)
+    with build_root(source, {}) as root:
+        work = root.work
         if install:
             install_nix(work)
-        run(["nix", "build", "-L", "--out-link", work / "core", IOS_CORE_JOB], cwd=source, env=nix_env())
-        install_ios_libs(source, work / "core" / IOS_CORE_ZIP, work)
+        run(["nix", "build", "-L", "--out-link", work / "core", IOS_CORE_JOB], cwd=root.source, env=nix_env())
+        install_ios_libs(root.source, work / "core" / IOS_CORE_ZIP, work)
         # the simulator test builds the app with this core, relabelled for the simulator by install libs ios
         shutil.copy(work / "core" / IOS_CORE_ZIP, out / IOS_CORE_ZIP)
 
         if art is not None:
             # The brand assets, as release-mobile.py adds them: Release.xcconfig includes Local.xcconfig, which turns on
             # SIMPLEX_ASSETS. copy-assets.sh runs first, as its build phase runs after the extensions' catalogs are built.
-            (source / "apps/ios/Local.xcconfig").write_text(IOS_LOCAL_XCCONFIG.format(art=art))
-            run(["scripts/ios/copy-assets.sh", art], cwd=source)
-            if not list((source / "apps/ios/Shared/SimpleXAssets.xcassets").glob("*.imageset")):
+            assets = work / IOS_ART_COPY
+            shutil.copytree(art, assets, symlinks=True)
+            (root.source / "apps/ios/Local.xcconfig").write_text(IOS_LOCAL_XCCONFIG.format(art=assets))
+            run(["scripts/ios/copy-assets.sh", assets], cwd=root.source)
+            if not list((root.source / "apps/ios/Shared/SimpleXAssets.xcassets").glob("*.imageset")):
                 raise BuildError(f"copy-assets.sh copied no imagesets from {art}")
 
         xcode = ["-project", IOS_PROJECT, "-scheme", IOS_SCHEME, "-configuration", "Release"]
-        settings_output = run(["xcodebuild", "-showBuildSettings", *xcode], cwd=source, capture=True).stdout
+        settings_output = run(["xcodebuild", "-showBuildSettings", *xcode], cwd=root.source, capture=True).stdout
         settings = build_settings(settings_output, ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
         team = settings["DEVELOPMENT_TEAM"]
-        check_minimum_versions(source, settings["IPHONEOS_DEPLOYMENT_TARGET"])
-        epoch = commit_epoch(source)
+        check_minimum_versions(root.source, settings["IPHONEOS_DEPLOYMENT_TARGET"])
+        epoch = commit_epoch(root.source)
         # the modules that Swift embeds in the dSYMs record the modification time of the bridging header
-        touch_tree(source / "apps/ios", epoch)
+        touch_tree(root.source / "apps/ios", epoch)
 
         # Xcode refuses ad-hoc signing for iOS devices ("Ad Hoc code signing is not allowed with SDK"), so the archive
         # is built unsigned and its bundles are signed after.
@@ -318,17 +324,18 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
                 "xcodebuild", "archive", "-quiet", *xcode,
                 "-destination", "generic/platform=iOS",
                 "-archivePath", archive,
+                "-derivedDataPath", work / "DerivedData",
                 "-onlyUsePackageVersionsFromResolvedFile",
                 "-skipPackagePluginValidation",
                 "-skipMacroValidation",
                 "CODE_SIGNING_ALLOWED=NO",
             ],
-            cwd=source,
+            cwd=root.source,
         )
         app = archive / "Products/Applications/SimpleX.app"
         for appex in sorted((app / "PlugIns").glob("*.appex")):
-            sign_bundle(appex, source / f"apps/ios/{appex.stem}/{appex.stem}.entitlements", team, work)
-        sign_bundle(app, source / f"apps/ios/{IOS_SCHEME}.entitlements", team, work)
+            sign_bundle(appex, root.source / f"apps/ios/{appex.stem}/{appex.stem}.entitlements", team, work)
+        sign_bundle(app, root.source / f"apps/ios/{IOS_SCHEME}.entitlements", team, work)
         run(["codesign", "--verify", "--deep", "--strict", app])
         # the team Xcode records when it signs an archive, which Organizer shows and distributes for
         run(["plutil", "-replace", "ApplicationProperties.Team", "-string", team, archive / "Info.plist"])
