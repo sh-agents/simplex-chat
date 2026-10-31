@@ -29,6 +29,7 @@ LINUX_JAVA_OPTIONS = "-Dskiko.renderApi=SOFTWARE"
 DESKTOP_WINDOW_TITLE = "SimpleX"
 ANDROID_PACKAGE = "chat.simplex.app"
 ANDROID_ACTIVITY = f"{ANDROID_PACKAGE}/.MainActivity"
+ANDROID_SCREENSHOT = "/data/local/tmp/screen.png"
 # Screenshots with fewer colours are blank, or show only a background
 MIN_SCREENSHOT_COLOURS = 16
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -118,14 +119,11 @@ def install_desktop(package: Path, work: Path) -> tuple[Path, dict[str, str]]:
 def window_open(process: subprocess.Popen[bytes], env: Mapping[str, str]) -> bool:
     if process.poll() is not None:
         raise BuildError(f"the app exited with {process.returncode} before opening its window")
-    match host_platform():
-        case Platform.LINUX:
-            search = ["xdotool", "search", "--onlyvisible", "--name", f"^{DESKTOP_WINDOW_TITLE}$"]
-            return run(search, env=env, check=False, capture=True).returncode == 0
-        case Platform.WINDOWS:
-            handle = f"(Get-Process -Id {process.pid}).MainWindowHandle"
-            return run(["powershell", "-NoProfile", "-Command", handle], check=False, capture=True).stdout.strip() not in ("", "0")
-    # macOS lets only apps with the accessibility permission list other apps' windows
+    if host_platform() == Platform.LINUX:
+        search = ["xdotool", "search", "--onlyvisible", "--name", f"^{DESKTOP_WINDOW_TITLE}$"]
+        return run(search, env=env, check=False, capture=True).returncode == 0
+    # macOS lists other apps' windows only to apps with the accessibility permission, and on GitHub's Windows runners
+    # the app's process has no main window handle: the screenshot shows the window
     return True
 
 
@@ -200,8 +198,9 @@ def test_apk(apk: Path, out: Path) -> None:
     run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
     time.sleep(SETTLE_SECONDS)
     screen = out / f"{apk.name}.png"
-    run(["adb", "shell", "screencap", "-p", "/sdcard/screen.png"])
-    run(["adb", "pull", "/sdcard/screen.png", screen])
+    # the shell user can always write here, unlike to /sdcard
+    run(["adb", "shell", "screencap", "-p", ANDROID_SCREENSHOT])
+    run(["adb", "pull", ANDROID_SCREENSHOT, screen])
     if not run(["adb", "shell", "pidof", ANDROID_PACKAGE], check=False, capture=True).stdout.strip():
         logcat = run(["adb", "logcat", "-d", "-t", "200"], check=False, capture=True).stdout
         record(out, f"{apk.name}.logcat", logcat)
