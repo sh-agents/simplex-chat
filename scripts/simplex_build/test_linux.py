@@ -29,6 +29,20 @@ class DesktopTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def release_workflow(self, text):
+        workflow = self.source / ".github/workflows/build.yml"
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        workflow.write_text(text)
+        return build_script.linux_container(self.source, JAMMY_ARM, self.root).run_args
+
+    def test_container_keeps_the_cabal_store_where_the_release_workflow_does(self):
+        run_args = self.release_workflow("docker run -t -d \\\n  -e CABAL_DIR=/home/builder/.cabal \\\n  --name builder\n")
+        self.assertEqual(run_args[-2:], ["-e", "CABAL_DIR=/home/builder/.cabal"])
+
+    def test_container_of_a_release_before_cabal_dir_uses_cabal_default(self):
+        run_args = self.release_workflow("docker run -t -d \\\n  --name builder\n")
+        self.assertFalse(any("CABAL_DIR" in arg for arg in run_args))
+
     def test_files_of_each_image(self):
         self.assertEqual(
             build_script.desktop_files(JAMMY),

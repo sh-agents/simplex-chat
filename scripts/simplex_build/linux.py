@@ -71,6 +71,12 @@ APPIMAGE_IMAGE = "22.04"
 DESKTOP_CABAL_LOCAL = "ignore-project: False\npackage direct-sqlcipher\n    flags: +openssl"
 
 
+CABAL_DIR = "/home/builder/.cabal"
+
+
+RELEASE_WORKFLOW = ".github/workflows/build.yml"
+
+
 def install_linux_libs(source: Path, package: Path) -> None:
     arch = platform.machine()
     extract_flat(package, desktop_libs(source, f"linux-{arch}"), "libs/")
@@ -298,12 +304,20 @@ def linux_image(version: str, machine: str) -> UbuntuImage:
     raise BuildError(f"no Ubuntu {version} image for {machine}")
 
 
+def cabal_dir_args(source: Path) -> list[str]:
+    """The cabal directory of source's release builds: CABAL_DIR since v7.1.0-beta.7, before it cabal's default
+    ~/.local/state/cabal; the binaries contain the path of its package store."""
+    if f"CABAL_DIR={CABAL_DIR}" in (source / RELEASE_WORKFLOW).read_text():
+        return ["-e", f"CABAL_DIR={CABAL_DIR}"]
+    return []
+
+
 def linux_container(source: Path, image: UbuntuImage, work: Path) -> Container:
     return Container(
         source,
         {source: PROJECT, work: OUT},
         build_args={"TAG": image.version, "HASH": image.digest, "GHC": GHC},
-        run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined"],
+        run_args=["--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor:unconfined", *cabal_dir_args(source)],
     )
 
 
