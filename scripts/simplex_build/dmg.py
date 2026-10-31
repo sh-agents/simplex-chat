@@ -44,6 +44,16 @@ LIBDMG_SEGMENT_ID_CALLS = 8
 UDIF_SEGMENT_ID = (16807, 282475249, 1622650073, 984943658)
 
 
+# dmg build compresses with the zlib that CMake finds, which is the SDK's unless it is given
+ZLIB_VERSION = "1.3.1"
+
+
+ZLIB_URL = f"https://github.com/madler/zlib/releases/download/v{ZLIB_VERSION}/zlib-{ZLIB_VERSION}.tar.gz"
+
+
+ZLIB_SHA256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+
+
 DMG_COMPRESSION = ("--compression", "zlib", "--level", "9")
 
 
@@ -246,18 +256,45 @@ def pin_segment_id(dmglib: Path) -> None:
     dmglib.write_text(LIBDMG_SEGMENT_ID.sub(lambda m: f"{m[1]}{m[2]} = {UDIF_SEGMENT_ID[int(m[2]) - 1]};", text))
 
 
+def build_zlib(work: Path) -> Path:
+    """The pinned zlib, only its static library, installed in the directory that it returns."""
+    with tarfile.open(fetch_pinned(ZLIB_URL, ZLIB_SHA256, work / "zlib.tar.gz")) as tar:
+        tar.extractall(work, filter="data")
+    source = work / f"zlib-{ZLIB_VERSION}"
+    prefix = work / "zlib"
+    run(["./configure", "--static", f"--prefix={prefix}"], cwd=source)
+    run(["make", "install"], cwd=source)
+    return prefix
+
+
+def check_static_zlib(tool: Path, dependencies: str) -> None:
+    """dependencies: what otool -L prints of the tool."""
+    if "libz." in dependencies:
+        raise BuildError(f"{tool.name} loads the system's zlib, instead of linking the pinned zlib statically")
+
+
 def build_libdmg(work: Path) -> DmgTools:
-    """hfsplus and dmg of libdmg-hfsplus, which date what they add with SOURCE_DATE_EPOCH and number the image with
-    UDIF_SEGMENT_ID."""
+    """hfsplus and dmg of libdmg-hfsplus, linked with the pinned zlib, which date what they add with SOURCE_DATE_EPOCH and
+    number the image with UDIF_SEGMENT_ID."""
+    zlib = build_zlib(work)
     with tarfile.open(fetch_pinned(LIBDMG_URL, LIBDMG_SHA256, work / "libdmg-hfsplus.tar.gz")) as tar:
         tar.extractall(work, filter="data")
     source = work / f"libdmg-hfsplus-{LIBDMG_COMMIT}"
     pin_clock(source / "hfs/catalog.c", SOURCE_DATE_EPOCH)
     pin_segment_id(source / "dmg/dmglib.c")
     build = source / "build"
-    run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release"])
+    zlib_args = [
+        f"-DZLIB_INCLUDE_DIR={zlib / 'include'}",
+        f"-DZLIB_LIBRARY={zlib / 'lib/libz.a'}",
+        # the CMakeLists link zlib by its name, z, which the linker looks for in -L directories before the SDK's
+        f"-DCMAKE_EXE_LINKER_FLAGS=-L{zlib / 'lib'}",
+    ]
+    run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release", *zlib_args])
     run(["cmake", "--build", build, "--target", "hfsplus", "dmg-bin"])
-    return DmgTools(build / "hfs/hfsplus", build / "dmg/dmg")
+    tools = DmgTools(build / "hfs/hfsplus", build / "dmg/dmg")
+    for tool in (tools.hfsplus, tools.dmg):
+        check_static_zlib(tool, run(["otool", "-L", tool], capture=True).stdout)
+    return tools
 
 
 def hfs_date(epoch: str) -> int:

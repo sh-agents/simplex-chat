@@ -109,27 +109,46 @@ class LibdmgTest(unittest.TestCase):
             values.append(state)
         self.assertEqual(tuple(values), build_script.UDIF_SEGMENT_ID)
 
-    def test_libdmg_is_built_from_the_pinned_source_with_its_clock_and_id_pinned(self):
-        top = f"libdmg-hfsplus-{build_script.LIBDMG_COMMIT}"
+    def fetch_sources(self, url, digest, target):
+        """The libdmg and zlib tarballs, with the files that the build edits."""
+        pinned = {
+            build_script.LIBDMG_URL: (build_script.LIBDMG_SHA256, f"libdmg-hfsplus-{build_script.LIBDMG_COMMIT}"),
+            build_script.ZLIB_URL: (build_script.ZLIB_SHA256, f"zlib-{build_script.ZLIB_VERSION}"),
+        }
+        self.assertEqual(digest, pinned[url][0])
+        top = pinned[url][1]
+        files = {"hfs/catalog.c": b"x = time(NULL); y = time(NULL);\n", "dmg/dmglib.c": SEGMENT_ID_CALLS.encode() * 2}
+        with tarfile.open(target, "w:gz") as tar:
+            for name, data in (files if url == build_script.LIBDMG_URL else {"configure": b""}).items():
+                info = tarfile.TarInfo(f"{top}/{name}")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return target
 
-        def fetch(url, digest, target):
-            self.assertEqual((url, digest), (build_script.LIBDMG_URL, build_script.LIBDMG_SHA256))
-            with tarfile.open(target, "w:gz") as tar:
-                files = {"hfs/catalog.c": b"x = time(NULL); y = time(NULL);\n", "dmg/dmglib.c": SEGMENT_ID_CALLS.encode() * 2}
-                for name, data in files.items():
-                    info = tarfile.TarInfo(f"{top}/{name}")
-                    info.size = len(data)
-                    tar.addfile(info, io.BytesIO(data))
-            return target
-
+    def test_libdmg_is_built_from_the_pinned_source_with_its_clock_and_id_pinned_and_the_pinned_zlib(self):
         recorder = Recorder()
-        with patch_all("fetch_pinned", fetch), patch_all("run", recorder):
+        with patch_all("fetch_pinned", self.fetch_sources), patch_all("run", recorder):
             tools = build_script.build_libdmg(self.root)
-        source = self.root / top
+        source = self.root / f"libdmg-hfsplus-{build_script.LIBDMG_COMMIT}"
+        zlib = self.root / "zlib"
         self.assertIn("((time_t) 1704067200)", (source / "hfs/catalog.c").read_text())
         self.assertNotIn("rand()", (source / "dmg/dmglib.c").read_text())
-        self.assertEqual(recorder.commands[-1], ["cmake", "--build", str(source / "build"), "--target", "hfsplus", "dmg-bin"])
+        self.assertEqual(recorder.commands[:2], [["./configure", "--static", f"--prefix={zlib}"], ["make", "install"]])
+        configure = recorder.commands[2]
+        self.assertEqual(configure[:5], ["cmake", "-S", str(source), "-B", str(source / "build")])
+        self.assertIn(f"-DZLIB_LIBRARY={zlib}/lib/libz.a", configure)
+        self.assertIn(f"-DZLIB_INCLUDE_DIR={zlib}/include", configure)
+        self.assertIn(f"-DCMAKE_EXE_LINKER_FLAGS=-L{zlib}/lib", configure)
+        self.assertEqual(recorder.commands[3], ["cmake", "--build", str(source / "build"), "--target", "hfsplus", "dmg-bin"])
+        self.assertEqual(recorder.commands[4:], [["otool", "-L", str(tools.hfsplus)], ["otool", "-L", str(tools.dmg)]])
         self.assertEqual(tools, build_script.DmgTools(source / "build/hfs/hfsplus", source / "build/dmg/dmg"))
+
+    def test_a_tool_that_loads_the_system_zlib_fails(self):
+        system = "dmg:\n\t/usr/lib/libz.1.dylib (compatibility version 1.0.0)\n\t/usr/lib/libSystem.B.dylib\n"
+        recorder = Recorder(answers={"otool -L": system})
+        with patch_all("fetch_pinned", self.fetch_sources), patch_all("run", recorder), self.assertRaises(build_script.BuildError):
+            build_script.build_libdmg(self.root)
+        build_script.check_static_zlib(pathlib.Path("dmg"), "dmg:\n\t/usr/lib/libbz2.1.0.dylib\n\t/usr/lib/libSystem.B.dylib\n")
 
 
 class HfsTest(unittest.TestCase):
