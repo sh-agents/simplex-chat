@@ -29,7 +29,10 @@ OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
 
 
 # the linker writes the time of the link into each executable and DLL unless told not to
-WINDOWS_NO_TIMESTAMP = "-optl-Wl,--no-insert-timestamp"
+LINKER_NO_TIMESTAMP = "-Wl,--no-insert-timestamp"
+
+
+WINDOWS_NO_TIMESTAMP = f"-optl{LINKER_NO_TIMESTAMP}"
 
 
 def disable_ghc_lld() -> None:
@@ -105,5 +108,6 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         assets = f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"
         # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's
         multiplatform = source / "apps/multiplatform"
-        run([multiplatform / "gradlew.bat", assets, "packageMsi"], cwd=multiplatform)
+        # CMake links libapp-lib.dll with LDFLAGS
+        run([multiplatform / "gradlew.bat", assets, "packageMsi"], cwd=multiplatform, env={"LDFLAGS": LINKER_NO_TIMESTAMP})
         shutil.copy(single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi"), out / host.desktop)

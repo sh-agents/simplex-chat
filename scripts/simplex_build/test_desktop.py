@@ -231,7 +231,8 @@ class HostDesktopTest(unittest.TestCase):
         self.assertEqual(calls, [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64")])
         self.assertEqual(openssl_dirs, [self.source / "dist-openssl"])
         multiplatform = self.source / "apps/multiplatform"
-        self.assertIn([str(multiplatform / "gradlew.bat"), "-Psimplex.assets.dir=../../assets", "packageMsi"], recorder.commands)
+        gradle = recorder.commands.index([str(multiplatform / "gradlew.bat"), "-Psimplex.assets.dir=../../assets", "packageMsi"])
+        self.assertEqual(recorder.envs[gradle], {"LDFLAGS": "-Wl,--no-insert-timestamp"})
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-windows-x86_64.zip", "simplex-chat-windows-x86-64", "simplex-desktop-windows-x86_64.msi"],
