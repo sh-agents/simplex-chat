@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .common import BuildError, fetch_pinned, log, run, warn
+from .macho import simulator_archive
 from .nix import install_nix, nix_env
 from .openssl import host_openssl
 
@@ -152,6 +153,8 @@ def check_simulator_libs(sim: Path) -> None:
         platforms = {line.split()[1] for line in output.splitlines() if line.split()[:1] == ["platform"]}
         if platforms - set(IOS_SIMULATOR_PLATFORMS):
             raise BuildError(f"{lib.name} has objects for platforms {sorted(platforms)}, not only the iOS simulator")
+        if "LC_VERSION_MIN_IPHONEOS" in output:
+            raise BuildError(f"{lib.name} has objects marked only with LC_VERSION_MIN_IPHONEOS, which are for iOS devices")
 
 
 def library_names(names: Sequence[str]) -> tuple[str, str] | None:
@@ -203,6 +206,9 @@ def install_ios_libs(source: Path, package: Path, work: Path) -> None:
         run([mac2ios, lib], capture=True)
     for lib in sorted(sim.iterdir()):
         run([mac2ios, "-s", lib], capture=True)
+        # mac2ios relabels only LC_BUILD_VERSION, while the Nix build's objects carry LC_VERSION_MIN_IPHONEOS
+        if simulator_archive(lib):
+            run(["ranlib", lib])
     check_simulator_libs(sim)
     update_pbxproj(source)
 

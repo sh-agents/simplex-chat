@@ -219,7 +219,12 @@ class IosLibsTest(unittest.TestCase):
         sim = self.root / "sim"
         sim.mkdir()
         (sim / "libffi.a").write_bytes(b"")
-        for platform_line, rejected in (("platform 7", False), ("platform IOSSIMULATOR", False), ("platform 2", True)):
+        for platform_line, rejected in (
+            ("platform 7", False),
+            ("platform IOSSIMULATOR", False),
+            ("platform 2", True),
+            ("cmd LC_VERSION_MIN_IPHONEOS", True),
+        ):
             with patch_all("run", Recorder(answers={"otool": f"Load command 1\n {platform_line}\n"})):
                 if rejected:
                     with self.assertRaises(build_script.BuildError):
@@ -235,12 +240,22 @@ class IosLibsTest(unittest.TestCase):
         recorder = Recorder(answers={"otool": " platform 7\n"})
         work = self.root / "work"
         work.mkdir()
+        converted = []
+
+        def fake_simulator_archive(lib):
+            converted.append(lib.parent.name)
+            return 3 if "ghc" in lib.name else 0
+
         with (
             patch_all("run", recorder),
             patch_all("fetch_pinned", lambda url, digest, target: target),
             patch_all("log"),
+            patch_all("simulator_archive", fake_simulator_archive),
         ):
             build_script.install_ios_libs(self.source, package, work)
+        self.assertEqual(converted, ["sim", "sim"])
+        ranlib = [c for c in recorder.commands if c[0] == "ranlib"]
+        self.assertEqual([pathlib.Path(c[1]).name for c in ranlib], ["libHSsimplex-chat-6.5.1.0-New-ghc9.6.3.a"])
         libraries = self.source / build_script.IOS_LIBRARIES
         for name in ("mac", "ios", "sim"):
             self.assertEqual(len(list((libraries / name).iterdir())), 2)
