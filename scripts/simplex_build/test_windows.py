@@ -66,3 +66,45 @@ class WindowsLibTest(unittest.TestCase):
         self.assertEqual(times, [0])
         self.assertTrue((libs / "vlc/libvlc.dll").exists())
         self.assertEqual((libs / "vlc/vlc/plugins/audio/libplugin.dll").stat().st_mtime, 0)
+
+
+class MsiTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.source = self.root / "src"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_msi_packs_the_app_image_without_skiko_runtime_at_the_epoch(self):
+        image = self.source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX"
+        release_msi = self.source / build_script.DESKTOP_RELEASE_DIR / "msi/SimpleX-7.1.7.msi"
+        recorder = Recorder()
+        seen = {}
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            if args[-1] == "createDistributable" and "-x" not in args:
+                (image / "app").mkdir(parents=True)
+                (image / "SimpleX.exe").write_bytes(b"exe")
+                (image / "app/desktop-jvm-7.1.7-854b.jar").write_bytes(b"jar")
+                (image / "app/skiko-awt-runtime-windows-x64-0.9.4.2-1f63.jar").write_bytes(b"jar")
+                (image / "app/SimpleX.cfg").write_text("app.classpath=$APPDIR\\skiko-awt-runtime-windows-x64-0.9.4.2-1f63.jar\n")
+            if "packageMsi" in args:
+                files = list(image.rglob("*"))
+                seen["names"] = sorted(p.relative_to(image).as_posix() for p in files)
+                seen["times"] = {p.stat().st_mtime for p in [image, *files]}
+                release_msi.parent.mkdir(parents=True)
+                release_msi.write_bytes(b"msi")
+            return recorder(args, **kwargs)
+
+        with patch_all("run", fake_run):
+            msi = build_script.package_msi(self.source)
+        self.assertEqual(msi, release_msi)
+        gradle = [str(self.source / "apps/multiplatform/gradlew.bat"), "-Psimplex.assets.dir=../../assets"]
+        self.assertEqual(recorder.commands, [[*gradle, "createDistributable"], [*gradle, "packageMsi", "-x", "createDistributable"]])
+        self.assertEqual(recorder.envs, [{"LDFLAGS": "-Wl,--no-insert-timestamp"}] * 2)
+        self.assertEqual(seen["names"], ["SimpleX.exe", "app", "app/SimpleX.cfg", "app/desktop-jvm-7.1.7-854b.jar"])
+        self.assertEqual(seen["times"], {1704067200})
+        self.assertEqual((image / "app/SimpleX.cfg").read_text(), "")

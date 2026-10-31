@@ -201,19 +201,22 @@ class HostDesktopTest(unittest.TestCase):
         (libs / "libsimplex.dll").write_bytes(b"lib")
         (self.root / "dist").mkdir()
         (self.root / "dist/simplex-chat.exe").write_bytes(b"cli")
-        msi = self.source / build_script.DESKTOP_RELEASE_DIR / "msi"
         recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat.exe\n", "objdump": "\tDLL Name: KERNEL32.dll\n"})
 
         def fake_run(args, **kwargs):
             args = [str(a) for a in args]
             if args[0] == "dlltool":
                 (self.source / "libsimplex.lib").write_bytes(b"import lib")
-            if "packageMsi" in args:
-                msi.mkdir(parents=True)
-                (msi / "SimpleX-7.1.0.msi").write_bytes(b"msi")
             return recorder(args, **kwargs)
 
         calls = []
+
+        def fake_package_msi(source):
+            calls.append(("msi", source))
+            msi = self.root / "SimpleX-7.1.0.msi"
+            msi.write_bytes(b"msi")
+            return msi
+
         openssl_dirs = []
 
         def fake_openssl(work):
@@ -226,13 +229,15 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("build_windows_lib", lambda source, openssl: calls.append(("lib", openssl.lib.name)) or libs),
             patch_all("add_vlc_windows", lambda libs, work: (libs / "vlc").mkdir()),
             patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
+            patch_all("package_msi", fake_package_msi),
         ):
             build_script.build_desktop_windows(self.source, self.out)
-        self.assertEqual(calls, [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64")])
+        self.assertEqual(
+            calls,
+            [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64"), ("msi", self.source)],
+        )
         self.assertEqual(openssl_dirs, [self.source / "dist-openssl"])
-        multiplatform = self.source / "apps/multiplatform"
-        gradle = recorder.commands.index([str(multiplatform / "gradlew.bat"), "-Psimplex.assets.dir=../../assets", "packageMsi"])
-        self.assertEqual(recorder.envs[gradle], {"LDFLAGS": "-Wl,--no-insert-timestamp"})
+        self.assertEqual((self.out / "simplex-desktop-windows-x86_64.msi").read_bytes(), b"msi")
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),
             ["simplex-chat-libs-windows-x86_64.zip", "simplex-chat-windows-x86-64", "simplex-desktop-windows-x86_64.msi"],

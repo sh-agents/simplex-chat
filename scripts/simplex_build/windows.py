@@ -6,10 +6,11 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .common import edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file
+from .common import edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file, touch_tree
 from .desktop import (
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
+    SOURCE_DATE_EPOCH,
     VLC_RELEASE,
     VLC_SHA256,
     WINDOWS_DESKTOP,
@@ -19,6 +20,7 @@ from .desktop import (
     client_library_constraints,
     desktop_libs,
     link_desktop_libs,
+    remove_skiko_runtime,
     run_cabal,
     zip_desktop_libs,
 )
@@ -92,6 +94,22 @@ def build_windows_libs(source: Path, out: Path) -> None:
     release_windows_libs(source, host_openssl(openssl_work(source)), out)
 
 
+def package_msi(source: Path) -> Path:
+    """jpackage's msi of the app image without the skiko runtime jar and with fixed times, which the msi's cabinet keeps."""
+    multiplatform = source / "apps/multiplatform"
+    # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's
+    gradle: list[str | Path] = [multiplatform / "gradlew.bat", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"]
+    # CMake links libapp-lib.dll with LDFLAGS
+    env = {"LDFLAGS": LINKER_NO_TIMESTAMP}
+    run([*gradle, "createDistributable"], cwd=multiplatform, env=env)
+    app = single_dir(source / DESKTOP_RELEASE_DIR / "app", "*imple*")
+    remove_skiko_runtime(app / "app")
+    touch_tree(app, SOURCE_DATE_EPOCH)
+    # packageMsi would otherwise create the edited app image again
+    run([*gradle, "packageMsi", "-x", "createDistributable"], cwd=multiplatform, env=env)
+    return single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi")
+
+
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
     with tempfile.TemporaryDirectory() as tmp:
@@ -105,9 +123,4 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         libs = release_windows_libs(source, openssl, out)
         add_vlc_windows(libs, work)
         link_desktop_libs(source, host.libs_dir, "windows-x64")
-        assets = f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"
-        # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's
-        multiplatform = source / "apps/multiplatform"
-        # CMake links libapp-lib.dll with LDFLAGS
-        run([multiplatform / "gradlew.bat", assets, "packageMsi"], cwd=multiplatform, env={"LDFLAGS": LINKER_NO_TIMESTAMP})
-        shutil.copy(single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi"), out / host.desktop)
+        shutil.copy(package_msi(source), out / host.desktop)
