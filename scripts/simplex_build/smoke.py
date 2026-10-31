@@ -80,6 +80,8 @@ ANDROID_PASSPHRASE_TEXT = "Database passphrase is required"
 ANDROID_PASSPHRASE_FIELD = "Enter passphrase"
 ANDROID_SAVE_BUTTON = "Save passphrase and open chat"
 ANDROID_UPGRADE_BUTTON = "Upgrade and open chat"
+# what the app may ask once a database with a user opens: a database upgrade, background notifications, delivery receipts
+ANDROID_DISMISS_BUTTONS = (ANDROID_UPGRADE_BUTTON, "Disable notifications", "Don't enable")
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
@@ -494,8 +496,10 @@ def open_android_old_database(out: Path, work: Path) -> None:
 
     def chat_list_shown() -> bool:
         ui = android_screen()
-        if ANDROID_UPGRADE_BUTTON in ui:
-            android_tap(ANDROID_UPGRADE_BUTTON)
+        for button in ANDROID_DISMISS_BUTTONS:
+            if f'text="{button}' in ui:
+                android_tap(button)
+                return False
         return f'text="{OLD_DATABASE_GROUP}"' in ui
 
     try:

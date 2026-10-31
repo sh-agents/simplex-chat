@@ -547,6 +547,24 @@ class OldDatabaseTest(unittest.TestCase):
             ],
         )
 
+    def test_android_prompts_after_the_database_opens_are_dismissed(self):
+        notifications = (
+            '<?xml version="1.0"?><hierarchy><node text="Instant notifications!" bounds="[0,800][1080,900]" />'
+            '<node text="Disable notifications" bounds="[300,1400][700,1500]" /></hierarchy>'
+        )
+        receipts = '<?xml version="1.0"?><hierarchy><node text="Don\'t enable" bounds="[300,1950][800,2050]" /></hierarchy>'
+        chat_list = '<?xml version="1.0"?><hierarchy><node text="team" bounds="[0,300][1080,400]" /></hierarchy>'
+        screens = iter([self.ANDROID_SCREEN] * 3 + [notifications, notifications, receipts, receipts, chat_list])
+        recorder = Recorder()
+        with (
+            patch_all("run", recorder),
+            patch_all("android_screen", lambda: next(screens)),
+            mock.patch.object(build_script.time, "sleep"),
+        ):
+            build_script.open_android_old_database(self.out, self.root)
+        taps = [["adb", "shell", "input", "tap", "500", "1450"], ["adb", "shell", "input", "tap", "550", "2000"]]
+        self.assertEqual(recorder.commands[-2:], taps)
+
     def test_android_app_stuck_on_the_old_database_leaves_its_screen(self):
         recorder = Recorder()
         with (
