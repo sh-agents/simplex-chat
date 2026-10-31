@@ -186,7 +186,7 @@ class IosArchiveTest(unittest.TestCase):
             mock.patch("builtins.print"),
             patch_all("nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
             patch_all("install_ios_libs") as install_libs,
-            patch_all("require_xcode", return_value=XCODE_DEVELOPER),
+            patch_all("require_xcode", return_value=build_script.CANONICAL_DEVELOPER_DIR),
             patch_all("BUILD_ROOT", self.build_root),
             patch_all("machine_paths", return_value=["/Users/builder"]) as paths,
             patch_all("warn") as warn,
@@ -195,7 +195,7 @@ class IosArchiveTest(unittest.TestCase):
         self.assertEqual(install_libs.call_args.args[0], source)
         self.assertEqual(install_libs.call_args.args[1].name, build_script.IOS_CORE_ZIP)
         self.assertEqual(self.cwd, source)
-        self.assertEqual(paths.call_args.args, (self.source, XCODE_DEVELOPER))
+        self.assertEqual(paths.call_args.args, (self.source, build_script.CANONICAL_DEVELOPER_DIR))
         self.assertFalse(self.build_root.exists())
         return apple.commands, warn
 
@@ -237,6 +237,12 @@ class IosArchiveTest(unittest.TestCase):
             self.build(None, binary=b"app /Users/builder/simplex-chat/apps/ios/Shared/AppDelegate.swift")
         self.assertIn("SimpleX.app/SimpleX: /Users/builder", str(raised.exception))
         self.assert_archive_zip()
+
+    def test_xcode_outside_its_usual_place_fails(self):
+        with patch_all("require_xcode", return_value=XCODE_DEVELOPER), self.assertRaises(build_script.BuildError) as raised:
+            build_script.build_ios_archive(self.source, self.art, self.out, install=False)
+        self.assertIn("/Applications/Xcode_26.3.app", str(raised.exception))
+        self.assertIn("/Applications/Xcode.app", str(raised.exception))
 
     def test_art_checkout_without_the_assets_fails(self):
         with self.assertRaises(build_script.BuildError):

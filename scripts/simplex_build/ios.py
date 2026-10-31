@@ -11,7 +11,14 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from .apple import build_root, check_machine_paths, find_machine_paths, machine_paths, require_xcode
+from .apple import (
+    CANONICAL_DEVELOPER_DIR,
+    build_root,
+    check_machine_paths,
+    find_machine_paths,
+    machine_paths,
+    require_xcode,
+)
 from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
 from .macho import simulator_archive
 from .nix import install_nix, nix_env
@@ -287,7 +294,13 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         warn("no simplex-chat-art checkout (--art): the archive has the default icons, not the release's brand assets")
     elif not (art / "ios/Assets.xcassets").is_dir():
         raise BuildError(f"no ios/Assets.xcassets in {art}")
-    paths = machine_paths(source, require_xcode())
+    developer = require_xcode()
+    # the dSYMs name Xcode's paths in the Swift modules that they embed and in the API notes of Clang's modules, which
+    # -debug-prefix-map doesn't change
+    if developer != CANONICAL_DEVELOPER_DIR:
+        app = CANONICAL_DEVELOPER_DIR.parents[1]
+        raise BuildError(f"Xcode is in {developer.parents[1]}: the iOS archive is built with Xcode in {app}, as its dSYMs name the path")
+    paths = machine_paths(source, developer)
     with build_root(source, {}) as root:
         work = root.work
         if install:

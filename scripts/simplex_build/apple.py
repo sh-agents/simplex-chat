@@ -110,7 +110,7 @@ def build_root(source: Path, env: Mapping[str, str]) -> Iterator[BuildRoot]:
         clear_build_root()
 
 
-# Xcode's usual place, which the builds don't report as a path of the machine
+# Xcode's usual place, where the iOS build needs it, and which the builds don't report as a path of the machine
 CANONICAL_DEVELOPER_DIR = Path("/Applications/Xcode.app/Contents/Developer")
 
 
