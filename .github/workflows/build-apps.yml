@@ -17,6 +17,26 @@ env:
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
 
 jobs:
+  # every build must open this encrypted database, made by the previous release with its own OpenSSL
+  old-database:
+    name: Previous release's database
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Make the database
+        run: python3 scripts/simplex-chat-build.py test old-database --out "$RUNNER_TEMP/old-database"
+
+      - name: Upload the database
+        uses: actions/upload-artifact@v7
+        with:
+          name: old-database
+          path: ${{ runner.temp }}/old-database
+          retention-days: 30
+          if-no-files-found: error
+
   android:
     name: Android ${{ matrix.arch }} APK
     runs-on: ubuntu-24.04
@@ -96,7 +116,7 @@ jobs:
 
   android-test:
     name: Android ${{ matrix.arch }} APK in the emulator
-    needs: android
+    needs: [android, old-database]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -127,8 +147,16 @@ jobs:
         run: scripts/ci/android/emulator.sh start "$RUNNER_TEMP/screens"
 
       # the unsigned APKs are signed with a throwaway key, which Android needs to install them
+      - name: Download the previous release's database
+        uses: actions/download-artifact@v8
+        with:
+          name: old-database
+          path: ${{ runner.temp }}/old-database
+
       - name: Smoke test
-        run: python3 scripts/simplex-chat-build.py test apk "$RUNNER_TEMP/apks/simplex-${{ matrix.arch }}.apk" --out "$RUNNER_TEMP/screens"
+        run: |
+          python3 scripts/simplex-chat-build.py test apk "$RUNNER_TEMP/apks/simplex-${{ matrix.arch }}.apk" \
+            --out "$RUNNER_TEMP/screens" --database "$RUNNER_TEMP/old-database"
 
       - name: Upload screenshots
         if: ${{ !cancelled() }}
@@ -185,6 +213,7 @@ jobs:
 
   desktop-linux:
     name: Desktop Ubuntu ${{ matrix.ubuntu }} ${{ matrix.arch }}
+    needs: old-database
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -230,15 +259,24 @@ jobs:
           sudo mkdir -p /usr/share/desktop-directories
 
       # each file runs as its users run it, and the apps leave screenshots
+      - name: Download the previous release's database
+        uses: actions/download-artifact@v8
+        with:
+          name: old-database
+          path: ${{ runner.temp }}/old-database
+
       - name: Smoke test
         run: |
           out=$RUNNER_TEMP/out
           ubuntu=${{ matrix.ubuntu }}
           name=ubuntu-${ubuntu//./_}-${{ matrix.arch }}
-          python3 scripts/simplex-chat-build.py test cli "$out/simplex-chat-$name" --out "$RUNNER_TEMP/screens"
-          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-$name.deb" --out "$RUNNER_TEMP/screens"
+          old=(--database "$RUNNER_TEMP/old-database")
+          python3 scripts/simplex-chat-build.py test cli "$out/simplex-chat-$name" --out "$RUNNER_TEMP/screens" "${old[@]}"
+          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-$name.deb" --out "$RUNNER_TEMP/screens" \
+            "${old[@]}" --cli "$out/simplex-chat-$name"
           if [ -f "$out/simplex-desktop-${{ matrix.arch }}.AppImage" ]; then
-            python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-${{ matrix.arch }}.AppImage" --out "$RUNNER_TEMP/screens"
+            python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-${{ matrix.arch }}.AppImage" --out "$RUNNER_TEMP/screens" \
+              "${old[@]}" --cli "$out/simplex-chat-$name"
           fi
 
       - name: Upload screenshots
@@ -252,6 +290,7 @@ jobs:
 
   desktop-macos:
     name: Desktop macOS ${{ matrix.arch }}
+    needs: old-database
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -299,12 +338,20 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Download the previous release's database
+        uses: actions/download-artifact@v8
+        with:
+          name: old-database
+          path: ${{ runner.temp }}/old-database
+
       - name: Smoke test
         run: |
           out=$RUNNER_TEMP/out
           cli=simplex-chat-macos-${{ matrix.arch == 'aarch64' && 'aarch64' || 'x86-64' }}
-          python3 scripts/simplex-chat-build.py test cli "$out/$cli" --out "$RUNNER_TEMP/screens"
-          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-macos-${{ matrix.arch }}.dmg" --out "$RUNNER_TEMP/screens"
+          old=(--database "$RUNNER_TEMP/old-database")
+          python3 scripts/simplex-chat-build.py test cli "$out/$cli" --out "$RUNNER_TEMP/screens" "${old[@]}"
+          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-macos-${{ matrix.arch }}.dmg" --out "$RUNNER_TEMP/screens" \
+            "${old[@]}" --cli "$out/$cli"
 
       - name: Upload screenshots
         if: ${{ !cancelled() }}
@@ -317,6 +364,7 @@ jobs:
 
   desktop-windows:
     name: Desktop Windows
+    needs: old-database
     runs-on: windows-latest
     timeout-minutes: 240
     defaults:
@@ -375,12 +423,20 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Download the previous release's database
+        uses: actions/download-artifact@v8
+        with:
+          name: old-database
+          path: ${{ runner.temp }}/old-database
+
       - name: Smoke test
         run: |
           out="$(cygpath -w "$RUNNER_TEMP")/out"
           screens="$(cygpath -w "$RUNNER_TEMP")/screens"
-          python scripts/simplex-chat-build.py test cli "$out/simplex-chat-windows-x86-64" --out "$screens"
-          python scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-windows-x86_64.msi" --out "$screens"
+          old="$(cygpath -w "$RUNNER_TEMP")/old-database"
+          python scripts/simplex-chat-build.py test cli "$out/simplex-chat-windows-x86-64" --out "$screens" --database "$old"
+          python scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-windows-x86_64.msi" --out "$screens" \
+            --database "$old" --cli "$out/simplex-chat-windows-x86-64"
 
       - name: Upload screenshots
         if: ${{ !cancelled() }}
