@@ -302,7 +302,7 @@ def build(command: Build) -> None:
             build_host_openssl(source, out)
         case BuildDesktopMacos(require_signing=require_signing):
             require_platform(Platform.MACOS)
-            require_tools(["cabal", "ghc", "perl", "make", "otool"])
+            require_tools(["cabal", "ghc", "perl", "make", "otool", "cmake", "codesign"])
             build_desktop_macos(source, out, require_signing)
         case BuildDesktopWindows():
             require_platform(Platform.WINDOWS)

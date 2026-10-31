@@ -13,6 +13,7 @@ from . import (
     cli,
     common,
     desktop,
+    dmg,
     docker,
     ios,
     linux,
@@ -23,7 +24,7 @@ from . import (
     windows,
 )
 
-MODULES = (common, apk_zip, docker, nix, desktop, openssl, android, linux, macos, windows, ios, smoke, cli)
+MODULES = (common, apk_zip, docker, nix, desktop, dmg, openssl, android, linux, macos, windows, ios, smoke, cli)
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 

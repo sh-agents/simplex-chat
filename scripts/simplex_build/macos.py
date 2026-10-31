@@ -28,6 +28,7 @@ from .desktop import (
     macos_desktop,
     zip_desktop_libs,
 )
+from .dmg import build_dmg, build_libdmg
 from .openssl import OpenSsl, check_static_openssl, host_openssl, openssl_work, static_libcrypto
 
 APPLE_TEAM = "5NN7GUYB6T"
@@ -207,9 +208,12 @@ def apple_keychain(work: Path) -> Iterator[Path]:
 
 
 def notarize(path: Path, work: Path) -> None:
-    """Submits a zip of path to Apple's notary service, and fails unless it is accepted."""
-    archive = work / f"{path.name}.zip"
-    run(["ditto", "-c", "-k", "--keepParent", path, archive])
+    """Submits a dmg, or a zip of another path, to Apple's notary service, fails unless it is accepted, and staples the
+    ticket to a dmg."""
+    dmg = path.suffix == ".dmg"
+    archive = path if dmg else work / f"{path.name}.zip"
+    if not dmg:
+        run(["ditto", "-c", "-k", "--keepParent", path, archive])
     credentials = [
         "--apple-id",
         os.environ["APPLE_SIMPLEX_NOTARIZATION_APPLE_ID"],
@@ -223,6 +227,8 @@ def notarize(path: Path, work: Path) -> None:
     run(["xcrun", "notarytool", "log", result["id"], *credentials], title=f"xcrun notarytool log {result['id']}")
     if result["status"] != "Accepted":
         raise BuildError(f"notarization of {path.name} is {result['status']}")
+    if dmg:
+        run(["xcrun", "stapler", "staple", path])
 
 
 def sign_mac_libs(libs: Path, keychain: Path, work: Path) -> None:
@@ -232,12 +238,12 @@ def sign_mac_libs(libs: Path, keychain: Path, work: Path) -> None:
     notarize(libs, work)
 
 
-def package_dmg(source: Path, keychain: Path | None) -> Path:
-    """The desktop app's dmg, signed and notarized by Gradle with the keychain."""
+def build_app(source: Path, keychain: Path | None) -> Path:
+    """The desktop app, SimpleX.app, signed by Compose with the keychain or else as Compose signs unsigned apps."""
     multiplatform = source / "apps/multiplatform"
     properties = multiplatform / "local.properties"
-    tasks = ["packageDmg"]
     if keychain:
+        # Compose signs only when the notarization properties are also set
         properties.write_text(
             f"desktop.mac.signing.identity={APPLE_IDENTITY}\n"
             f"desktop.mac.signing.keychain={keychain}\n"
@@ -245,13 +251,24 @@ def package_dmg(source: Path, keychain: Path | None) -> Path:
             f"desktop.mac.notarization.password={os.environ['APPLE_SIMPLEX_NOTARIZATION_PASSWORD']}\n"
             f"desktop.mac.notarization.team_id={APPLE_TEAM}\n"
         )
-        tasks.append("notarizeDmg")
     try:
-        for task in tasks:
-            run(["./gradlew", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}", task], cwd=multiplatform)
+        run(["./gradlew", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}", "createDistributable"], cwd=multiplatform)
     finally:
         properties.unlink(missing_ok=True)
-    return single_file(source / DESKTOP_RELEASE_DIR / "dmg", "SimpleX-*.dmg")
+    return single_dir(source / DESKTOP_RELEASE_DIR / "app", "*.app")
+
+
+def sign_dmg(dmg: Path, keychain: Path, work: Path) -> None:
+    """Signs dmg with the keychain's identity, then notarizes it."""
+    run(["codesign", "--timestamp", "--sign", APPLE_IDENTITY, "--keychain", keychain, dmg])
+    notarize(dmg, work)
+
+
+def java_home() -> Path:
+    home = os.environ.get("JAVA_HOME")
+    if not home:
+        raise BuildError("JAVA_HOME is not set: set it to the JDK that builds the app")
+    return Path(home)
 
 
 def release_macos_libs(
@@ -295,4 +312,9 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         shutil.copy(cli, out / host.cli)
         libs = release_macos_libs(source, openssl, Database.SQLITE, keychain, work, out)
         add_vlc_mac(libs, host.arch, work)
-        shutil.copy(package_dmg(source, keychain), out / host.desktop)
+        app = build_app(source, keychain)
+        dmg = work / host.desktop
+        build_dmg(build_libdmg(work), app, java_home(), work, dmg)
+        if keychain:
+            sign_dmg(dmg, keychain, work)
+        shutil.copy(dmg, out / host.desktop)

@@ -177,35 +177,57 @@ class MacLibTest(unittest.TestCase):
         with self.assertRaises(build_script.BuildError):
             self.notarize("Invalid")
 
-    def test_dmg_signing_properties_are_written_and_removed(self):
+    def test_app_signing_properties_are_written_and_removed(self):
         source = self.root / "src"
         multiplatform = source / "apps/multiplatform"
         multiplatform.mkdir(parents=True)
-        dmg_dir = source / build_script.DESKTOP_RELEASE_DIR / "dmg"
+        app = source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX.app"
         seen = []
 
         def fake_run(args, **kwargs):
             seen.append(([str(a) for a in args], (multiplatform / "local.properties").read_text()))
-            dmg_dir.mkdir(parents=True, exist_ok=True)
-            (dmg_dir / "SimpleX-7.1.0.dmg").write_bytes(b"dmg")
+            app.mkdir(parents=True, exist_ok=True)
             return mock.Mock(returncode=0, stdout="")
 
         environ = {"APPLE_SIMPLEX_NOTARIZATION_APPLE_ID": "id@x", "APPLE_SIMPLEX_NOTARIZATION_PASSWORD": "secret"}
         with patch_all("run", fake_run), mock.patch.dict(os.environ, environ):
-            dmg = build_script.package_dmg(source, self.root / "k.keychain")
-        self.assertEqual([args[-1] for args, _ in seen], ["packageDmg", "notarizeDmg"])
+            built = build_script.build_app(source, self.root / "k.keychain")
+        self.assertEqual([args[-1] for args, _ in seen], ["createDistributable"])
         self.assertIn("desktop.mac.notarization.team_id=5NN7GUYB6T\n", seen[0][1])
         self.assertIn(f"desktop.mac.signing.keychain={self.root / 'k.keychain'}\n", seen[0][1])
         self.assertFalse((multiplatform / "local.properties").exists())
-        self.assertEqual(dmg.name, "SimpleX-7.1.0.dmg")
+        self.assertEqual(built, app)
 
-    def test_unsigned_dmg_is_only_packaged(self):
+    def test_unsigned_app_is_built_without_properties(self):
         source = self.root / "src"
         (source / "apps/multiplatform").mkdir(parents=True)
-        dmg_dir = source / build_script.DESKTOP_RELEASE_DIR / "dmg"
-        dmg_dir.mkdir(parents=True)
-        (dmg_dir / "SimpleX-7.1.0.dmg").write_bytes(b"dmg")
+        (source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX.app").mkdir(parents=True)
         recorder = Recorder()
         with patch_all("run", recorder):
-            build_script.package_dmg(source, None)
-        self.assertEqual([c[-1] for c in recorder.commands], ["packageDmg"])
+            build_script.build_app(source, None)
+        self.assertEqual([c[-1] for c in recorder.commands], ["createDistributable"])
+        self.assertFalse((source / "apps/multiplatform/local.properties").exists())
+
+    def test_signed_dmg_is_notarized_itself_and_stapled(self):
+        dmg = self.root / "simplex-desktop-macos-aarch64.dmg"
+        commands = []
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            commands.append(args)
+            stdout = json.dumps({"id": "abc", "status": "Accepted"}) if "submit" in args else ""
+            return mock.Mock(returncode=0, stdout=stdout)
+
+        environ = {"APPLE_SIMPLEX_NOTARIZATION_APPLE_ID": "id@x", "APPLE_SIMPLEX_NOTARIZATION_PASSWORD": "secret"}
+        with patch_all("run", fake_run), mock.patch.dict(os.environ, environ):
+            build_script.sign_dmg(dmg, self.root / "k.keychain", self.root)
+        self.assertEqual(commands[0][:3], ["codesign", "--timestamp", "--sign"])
+        self.assertEqual(commands[1][:5], ["xcrun", "notarytool", "submit", str(dmg), "--wait"])
+        self.assertFalse(any(c[0] == "ditto" for c in commands))
+        self.assertEqual(commands[-1], ["xcrun", "stapler", "staple", str(dmg)])
+
+    def test_java_home_must_be_set(self):
+        with mock.patch.dict(os.environ, {"JAVA_HOME": "/jdk"}):
+            self.assertEqual(build_script.java_home(), pathlib.Path("/jdk"))
+        with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(build_script.BuildError):
+            build_script.java_home()
