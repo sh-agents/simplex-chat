@@ -1499,7 +1499,7 @@ testMaintenanceMode ps = do
       connectUsers alice bob
       alice #> "@bob hi"
       bob <# "alice> hi"
-      alice ##> ("/_db export {\"archivePath\": \"" <> archive <> "\"}")
+      alice ##> ("/_db export " <> dbArchiveConfig archive)
       alice <## "error: chat not stopped"
       alice ##> "/_stop"
       alice <## "chat stopped"
@@ -1513,10 +1513,10 @@ testMaintenanceMode ps = do
       -- export / delete / import
       alice ##> "/_stop"
       alice <## "chat stopped"
-      alice ##> ("/_db export {\"archivePath\": \"" <> archive <> "\"}")
+      alice ##> ("/_db export " <> dbArchiveConfig archive)
       alice <## "ok"
       doesFileExist archive `shouldReturn` True
-      alice ##> ("/_db import {\"archivePath\": \"" <> archive <> "\"}")
+      alice ##> ("/_db import " <> dbArchiveConfig archive)
       alice <## "ok"
       -- cannot start chat after import
       alice ##> "/_start"
@@ -1571,7 +1571,7 @@ testMaintenanceModeWithFiles ps = withXFTPServer ps $ do
       forM_ backupDBs $ \f -> B.writeFile f ""
       alice ##> "/_stop"
       alice <## "chat stopped"
-      alice ##> ("/_db export {\"archivePath\": \"" <> archive <> "\"}")
+      alice ##> ("/_db export " <> dbArchiveConfig archive)
       alice <## "ok"
       let exportedDBs = [tmpPath ps <> "/alice_chat.db.exported", tmpPath ps <> "/alice_agent.db.exported"]
       forM_ exportedDBs $ \f -> B.writeFile f ""
@@ -1582,7 +1582,7 @@ testMaintenanceModeWithFiles ps = withXFTPServer ps $ do
       alice <## "error: chat store changed, please restart chat"
       doesDirectoryExist aliceFiles `shouldReturn` False
       forM_ exportedDBs $ \f -> doesFileExist f `shouldReturn` False
-      alice ##> ("/_db import {\"archivePath\": \"" <> archive <> "\"}")
+      alice ##> ("/_db import " <> dbArchiveConfig archive)
       alice <## "ok"
       B.readFile (aliceFiles </> "test.jpg") `shouldReturn` src
       forM_ backupDBs $ \f -> doesFileExist f `shouldReturn` False
@@ -1591,6 +1591,10 @@ testMaintenanceModeWithFiles ps = withXFTPServer ps $ do
   where
     aliceFiles = tmpFile ps "alice_files"
     archive = tmpFile ps "alice-chat.zip"
+
+-- JSON-encoded, as Windows paths have backslashes
+dbArchiveConfig :: FilePath -> String
+dbArchiveConfig archive = LB.unpack $ J.encode $ J.object ["archivePath" J..= archive]
 
 #if !defined(dbPostgres)
 testDatabaseEncryption :: HasCallStack => TestParams -> IO ()
