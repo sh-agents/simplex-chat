@@ -35,6 +35,7 @@ import JSONFixtures
 import Simplex.Chat
 import Simplex.Chat.Badges (BadgeInfo (..), BadgeRequest (..), BadgeType (..), generateMasterKey, verifyCredential)
 import Simplex.Chat.Controller (ChatConfig (..), ChatController (..), ChatDatabase (..))
+import Simplex.Chat.Library.Commands (stopChatController)
 import Simplex.Chat.Mobile hiding (error)
 import Simplex.Chat.Mobile.Badges hiding (error)
 import Simplex.Chat.Mobile.File
@@ -44,8 +45,10 @@ import Simplex.Chat.Options.DB
 import Simplex.Chat.Store
 import Simplex.Chat.Store.Profiles
 import Simplex.Chat.Types (AgentUserId (..), Profile (..))
+import Simplex.Messaging.Agent (disposeAgentClient)
 import Simplex.Messaging.Agent.Client (AgentClient (..))
 import Simplex.Messaging.Agent.Env.SQLite (AgentConfig (..), Env (..))
+import Simplex.Messaging.Agent.Store.Interface (closeDBStore)
 import Simplex.Messaging.Agent.Store.Shared (MigrationConfig (..), MigrationConfirmation (..))
 import qualified Simplex.Messaging.Agent.Store.SQLite.DB as DB
 import qualified Simplex.Messaging.Crypto as C
@@ -148,6 +151,7 @@ testChatApiNoUser ps = do
   chatSendCmd cc "/_start" `shouldReturn` noActiveUser
   chatSendCmd cc "/create user alice Alice" `shouldReturn` activeUser
   chatSendCmd cc "/_start" `shouldReturn` chatStarted
+  closeChatController cc
 
 testChatApi :: TestParams -> IO ()
 testChatApi ps = do
@@ -157,6 +161,8 @@ testChatApi ps = do
   insertUser agentStore
   ts <- getCurrentTime
   Right _ <- withTransaction chatStore $ \db -> runExceptT $ createUserRecordAt db (AgentUserId 1) False False aliceProfile {preferences = Nothing} True ts
+  closeDBStore chatStore
+  closeDBStore agentStore
   Right cc <- chatMigrateInit dbPrefix "myKey" "yesUp"
   Left (DBMErrorNotADatabase _) <- chatMigrateInit dbPrefix "" "yesUp"
   Left (DBMErrorNotADatabase _) <- chatMigrateInit dbPrefix "anotherKey" "yesUp"
@@ -167,6 +173,14 @@ testChatApi ps = do
   chatRecvMsgWait cc 10000 `shouldReturn` ""
   chatParseMarkdown "hello" `shouldBe` "{}"
   chatParseMarkdown "*hello*" `shouldBe` parsedMarkdown
+  closeChatController cc
+
+-- Windows cannot delete the test directory while the database files are open
+closeChatController :: ChatController -> IO ()
+closeChatController cc@ChatController {chatStore, smpAgent} = do
+  stopChatController cc
+  disposeAgentClient smpAgent
+  closeDBStore chatStore
 
 testChatMigrateInitQueueCApi :: TestParams -> IO ()
 testChatMigrateInitQueueCApi ps = do
