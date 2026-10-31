@@ -7,15 +7,31 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import tarfile
 import tempfile
 import time
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
 from .apk_zip import LOCAL_HEADER, central_directory
-from .common import GHC, BuildError, edit_lines, fetch_pinned, run, single_dir, single_file, touch_tree, warn
+from .common import (
+    GHC,
+    SIMPLEX_REPO,
+    BuildError,
+    checkout,
+    compare_release,
+    download_release,
+    edit_lines,
+    fetch_pinned,
+    run,
+    single_dir,
+    single_file,
+    touch_tree,
+    warn,
+)
 from .desktop import (
     COMPOSE_ARCHES,
     DESKTOP_ENV,
@@ -32,7 +48,8 @@ from .desktop import (
     macos_desktop,
     zip_desktop_libs,
 )
-from .dmg import build_dmg, build_libdmg
+from .dmg import build_dmg, build_libdmg, copy_dmg_signature, dmg_signature
+from .macho import CODE_DIFFERS, same_code
 from .openssl import OpenSsl, check_static_openssl, host_openssl, openssl_work, static_libcrypto
 
 APPLE_TEAM = "5NN7GUYB6T"
@@ -427,3 +444,155 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
             sign_dmg(dmg, keychain, work)
         check_dmg(dmg, keychain is not None, work)
         shutil.copy(dmg, out / host.desktop)
+
+
+# What codesign and stapler add to a bundle, which the signature of its main executable covers: the hashes of its
+# resources in _CodeSignature/CodeResources, and the notarization ticket in Contents/CodeResources
+CODE_SIGNATURE_DIR = "_CodeSignature"
+
+
+CODE_RESOURCES = "CodeResources"
+
+
+# The designated requirement of Developer ID applications, for the certificate of the SimpleX team
+DEVELOPER_ID_REQUIREMENT = (
+    "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and "
+    f'certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "{APPLE_TEAM}"'
+)
+
+
+@contextlib.contextmanager
+def mounted(dmg: Path, mountpoint: Path) -> Iterator[Path]:
+    mountpoint.mkdir(parents=True)
+    run(["hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-noverify", "-mountpoint", mountpoint, dmg])
+    try:
+        yield mountpoint
+    finally:
+        run(["hdiutil", "detach", mountpoint])
+
+
+def signature_item(path: Path) -> bool:
+    return path.name == CODE_SIGNATURE_DIR or (path.name == CODE_RESOURCES and path.parent.name in (CODE_SIGNATURE_DIR, "Contents"))
+
+
+def volume_items(root: Path) -> dict[str, Path]:
+    """Everything in root by its path, without what codesign and stapler add to bundles, and with each Compose jar
+    under its name without the hash that normalize_app names it with: the jars with native code differ when signed."""
+    items = {}
+    for directory, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = Path(directory, name).relative_to(root)
+            if signature_item(path):
+                continue
+            match = COMPOSE_JAR_NAME.fullmatch(name)
+            key = path.with_name(f"{match['name']}.jar") if match and path.parent.name == "app" else path
+            items[key.as_posix()] = path
+    return items
+
+
+def rename_jars(cfg: str, renamed: dict[str, str]) -> str:
+    """The launcher's classpath with the jars of the built app named as the released app names them."""
+    lines = cfg.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        name = line.rstrip("\n").removeprefix(CLASSPATH_PREFIX)
+        if line.startswith(CLASSPATH_PREFIX) and name in renamed:
+            lines[i] = line.replace(name, renamed[name], 1)
+    return "".join(lines)
+
+
+def zip_entry(info: zipfile.ZipInfo) -> tuple[object, ...]:
+    """What a zip records about an entry, but the sizes and CRC of its data."""
+    return info.filename, info.date_time, info.compress_type, info.flag_bits, info.external_attr, info.extra, info.comment
+
+
+def same_jar(released: Path, built: Path) -> bool:
+    """Whether the jars have the same entries, with the same content or the same code but its signature."""
+    try:
+        with zipfile.ZipFile(released) as theirs, zipfile.ZipFile(built) as ours:
+            entries, built_entries = theirs.infolist(), ours.infolist()
+            if theirs.comment != ours.comment or list(map(zip_entry, entries)) != list(map(zip_entry, built_entries)):
+                return False
+            return all(same_code(theirs.read(a), ours.read(b)) for a, b in zip(entries, built_entries, strict=True))
+    except zipfile.BadZipFile:
+        return False
+
+
+def same_item(released: Path, built: Path, renamed: dict[str, str]) -> bool:
+    theirs, ours = released.lstat(), built.lstat()
+    if theirs.st_mode != ours.st_mode:
+        return False
+    if stat.S_ISLNK(theirs.st_mode):
+        return os.readlink(released) == os.readlink(built)
+    if not stat.S_ISREG(theirs.st_mode):
+        return True
+    data, built_data = released.read_bytes(), built.read_bytes()
+    if data == built_data:
+        return True
+    if released.suffix == ".cfg":
+        return data == rename_jars(built_data.decode(), renamed).encode()
+    if released.suffix == ".jar":
+        return same_jar(released, built)
+    return same_code(data, built_data)
+
+
+def volume_differences(released: Path, built: Path) -> list[str]:
+    """The paths in the released volume that differ from the built one other than by code signatures, then the paths
+    that only one of them has."""
+    theirs, ours = volume_items(released), volume_items(built)
+    renamed = {ours[key].name: path.name for key, path in theirs.items() if key in ours and path.suffix == ".jar"}
+    shared = theirs.keys() & ours.keys()
+    differences = [theirs[key].as_posix() for key in sorted(shared) if not same_item(released / theirs[key], built / ours[key], renamed)]
+    return differences + sorted(f"{path.as_posix()} (only one has it)" for key, path in (theirs | ours).items() if key not in shared)
+
+
+def signature_differences(dmg: Path, app: Path, repo: str) -> list[str]:
+    """The signatures of the dmg and of its app that codesign doesn't verify, as the SimpleX team's Developer ID
+    signatures for releases of simplex-chat/simplex-chat."""
+    requirement = [f"-R={DEVELOPER_ID_REQUIREMENT}"] if repo == SIMPLEX_REPO else []
+    differences = []
+    for path, deep in ((dmg, []), (app, ["--deep"])):
+        if run(["codesign", "--verify", *deep, "--strict", "--verbose=2", *requirement, path], check=False).returncode:
+            differences.append(f"codesign doesn't verify the signature of {path.name}")
+    return differences
+
+
+def dmg_differences(released: Path, built: Path, repo: str, work: Path) -> list[str]:
+    """What differs other than signatures: the volumes' contents, then the released dmg and the one that the build
+    makes of its app, and the signatures that codesign doesn't verify."""
+    work.mkdir(parents=True)
+    with mounted(released, work / "released") as theirs, mounted(built, work / "built") as ours:
+        differences = volume_differences(theirs, ours)
+        if differences:
+            return differences
+        released_app = single_dir(theirs, "*.app")
+        app = work / "app" / released_app.name
+        shutil.copytree(released_app, app, symlinks=True)
+    data = released.read_bytes()
+    if dmg_signature(data)[1]:
+        differences += signature_differences(released, app, repo)
+    elif repo == SIMPLEX_REPO:
+        differences.append("it is not signed")
+    rebuilt = work / "rebuilt.dmg"
+    build_dmg(build_libdmg(work), app, java_home(), work / "rebuild", rebuilt)
+    if copy_dmg_signature(data, rebuilt.read_bytes()) != data:
+        differences.append("it is not the dmg that the build makes of its app")
+    return differences
+
+
+def macos_differences(released: Path, built: Path, repo: str, work: Path) -> list[str]:
+    if released.suffix == ".dmg":
+        return dmg_differences(released, built, repo, work)
+    return [] if same_code(released.read_bytes(), built.read_bytes()) else [CODE_DIFFERS]
+
+
+def reproduce_macos(tag: str, repo: str, source: Path, results: Path) -> list[str]:
+    host = macos_desktop()
+    out = results / "macos"
+    names = (host.cli, host.desktop)
+    download_release(tag, repo, names, out / "prebuilt")
+    checkout(source, tag)
+    (out / "from-source").mkdir(exist_ok=True)
+    build_desktop_macos(source, out / "from-source", require_signing=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp).resolve()
+        return compare_release(names, out, lambda released, built: macos_differences(released, built, repo, work / released.name))

@@ -182,3 +182,44 @@ class GitHubLogTest(unittest.TestCase):
             summary = pathlib.Path(tmp) / "summary.md"
             self.output({"GITHUB_STEP_SUMMARY": str(summary)}, lambda: build_script.add_summary("text"))
             self.assertFalse(summary.exists())
+
+
+class ReleaseComparisonTest(unittest.TestCase):
+    def test_release_files_are_downloaded_from_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "prebuilt"
+            with patch_all("download") as download:
+                build_script.download_release("v7.1.0", "owner/fork", ["a.dmg", "cli"], target)
+            self.assertTrue(target.is_dir())
+            self.assertEqual(
+                download.call_args_list,
+                [
+                    mock.call("https://github.com/owner/fork/releases/download/v7.1.0/a.dmg", target / "a.dmg"),
+                    mock.call("https://github.com/owner/fork/releases/download/v7.1.0/cli", target / "cli"),
+                ],
+            )
+
+    def test_each_differing_or_unbuilt_file_fails_and_no_sums_are_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            for directory, files in (("prebuilt", {"a": b"1", "b": b"2", "c": b"3"}), ("from-source", {"a": b"1", "b": b"x"})):
+                (out / directory).mkdir()
+                for name, data in files.items():
+                    (out / directory / name).write_bytes(data)
+            with patch_all("log") as log:
+                self.assertEqual(build_script.compare_release(["a", "b", "c"], out, build_script.byte_differences), ["b", "c"])
+            logged = [c.args[0] for c in log.call_args_list]
+            self.assertIn("b: sha256 doesn't match", logged)
+            self.assertIn("c: it is not built", logged)
+            self.assertIn("a is reproduced", logged)
+            self.assertFalse((out / "_sha256sums").exists())
+
+    def test_sums_list_the_released_files_when_all_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            for directory in ("prebuilt", "from-source"):
+                (out / directory).mkdir()
+                (out / directory / "a").write_bytes(b"1")
+            with patch_all("log"):
+                self.assertEqual(build_script.compare_release(["a"], out, lambda released, built: []), [])
+            self.assertEqual((out / "_sha256sums").read_text().split(), [build_script.sha256(out / "prebuilt/a"), "a"])

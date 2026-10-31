@@ -337,3 +337,40 @@ class MsiComparisonTest(unittest.TestCase):
         built = msi_file(self.STREAMS)
         self.assertEqual(build_script.msi_differences(b"MZ", built), ["not a readable msi: not a compound file"])
         self.assertTrue(build_script.msi_differences(built[:1100], built)[0].startswith("not a readable msi"))
+
+    def test_release_files_are_compared_by_their_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            files = {
+                "signed.msi": self.signed(self.STREAMS),
+                "built.msi": msi_file(self.STREAMS),
+                "other.msi": msi_file({**self.STREAMS, "Binary.icon": b"x"}),
+                "signed.exe": signtool(pe_file(), b"pkcs7"),
+                "built.exe": pe_file(),
+            }
+            for name, data in files.items():
+                (root / name).write_bytes(data)
+            self.assertEqual(build_script.windows_differences(root / "signed.msi", root / "built.msi"), [])
+            self.assertEqual(build_script.windows_differences(root / "other.msi", root / "built.msi"), ["/Binary.icon differs"])
+            self.assertEqual(build_script.windows_differences(root / "signed.exe", root / "built.exe"), [])
+            self.assertEqual(build_script.windows_differences(root / "signed.exe", root / "built.msi"), [build_script.PE_DIFFERS])
+
+    def test_reproduce_downloads_builds_and_compares_the_cli_and_msi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = pathlib.Path(tmp) / "results"
+            urls = []
+
+            def fake_download(url, target):
+                urls.append(url)
+                target.write_bytes(signtool(pe_file(), b"pkcs7") if target.suffix != ".msi" else self.signed(self.STREAMS))
+
+            def fake_build(source, out):
+                (out / "simplex-chat-windows-x86-64").write_bytes(pe_file())
+                (out / "simplex-desktop-windows-x86_64.msi").write_bytes(msi_file({**self.STREAMS, "Binary.icon": b"x"}))
+
+            with patch_all("download", fake_download), patch_all("checkout") as checkout, patch_all("build_desktop_windows", fake_build):
+                failed = build_script.reproduce_windows("v7.1.0", "owner/fork", pathlib.Path(tmp), results)
+            self.assertEqual(failed, ["simplex-desktop-windows-x86_64.msi"])
+            checkout.assert_called_once_with(pathlib.Path(tmp), "v7.1.0")
+            self.assertEqual(urls[0], "https://github.com/owner/fork/releases/download/v7.1.0/simplex-chat-windows-x86-64")
+            self.assertFalse((results / "windows/_sha256sums").exists())
