@@ -129,11 +129,19 @@ class MacLibTest(unittest.TestCase):
             return recorder(args, **kwargs)
 
         recorder = Recorder()
-        with patch_all("run", fake_run), patch_all("fetch_pinned", lambda u, d, t: t):
+        cached_times = []
+
+        def cache_gen(args, **kwargs):
+            if str(args[0]).endswith("vlc-cache-gen"):
+                cached_times.append((macos / "plugins/libaudio_plugin.dylib").stat().st_mtime)
+            return fake_run(args, **kwargs)
+
+        with patch_all("run", cache_gen), patch_all("fetch_pinned", lambda u, d, t: t):
             build_script.add_vlc_mac(libs, "aarch64", work)
         plugin = str(macos / "plugins/libaudio_plugin.dylib")
         self.assertIn(["install_name_tool", "-add_rpath", "@loader_path/../../", plugin], recorder.commands)
         self.assertIn([str(work / "vlc/vlc-cache-gen"), "plugins"], recorder.commands)
+        self.assertEqual(cached_times, [int(build_script.SOURCE_DATE_EPOCH)])
         self.assertTrue((libs / "vlc/libvlc.dylib").exists())
         self.assertTrue((libs / "vlc/vlc/plugins/libaudio_plugin.dylib").exists())
 

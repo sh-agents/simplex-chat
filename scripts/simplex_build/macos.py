@@ -11,11 +11,12 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
-from .common import GHC, BuildError, fetch_pinned, run, single_dir, single_file, warn
+from .common import GHC, BuildError, fetch_pinned, run, single_dir, single_file, touch_tree, warn
 from .desktop import (
     COMPOSE_ARCHES,
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
+    SOURCE_DATE_EPOCH,
     VLC_RELEASE,
     VLC_SHA256,
     Database,
@@ -181,6 +182,8 @@ def add_vlc_mac(libs: Path, arch: str, work: Path) -> None:
         run(["install_name_tool", "-add_rpath", "@loader_path", lib], check=False, capture=True)
     for lib in sorted((macos / "plugins").glob("*.dylib")):
         run(["install_name_tool", "-add_rpath", "@loader_path/../../", lib], check=False, capture=True)
+    # the plugin cache records each plugin's modification time
+    touch_tree(macos / "plugins", SOURCE_DATE_EPOCH)
     run([extracted / "vlc-cache-gen", "plugins"], cwd=macos)
     for path in (macos / "lib").iterdir():
         shutil.copy(path, vlc)
