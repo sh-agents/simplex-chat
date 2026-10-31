@@ -192,6 +192,9 @@ jobs:
           fetch-depth: 0
           filter: tree:0
 
+      - name: Use the release Xcode
+        run: scripts/ci/ios-xcode.sh
+
       - name: Show runner
         run: |
           sw_vers
@@ -383,6 +386,9 @@ jobs:
     needs: old-database
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
+    env:
+      # the Xcode of the release builds, XCODE_VERSION in scripts/simplex_build/apple.py
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     strategy:
       fail-fast: false
       matrix:
