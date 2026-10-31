@@ -328,16 +328,21 @@ jobs:
           name: old-database
           path: ${{ runner.temp }}/old-database
 
+      # each upgrade test installs the previous release's app where no app is installed, and uninstalls the app after
       - name: Smoke test
         run: |
           out=$RUNNER_TEMP/out
           ubuntu=${{ matrix.ubuntu }}
           name=ubuntu-${ubuntu//./_}-${{ matrix.arch }}
           old=(--database "$RUNNER_TEMP/old-database")
+          upgrade=(--upgrade-from-previous --cli "$out/simplex-chat-$name")
           python3 scripts/simplex-chat-build.py test cli "$out/simplex-chat-$name" --out "$RUNNER_TEMP/screens" "${old[@]}"
+          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-$name.deb" --out "$RUNNER_TEMP/screens" "${upgrade[@]}"
           python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-$name.deb" --out "$RUNNER_TEMP/screens" \
             "${old[@]}" --cli "$out/simplex-chat-$name"
           if [ -f "$out/simplex-desktop-${{ matrix.arch }}.AppImage" ]; then
+            python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-${{ matrix.arch }}.AppImage" --out "$RUNNER_TEMP/screens" \
+              "${upgrade[@]}"
             python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-${{ matrix.arch }}.AppImage" --out "$RUNNER_TEMP/screens" \
               "${old[@]}" --cli "$out/simplex-chat-$name"
           fi
@@ -413,6 +418,8 @@ jobs:
           cli=simplex-chat-macos-${{ matrix.arch == 'aarch64' && 'aarch64' || 'x86-64' }}
           old=(--database "$RUNNER_TEMP/old-database")
           python3 scripts/simplex-chat-build.py test cli "$out/$cli" --out "$RUNNER_TEMP/screens" "${old[@]}"
+          python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-macos-${{ matrix.arch }}.dmg" --out "$RUNNER_TEMP/screens" \
+            --upgrade-from-previous --cli "$out/$cli"
           python3 scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-macos-${{ matrix.arch }}.dmg" --out "$RUNNER_TEMP/screens" \
             "${old[@]}" --cli "$out/$cli"
 
@@ -498,6 +505,8 @@ jobs:
           screens="$(cygpath -w "$RUNNER_TEMP")/screens"
           old="$(cygpath -w "$RUNNER_TEMP")/old-database"
           python scripts/simplex-chat-build.py test cli "$out/simplex-chat-windows-x86-64" --out "$screens" --database "$old"
+          python scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-windows-x86_64.msi" --out "$screens" \
+            --upgrade-from-previous --cli "$out/simplex-chat-windows-x86-64"
           python scripts/simplex-chat-build.py test desktop "$out/simplex-desktop-windows-x86_64.msi" --out "$screens" \
             --database "$old" --cli "$out/simplex-chat-windows-x86-64"
 
