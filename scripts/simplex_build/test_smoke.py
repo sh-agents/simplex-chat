@@ -195,7 +195,7 @@ class SmokeTest(unittest.TestCase):
         opened = []
         with (
             patch_all("push_android_old_database", lambda database: opened.append(("push", database))),
-            patch_all("open_android_old_database", lambda: opened.append(("open",))),
+            patch_all("open_android_old_database", lambda out, work: opened.append(("open",))),
         ):
             commands = self.apk_run(verify_returncode=0, pidof="1234\n", database=self.root / "old")
         self.assertEqual(opened, [("push", self.root / "old"), ("open",)])
@@ -388,13 +388,15 @@ class OldDatabaseTest(unittest.TestCase):
     ANDROID_SCREEN = (
         '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\' ?><hierarchy rotation="0">'
         '<node text="Database passphrase is required to open chat." bounds="[0,100][1080,200]" />'
+        '<node text="Enter passphrase…" bounds="[100,500][980,600]" />'
+        '<node text="Save passphrase and open chat" bounds="[300,700][780,800]" />'
         '<node text="Upgrade and open chat" bounds="[300,900][780,1000]" /></hierarchy>'
         "UI hierchary dumped to: /dev/tty"
     )
 
     def test_android_node_centre_from_uiautomator_dump(self):
         self.assertEqual(build_script.android_node_centre(self.ANDROID_SCREEN, "Upgrade and"), (540, 950))
-        self.assertIsNone(build_script.android_node_centre(self.ANDROID_SCREEN, "Save passphrase"))
+        self.assertIsNone(build_script.android_node_centre(self.ANDROID_SCREEN, "Open chat"))
 
     def test_android_old_database_is_pushed_as_the_app_owns_it(self):
         recorder = Recorder(answers={"stat": "10123:10123\n"})
@@ -408,19 +410,34 @@ class OldDatabaseTest(unittest.TestCase):
 
     def test_android_app_opens_the_old_database_with_its_key_and_confirms_its_upgrade(self):
         chat_list = '<?xml version="1.0"?><hierarchy><node text="team" bounds="[0,300][1080,400]" /></hierarchy>'
-        screens = iter([self.ANDROID_SCREEN, self.ANDROID_SCREEN, self.ANDROID_SCREEN, chat_list])
+        screens = iter([self.ANDROID_SCREEN] * 5 + [chat_list])
         recorder = Recorder()
         with (
             patch_all("run", recorder),
             patch_all("android_screen", lambda: next(screens)),
             mock.patch.object(build_script.time, "sleep"),
         ):
-            build_script.open_android_old_database()
+            build_script.open_android_old_database(self.out, self.root)
         self.assertEqual(
             recorder.commands,
             [
+                ["adb", "shell", "input", "tap", "540", "550"],
                 ["adb", "shell", "input", "text", "old-release-key"],
-                ["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"],
+                ["adb", "shell", "input", "tap", "540", "750"],
                 ["adb", "shell", "input", "tap", "540", "950"],
             ],
         )
+
+    def test_android_app_stuck_on_the_old_database_leaves_its_screen(self):
+        recorder = Recorder()
+        with (
+            patch_all("run", recorder),
+            patch_all("android_screen", return_value=self.ANDROID_SCREEN.replace("Upgrade and open chat", "Opening")),
+            patch_all("emulator_screenshot") as screenshot,
+            patch_all("ANDROID_FIRST_SCREEN_SECONDS", 0),
+            mock.patch.object(build_script.time, "sleep"),
+            self.assertRaises(build_script.BuildError),
+        ):
+            build_script.open_android_old_database(self.out, self.root)
+        self.assertIn("Save passphrase", (self.out / "android-old-database-screen.txt").read_text())
+        screenshot.assert_called_once_with(self.out / "android-old-database.png", self.root)

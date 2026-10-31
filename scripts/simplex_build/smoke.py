@@ -61,6 +61,8 @@ DESKTOP_SETTINGS = "settings.properties"
 ANDROID_DATA_DIR = f"/data/user/0/{ANDROID_PACKAGE}"
 ANDROID_DATABASE_PREFIX = "files"
 ANDROID_PASSPHRASE_TEXT = "Database passphrase is required"
+ANDROID_PASSPHRASE_FIELD = "Enter passphrase"
+ANDROID_SAVE_BUTTON = "Save passphrase and open chat"
 ANDROID_UPGRADE_BUTTON = "Upgrade and open chat"
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -358,12 +360,9 @@ def push_android_old_database(database: Path) -> None:
         run(["adb", "shell", "restorecon", target])
 
 
-def open_android_old_database() -> None:
-    """Enters the key on the app's passphrase screen and waits for the chat list with the previous release's group."""
-    wait_until(lambda: ANDROID_PASSPHRASE_TEXT in android_screen(), ANDROID_FIRST_SCREEN_SECONDS, "passphrase screen")
-    run(["adb", "shell", "input", "text", OLD_DATABASE_KEY])
-    # the passphrase field opens the chat on Enter, while the keyboard may cover the button
-    run(["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"])
+def open_android_old_database(out: Path, work: Path) -> None:
+    """Enters the key on the app's passphrase screen and waits for the chat list with the previous release's group;
+    on a timeout it records the screen's tree and a screenshot."""
 
     def chat_list_shown() -> bool:
         ui = android_screen()
@@ -371,7 +370,17 @@ def open_android_old_database() -> None:
             android_tap(ANDROID_UPGRADE_BUTTON)
         return f'text="{OLD_DATABASE_GROUP}"' in ui
 
-    wait_until(chat_list_shown, ANDROID_FIRST_SCREEN_SECONDS, f"chat list with the group {OLD_DATABASE_GROUP}")
+    try:
+        wait_until(lambda: ANDROID_PASSPHRASE_TEXT in android_screen(), ANDROID_FIRST_SCREEN_SECONDS, "passphrase screen")
+        # the emulator has a hardware keyboard, so no on-screen keyboard covers the button
+        wait_until(lambda: android_tap(ANDROID_PASSPHRASE_FIELD), SETTLE_SECONDS, "passphrase field")
+        run(["adb", "shell", "input", "text", OLD_DATABASE_KEY])
+        wait_until(lambda: android_tap(ANDROID_SAVE_BUTTON), SETTLE_SECONDS, "button to open the chat")
+        wait_until(chat_list_shown, ANDROID_FIRST_SCREEN_SECONDS, f"chat list with the group {OLD_DATABASE_GROUP}")
+    except BuildError:
+        record(out, "android-old-database-screen", android_screen())
+        emulator_screenshot(out / "android-old-database.png", work)
+        raise
 
 
 def test_apk(apk: Path, out: Path, database: Path | None = None) -> None:
@@ -393,7 +402,7 @@ def test_apk(apk: Path, out: Path, database: Path | None = None) -> None:
             push_android_old_database(database)
         run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
         if database:
-            open_android_old_database()
+            open_android_old_database(out, work)
         else:
             wait_until(android_screen_loaded, ANDROID_FIRST_SCREEN_SECONDS, "screen past the database loading")
         time.sleep(SETTLE_SECONDS)
