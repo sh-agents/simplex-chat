@@ -236,13 +236,13 @@ class MacLibTest(unittest.TestCase):
         with self.assertRaises(build_script.BuildError):
             build_script.normalize_jar(jar, "1704067200")
 
-    def app_built_at(self, name, date_time):
+    def app_built_at(self, name, date_time, skiko_listed=1):
         app = self.root / name / "SimpleX.app"
         jars = app / "Contents/app"
         jars.mkdir(parents=True)
         self.jar(jars / f"skiko-awt-runtime-macos-arm64-0.9.4.2-{date_time[4]:02}aa.jar", date_time)
         self.jar(jars / "plain.jar", date_time)
-        cfg = f"[Application]\napp.classpath=$APPDIR/skiko-awt-runtime-macos-arm64-0.9.4.2-{date_time[4]:02}aa.jar\n"
+        cfg = "[Application]\n" + f"app.classpath=$APPDIR/skiko-awt-runtime-macos-arm64-0.9.4.2-{date_time[4]:02}aa.jar\n" * skiko_listed
         (jars / "SimpleX.cfg").write_text(cfg + "app.classpath=$APPDIR/plain.jar\napp.mainclass=chat.simplex.desktop.MainKt\n")
         build_script.normalize_app(app)
         return {p.name: p.read_bytes() for p in sorted(jars.iterdir())}
@@ -255,6 +255,12 @@ class MacLibTest(unittest.TestCase):
         self.assertRegex(skiko, r"^skiko-awt-runtime-macos-arm64-0\.9\.4\.2-[0-9a-f]{32}\.jar$")
         self.assertIn(f"app.classpath=$APPDIR/{skiko}\n".encode(), first["SimpleX.cfg"])
         self.assertIn(b"app.classpath=$APPDIR/plain.jar\n", first["SimpleX.cfg"])
+
+    def test_a_renamed_jar_that_the_classpath_lists_other_than_once_fails(self):
+        for listed in (0, 2):
+            with self.subTest(listed=listed), self.assertRaises(build_script.BuildError) as raised:
+                self.app_built_at(f"listed-{listed}", (2026, 10, 31, 12, 34, 56), skiko_listed=listed)
+            self.assertIn("skiko-awt-runtime-macos-arm64-0.9.4.2-34aa.jar", str(raised.exception))
 
     def test_app_is_signed_again_as_compose_signed_it(self):
         app = self.root / "SimpleX.app"

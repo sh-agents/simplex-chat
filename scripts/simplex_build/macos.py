@@ -310,11 +310,20 @@ def normalize_app(app: Path) -> None:
             renamed[jar.name] = f"{match['name']}-{digest}.jar"
             jar.rename(jars / renamed[jar.name])
 
+    listed = dict.fromkeys(renamed, 0)
+
     def rename_classpath(line: str) -> str:
         name = line.removeprefix(CLASSPATH_PREFIX)
-        return CLASSPATH_PREFIX + renamed[name] if line.startswith(CLASSPATH_PREFIX) and name in renamed else line
+        if not line.startswith(CLASSPATH_PREFIX) or name not in renamed:
+            return line
+        listed[name] += 1
+        return CLASSPATH_PREFIX + renamed[name]
 
-    edit_lines(jars / f"{app.stem}.cfg", rename_classpath)
+    cfg = jars / f"{app.stem}.cfg"
+    edit_lines(cfg, rename_classpath)
+    unlisted = sorted(name for name, count in listed.items() if count != 1)
+    if unlisted:
+        raise BuildError(f"{cfg.name} lists these jars other than once: {', '.join(unlisted)}")
 
 
 def sign_app(app: Path, keychain: Path | None) -> None:
