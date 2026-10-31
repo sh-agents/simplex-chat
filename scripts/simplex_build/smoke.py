@@ -80,8 +80,9 @@ ANDROID_PASSPHRASE_TEXT = "Database passphrase is required"
 ANDROID_PASSPHRASE_FIELD = "Enter passphrase"
 ANDROID_SAVE_BUTTON = "Save passphrase and open chat"
 ANDROID_UPGRADE_BUTTON = "Upgrade and open chat"
-# what the app may ask once a database with a user opens: a database upgrade, background notifications, delivery receipts
-ANDROID_DISMISS_BUTTONS = (ANDROID_UPGRADE_BUTTON, "Disable notifications", "Don't enable")
+# what the app may ask once a database with a user opens: a database upgrade, background notifications and the
+# battery optimization notes that follow them, delivery receipts
+ANDROID_DISMISS_BUTTONS = (ANDROID_UPGRADE_BUTTON, "Disable notifications", "OK", "Don't enable")
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
