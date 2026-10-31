@@ -57,6 +57,14 @@ class HostDesktopTest(unittest.TestCase):
         self.assertEqual(commands[0][2:5], ["darwin64-x86_64-cc", f"--prefix={self.root / 'openssl'}", "--openssldir=/etc/ssl"])
         self.assertEqual(commands[-1], ["make", "install_sw"])
 
+    def test_release_openssl_starts_empty_at_one_path_in_the_checkout(self):
+        stale = self.source / f"dist-openssl/openssl-{build_script.OPENSSL_VERSION}/libcrypto.a"
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"earlier build")
+        work = build_script.openssl_work(self.source)
+        self.assertEqual(work, self.source / "dist-openssl")
+        self.assertEqual(list(work.iterdir()), [])
+
     def test_linux_has_no_pinned_openssl_build(self):
         with self.assertRaises(build_script.BuildError):
             self.openssl_on("posix", "linux")
@@ -106,6 +114,8 @@ class HostDesktopTest(unittest.TestCase):
         (self.root / "dist/simplex-chat").write_bytes(b"cli")
         calls = []
         recorder_cabal_locals = []
+        openssl_dirs = []
+        openssl = build_script.OpenSsl(work / "openssl/include", work / "openssl/lib")
         original_cli = build_script.build_host_cli
 
         def build_cli(source, cabal_local):
@@ -115,7 +125,7 @@ class HostDesktopTest(unittest.TestCase):
         with (
             patch_all("build_host_cli", build_cli),
             patch_all("run", recorder),
-            patch_all("host_openssl", return_value=build_script.OpenSsl(work / "openssl/include", work / "openssl/lib")),
+            patch_all("host_openssl", lambda openssl_dir: openssl_dirs.append(openssl_dir) or openssl),
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             patch_all("apple_signing", return_value=False),
             mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(work))),
@@ -126,7 +136,8 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("sign_mac_libs") as sign,
         ):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
-        self.assertIn(f"extra-lib-dirs: {work / 'openssl-static'}", recorder_cabal_locals[0])
+        self.assertEqual(openssl_dirs, [self.source / "dist-openssl"])
+        self.assertIn(f"extra-lib-dirs: {self.source / 'dist-openssl/openssl-static'}", recorder_cabal_locals[0])
         self.assertEqual(calls, [("lib", "aarch64"), ("link", "mac-aarch64", "macos-arm64"), ("dmg", None)])
         sign.assert_not_called()
         self.assertIn(f"extra-lib-dirs: {work / 'openssl/lib'}", (self.source / "cabal.project.local").read_text())
@@ -167,15 +178,22 @@ class HostDesktopTest(unittest.TestCase):
             return recorder(args, **kwargs)
 
         calls = []
+        openssl_dirs = []
+
+        def fake_openssl(work):
+            openssl_dirs.append(work)
+            return build_script.OpenSsl(self.fetch(work) / "include", self.fetch(work))
+
         with (
             patch_all("run", fake_run),
-            patch_all("host_openssl", lambda work: build_script.OpenSsl(self.fetch(work) / "include", self.fetch(work))),
+            patch_all("host_openssl", fake_openssl),
             patch_all("build_windows_lib", lambda source, openssl: calls.append(("lib", openssl.lib.name)) or libs),
             patch_all("add_vlc_windows", lambda libs, work: (libs / "vlc").mkdir()),
             patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args[1:]))),
         ):
             build_script.build_desktop_windows(self.source, self.out)
         self.assertEqual(calls, [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64")])
+        self.assertEqual(openssl_dirs, [self.source / "dist-openssl"])
         multiplatform = self.source / "apps/multiplatform"
         self.assertIn([str(multiplatform / "gradlew.bat"), "-Psimplex.assets.dir=../../assets", "packageMsi"], recorder.commands)
         self.assertEqual(

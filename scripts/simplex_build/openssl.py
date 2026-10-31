@@ -6,7 +6,7 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import BuildError, Platform, fetch_pinned, host_platform, run
+from .common import BuildError, Platform, fetch_pinned, host_platform, remove_tree, run
 from .desktop import SOURCE_DATE_EPOCH, WINDOWS_DESKTOP, macos_desktop
 
 # The OpenSSL bundled with the apps; pinOpenssl in flake.nix pins the same for the Android and iOS core libraries
@@ -31,6 +31,11 @@ OPENSSL_WINDOWS_PREFIX = "C:/Program Files/OpenSSL"
 
 
 OPENSSL_WINDOWS_DIR = "C:/Program Files/Common Files/SSL"
+
+
+# Release builds keep OpenSSL at one path in the checkout: cabal hashes its directories into the package ids that the
+# binaries contain, and the macOS build records its prefix there, under the runner's home
+OPENSSL_BUILD_DIR = "dist-openssl"
 
 
 def fetch_openssl(work: Path) -> Path:
@@ -76,6 +81,13 @@ class OpenSsl:
 
     def cabal_local(self, simplex_chat_ghc_options: str = "") -> str:
         return openssl_cabal_local(self.include.as_posix(), self.lib.as_posix(), simplex_chat_ghc_options)
+
+
+def openssl_work(source: Path) -> Path:
+    work = source / OPENSSL_BUILD_DIR
+    remove_tree(work)
+    work.mkdir()
+    return work
 
 
 def host_openssl(work: Path) -> OpenSsl:

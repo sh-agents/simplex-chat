@@ -27,7 +27,7 @@ from .desktop import (
     macos_desktop,
     zip_desktop_libs,
 )
-from .openssl import OpenSsl, check_static_openssl, host_openssl, static_libcrypto
+from .openssl import OpenSsl, check_static_openssl, host_openssl, openssl_work, static_libcrypto
 
 APPLE_TEAM = "5NN7GUYB6T"
 
@@ -275,7 +275,7 @@ def build_macos_libs(source: Path, database: Database, out: Path, require_signin
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
-        release_macos_libs(source, host_openssl(work), database, keychain, work, out)
+        release_macos_libs(source, host_openssl(openssl_work(source)), database, keychain, work, out)
 
 
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
@@ -284,8 +284,9 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
-        openssl = host_openssl(work)
-        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
+        openssl_dir = openssl_work(source)
+        openssl = host_openssl(openssl_dir)
+        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, openssl_dir))
         cli = build_host_cli(source, static.cabal_local())
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)

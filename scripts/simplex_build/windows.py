@@ -22,7 +22,7 @@ from .desktop import (
     run_cabal,
     zip_desktop_libs,
 )
-from .openssl import OpenSsl, check_static_openssl, host_openssl, static_libcrypto
+from .openssl import OpenSsl, check_static_openssl, host_openssl, openssl_work, static_libcrypto
 
 # The system libraries that the static libcrypto of a MinGW build needs (ex_libs of OpenSSL's mingw-common)
 OPENSSL_WINDOWS_STATIC_LINK = "-optl-lws2_32 -optl-lgdi32 -optl-lcrypt32"
@@ -79,16 +79,16 @@ def release_windows_libs(source: Path, openssl: OpenSsl, out: Path) -> Path:
 
 
 def build_windows_libs(source: Path, out: Path) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        release_windows_libs(source, host_openssl(Path(tmp).resolve()), out)
+    release_windows_libs(source, host_openssl(openssl_work(source)), out)
 
 
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp).resolve()
-        openssl = host_openssl(work)
-        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, work))
+        openssl_dir = openssl_work(source)
+        openssl = host_openssl(openssl_dir)
+        static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, openssl_dir))
         cli = build_host_cli(source, static.cabal_local(OPENSSL_WINDOWS_STATIC_LINK))
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
