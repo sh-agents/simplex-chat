@@ -1,0 +1,228 @@
+name: windows-core-tests
+
+on:
+  push:
+    branches:
+      - sh/windows-core-tests
+
+env:
+  opt: O0
+  ghc_options: --ghc-options=-O0
+  release: false
+  branch: ${{ github.ref_name }}
+  sqlcipher_src: https://raw.githubusercontent.com/simplex-chat/direct-sqlcipher/2330df3dc8c4b660674d3c02d76bb86f66c2abee/cbits
+  bench_flags: -O -DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_OPENSSL -DSQLITE_TEMP_STORE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.simplexmq }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        simplexmq: [fork]
+        ghc: [9.6.3]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Use upstream simplexmq
+        if: matrix.simplexmq == 'upstream'
+        shell: bash
+        run: |
+          sed -i 's|https://github.com/sh-agents/simplexmq.git|https://github.com/simplex-chat/simplexmq.git|; s|b76b606bbdc9abe7618424f7e43d6a8d9933c6e6|d1f97d38f7a01f112efb6be753a1b45a40777826|' cabal.project
+          grep -A2 simplexmq.git cabal.project
+
+      - name: Prepare build
+        id: prepare
+        uses: ./.github/actions/prepare-build
+        with:
+          java_ver: 17
+          ghc_ver: ${{ matrix.ghc }}
+          github_ref: ${{ github.ref }}
+
+      - name: Configure pagefile (Windows)
+        uses: simplex-chat/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 16GB
+          disk-root: "C:"
+
+      - name: 'Setup MSYS2'
+        uses: simplex-chat/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: >-
+            git
+            perl
+            make
+            zip
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            python:p
+
+      - name: Compute cache key prefixes
+        id: keys
+        shell: msys2 {0}
+        run: |
+          toolchain=$(gcc --version | sha256sum | cut -c1-16)
+          target=windows-x86_64-ghc${{ matrix.ghc }}-$toolchain
+          echo "deps=deps-$target" >> "$GITHUB_OUTPUT"
+          echo "dist=dist-$target-${{ matrix.simplexmq }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore dependencies from cache
+        id: restore-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.prepare.outputs.cabal-store }}
+          key: ${{ steps.keys.outputs.deps }}-${{ env.branch }}-${{ github.sha }}
+          restore-keys: |
+            ${{ steps.keys.outputs.deps }}-${{ env.branch }}-
+            ${{ steps.keys.outputs.deps }}-
+
+      - name: Restore source repositories from cache
+        id: restore-src
+        uses: actions/cache/restore@v4
+        with:
+          path: dist-newstyle/src
+          key: src-${{ runner.os }}-${{ hashFiles('cabal.project') }}
+          restore-keys: src-${{ runner.os }}-
+
+      - name: Restore build directory from cache
+        id: restore-build
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dist-newstyle/*
+            !dist-newstyle/src
+          key: ${{ steps.keys.outputs.dist }}-${{ env.opt }}-${{ env.branch }}-${{ github.sha }}
+          restore-keys: |
+            ${{ steps.keys.outputs.dist }}-${{ env.opt }}-${{ env.branch }}-
+            ${{ steps.keys.outputs.dist }}-${{ env.opt }}-
+            dist-windows-x86_64-ghc${{ matrix.ghc }}-
+
+      - name: Build CLI
+        shell: msys2 {0}
+        run: |
+          export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
+          python scripts/simplex-chat-build.py build openssl windows --out "$(cygpath -w "$RUNNER_TEMP")/openssl"
+          scripts/ci/prune-old-builds.sh dist-newstyle
+          rm -rf dist-newstyle/src/direct-sq* dist-newstyle/src/simplexmq*
+          cabal build -j --enable-tests ${{ env.ghc_options }}
+          rm -rf dist-newstyle/src/direct-sq* dist-newstyle/src/simplexmq*
+
+      - name: Compute dependency cache key
+        id: hash-deps
+        shell: msys2 {0}
+        run: echo "hash=$(ls "$(cygpath -u '${{ steps.prepare.outputs.cabal-store }}')"/ghc-*/ | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Save dependencies to cache
+        if: matrix.simplexmq == 'fork' && steps.restore-deps.outputs.cache-matched-key != format('{0}-{1}-{2}', steps.keys.outputs.deps, env.branch, steps.hash-deps.outputs.hash)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.prepare.outputs.cabal-store }}
+          key: ${{ steps.keys.outputs.deps }}-${{ env.branch }}-${{ steps.hash-deps.outputs.hash }}
+
+      - name: Save build directory to cache
+        if: steps.restore-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dist-newstyle/*
+            !dist-newstyle/src
+          key: ${{ steps.keys.outputs.dist }}-${{ env.opt }}-${{ env.branch }}-${{ github.sha }}
+
+      - name: Mount RAM disk for tests
+        shell: pwsh
+        run: |
+          choco install imdisk-toolkit -y --no-progress
+          imdisk -a -s 2G -m R: -p "/fs:ntfs /q /y"
+          New-Item -ItemType Directory -Path R:\tmp
+          New-Item -ItemType Junction -Path tests\tmp -Target R:\tmp
+
+      - name: Run tests
+        if: matrix.simplexmq == 'fork'
+        timeout-minutes: 120
+        shell: msys2 {0}
+        env:
+          TESTS: |
+            /Mobile API Tests/mobile API/start new chat
+            /direct tests/maintenance mode/
+            /direct tests/direct messages/add contact and send/receive messages/
+            /direct tests/message errors/
+          ATTEMPTS: ${{ (github.ref == 'refs/heads/stable' || startsWith(github.ref, 'refs/tags/v')) && 3 || 1 }}
+          OPENSSL_DLL: libcrypto-3-x64.dll
+          # MSYS2 turns arguments starting with / into Windows paths, which the patterns are not
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
+          # list-bin clones the source repositories removed after the build, and prints git's output before the path
+          test_exe=$(cabal list-bin simplex-chat-test ${{ env.ghc_options }} | tail -n 1)
+          rm -rf dist-newstyle/src/direct-sq* dist-newstyle/src/simplexmq*
+          test_bin=$(cygpath -u "$test_exe")
+          openssl_lib=$(cygpath -u "$(awk '$1 == "extra-lib-dirs:" {print $2; exit}' cabal.project.local)")
+          # Windows loads DLLs from the executable's directory before PATH, which has MSYS2's OpenSSL
+          dll_copy=$(dirname "$test_bin")/$OPENSSL_DLL
+          cp "$openssl_lib/$OPENSSL_DLL" "$dll_copy"
+          loaded=$(ldd "$test_bin" | awk -v dll="$OPENSSL_DLL" 'tolower($1) == dll {print $3}')
+          echo "$OPENSSL_DLL loaded from: $loaded"
+          [ "$loaded" = "$dll_copy" ]
+          mkdir -p tests/tmp
+          scripts/ci/run-tests.sh timeout 35m "$test_bin"
+
+      - name: Remote control server test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        shell: msys2 {0}
+        env:
+          TESTS: /Remote control server/
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          test_bin=$(find dist-newstyle/build -name simplex-chat-test.exe)
+          openssl_lib=$(cygpath -u "$(awk '$1 == "extra-lib-dirs:" {print $2; exit}' cabal.project.local)")
+          cp "$openssl_lib/libcrypto-3-x64.dll" "$(dirname "$test_bin")"
+          mkdir -p tests/tmp
+          time scripts/ci/run-tests.sh timeout 5m "$test_bin" --print-slow-items
+
+      - name: Database encryption test alone
+        if: ${{ !cancelled() && matrix.simplexmq == 'fork' }}
+        timeout-minutes: 15
+        shell: msys2 {0}
+        env:
+          TESTS: /encrypt/decrypt database/
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          test_bin=$(find dist-newstyle/build -name simplex-chat-test.exe)
+          time scripts/ci/run-tests.sh timeout 10m "$test_bin" --print-slow-items
+
+
+      - name: OpenSSL contention benchmark
+        if: ${{ !cancelled() }}
+        shell: msys2 {0}
+        run: |
+          openssl_lib=$(cygpath -u "$(awk '$1 == "extra-lib-dirs:" {print $2; exit}' cabal.project.local)")
+          bench=$(cygpath -u "$RUNNER_TEMP")/bench
+          mkdir -p "$bench/pinned" "$bench/msys2"
+          curl -fsSL "$sqlcipher_src/sqlite3.c" -o "$bench/sqlite3.c"
+          curl -fsSL "$sqlcipher_src/sqlite3.h" -o "$bench/sqlite3.h"
+          # shellcheck disable=SC2086 # bench_flags is a list of compiler flags
+          gcc $bench_flags -pthread -I"$bench" -I"$openssl_lib/include" -o "$bench/pinned/bench.exe" .github/windows-diag/encrypt-bench.c "$bench/sqlite3.c" -L"$openssl_lib" -lcrypto -w
+          cp "$openssl_lib/libcrypto-3-x64.dll" "$bench/pinned"
+          # shellcheck disable=SC2086 # bench_flags is a list of compiler flags
+          gcc $bench_flags -pthread -I"$bench" -o "$bench/msys2/bench.exe" .github/windows-diag/encrypt-bench.c "$bench/sqlite3.c" -lcrypto -w
+          nproc
+          for v in pinned msys2; do
+            for load in "0" "4" "4 spin"; do
+              # shellcheck disable=SC2086 # load is the thread count and an optional mode
+              "$bench/$v/bench.exe" "$bench/$v" $load | grep -E "threads|PBKDF2|attach|test exported|synced|calls"
+            done
+          done
+          mkdir -p /r/bench
+          echo "== pinned, RAM disk"
+          "$bench/pinned/bench.exe" /r/bench | grep -E "threads|attach|test exported|synced"
