@@ -26,6 +26,8 @@ rm -f "$container"/simplex_v1_chat.db* "$container"/simplex_v1_agent.db*
 cp "$old/simplex_chat.db" "$container/simplex_v1_chat.db"
 cp "$old/simplex_agent.db" "$container/simplex_v1_agent.db"
 
+# iOS otherwise asks for the camera over the passphrase screen, hiding its button from the accessibility tree
+xcrun simctl privacy "$SIM_UDID" grant camera "$bundle_id"
 # the keychain still has the key of the smoke test's database, so the app asks for the right one
 xcrun simctl launch "$SIM_UDID" "$bundle_id"
 "$ui" wait "Save passphrase and open chat" 180
