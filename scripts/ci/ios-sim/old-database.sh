@@ -14,7 +14,8 @@ ui=$(dirname "$0")/ui
 key="old-release-key"
 group=team
 
-xcrun simctl terminate "$SIM_UDID" "$bundle_id"
+# the snapshot tests after the smoke test may have stopped the app already
+xcrun simctl terminate "$SIM_UDID" "$bundle_id" || true
 container=$(xcrun simctl get_app_container "$SIM_UDID" "$bundle_id" group.chat.simplex.app)
 rm -f "$container"/simplex_v1_chat.db* "$container"/simplex_v1_agent.db*
 cp "$old/simplex_chat.db" "$container/simplex_v1_chat.db"
