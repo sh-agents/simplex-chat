@@ -11,6 +11,7 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
+from .apple import require_xcode
 from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
 from .macho import simulator_archive
 from .nix import install_nix, nix_env
@@ -28,7 +29,7 @@ IOS_PROJECT = "apps/ios/SimpleX.xcodeproj"
 IOS_SCHEME = "SimpleX (iOS)"
 
 
-IOS_TOOLS = ("xcodebuild", "codesign", "otool", "plutil", "git")
+IOS_TOOLS = ("xcodebuild", "xcrun", "codesign", "otool", "plutil", "git")
 
 
 IOS_LIBRARIES = "apps/ios/Libraries"
@@ -282,6 +283,7 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         warn("no simplex-chat-art checkout (--art): the archive has the default icons, not the release's brand assets")
     elif not (art / "ios/Assets.xcassets").is_dir():
         raise BuildError(f"no ios/Assets.xcassets in {art}")
+    require_xcode()
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         if install:

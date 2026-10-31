@@ -12,6 +12,7 @@ from .testing import (
     OTOOL,
     PBXPROJ,
     REPO_ROOT,
+    XCODE_DEVELOPER,
     FakeApple,
     Recorder,
     build_script,
@@ -179,6 +180,7 @@ class IosArchiveTest(unittest.TestCase):
             mock.patch("builtins.print"),
             patch_all("nix_env", return_value={"NIX_SSL_CERT_FILE": "/c"}),
             patch_all("install_ios_libs") as install_libs,
+            patch_all("require_xcode", return_value=XCODE_DEVELOPER),
             patch_all("warn") as warn,
         ):
             build_script.build_ios_archive(source, art, self.out, install=False)

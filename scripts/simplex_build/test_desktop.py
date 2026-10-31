@@ -7,7 +7,7 @@ import unittest
 import zipfile
 from unittest import mock
 
-from .testing import Recorder, build_script, patch_all
+from .testing import XCODE_DEVELOPER, Recorder, build_script, patch_all
 
 
 class HostDesktopTest(unittest.TestCase):
@@ -134,6 +134,7 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("host_openssl", lambda openssl_dir: self.openssl_dirs.append(openssl_dir) or openssl),
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             patch_all("apple_signing", return_value=signed),
+            patch_all("require_xcode", return_value=XCODE_DEVELOPER),
             patch_all("apple_keychain", lambda work: contextlib.nullcontext(self.keychain)),
             mock.patch.object(build_script.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(work))),
             patch_all("build_mac_lib", lambda source, arch, database, work: calls.append(("lib", arch)) or libs),
@@ -193,6 +194,7 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("host_openssl", return_value=build_script.OpenSsl(self.root, self.root)),
             mock.patch.object(build_script.platform, "machine", return_value="x86_64"),
             patch_all("apple_signing", return_value=False),
+            patch_all("require_xcode", return_value=XCODE_DEVELOPER),
             patch_all("static_libcrypto", return_value=self.root),
             self.assertRaises(build_script.BuildError),
         ):

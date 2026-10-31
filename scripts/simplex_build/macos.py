@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .apk_zip import LOCAL_HEADER, central_directory
+from .apple import require_xcode
 from .common import GHC, BuildError, edit_lines, fetch_pinned, run, single_dir, single_file, touch_tree, warn
 from .desktop import (
     COMPOSE_ARCHES,
@@ -407,6 +408,7 @@ def release_macos_libs(
 
 def build_macos_libs(source: Path, database: Database, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
+    require_xcode()
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
@@ -416,6 +418,7 @@ def build_macos_libs(source: Path, database: Database, out: Path, require_signin
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     host = macos_desktop()
     signed = apple_signing(require_signing)
+    require_xcode()
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         work = Path(tmp).resolve()
         keychain = stack.enter_context(apple_keychain(work)) if signed else None

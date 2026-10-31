@@ -10,6 +10,7 @@ from unittest import mock
 from . import (
     android,
     apk_zip,
+    apple,
     cli,
     common,
     desktop,
@@ -25,7 +26,7 @@ from . import (
     windows,
 )
 
-MODULES = (common, apk_zip, docker, nix, desktop, dmg, openssl, android, linux, macho, macos, windows, ios, smoke, cli)
+MODULES = (common, apk_zip, apple, docker, nix, desktop, dmg, openssl, android, linux, macho, macos, windows, ios, smoke, cli)
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -63,6 +64,9 @@ UTF8_FLAG = 0x800
 
 
 GITHUB = {"GITHUB_ACTIONS": "true"}
+
+
+XCODE_DEVELOPER = pathlib.Path("/Applications/Xcode_26.3.app/Contents/Developer")
 
 
 APKSIGNER_PADDING = struct.pack("<HHH", 0xD935, 2, 4)
