@@ -73,9 +73,54 @@ class MsiTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tmp.name)
         self.source = self.root / "src"
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.msi = self.root / "SimpleX-7.1.7.msi"
+        self.msi.write_bytes(b"msi")
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def persisting_summary(self, recorder, scripts):
+        """Stands in for run(): powershell writes the package code it is given into the msi, as Persist does."""
+
+        def fake_run(args, **kwargs):
+            args = [str(a) for a in args]
+            if args[0] == "powershell":
+                scripts.append(pathlib.Path(args[args.index("-File") + 1]).read_text())
+                self.msi.write_bytes(b"msi " + args[-2].encode())
+            return recorder(args, **kwargs)
+
+        return fake_run
+
+    def test_summary_script_gets_the_msi_package_code_and_epoch(self):
+        recorder, scripts = Recorder(), []
+        with patch_all("run", self.persisting_summary(recorder, scripts)):
+            build_script.set_msi_summary(self.msi, "{A}", self.work)
+        script = str(self.work / "msi-summary.ps1")
+        msi = str(pathlib.PureWindowsPath(self.msi))
+        self.assertEqual(
+            recorder.commands,
+            [["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, msi, "{A}", "1704067200"]],
+        )
+        self.assertEqual(scripts, [build_script.MSI_SUMMARY_SCRIPT])
+        self.assertIn("$RevisionNumber, $CreateTime, $LastSaveTime = 9, 12, 13", scripts[0])
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_package_code_is_a_uuid_of_the_content(self):
+        code = build_script.msi_package_code(self.msi)
+        self.assertRegex(code, r"^\{[0-9A-F]{8}-[0-9A-F]{4}-5[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}\}$")
+        self.assertEqual(build_script.msi_package_code(self.msi), code)
+        self.msi.write_bytes(b"msi 2")
+        self.assertNotEqual(build_script.msi_package_code(self.msi), code)
+
+    def test_package_code_is_derived_from_the_msi_with_the_placeholder(self):
+        recorder, scripts = Recorder(), []
+        with patch_all("run", self.persisting_summary(recorder, scripts)):
+            build_script.normalize_msi_summary(self.msi, self.work)
+        self.msi.write_bytes(b"msi " + build_script.MSI_PLACEHOLDER_PACKAGE_CODE.encode())
+        expected = build_script.msi_package_code(self.msi)
+        self.assertEqual([command[-2] for command in recorder.commands], [build_script.MSI_PLACEHOLDER_PACKAGE_CODE, expected])
 
     def test_msi_packs_the_app_image_without_skiko_runtime_at_the_epoch(self):
         image = self.source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX"
@@ -99,9 +144,10 @@ class MsiTest(unittest.TestCase):
                 release_msi.write_bytes(b"msi")
             return recorder(args, **kwargs)
 
-        with patch_all("run", fake_run):
-            msi = build_script.package_msi(self.source)
+        with patch_all("run", fake_run), patch_all("normalize_msi_summary") as normalize:
+            msi = build_script.package_msi(self.source, self.work)
         self.assertEqual(msi, release_msi)
+        normalize.assert_called_once_with(release_msi, self.work)
         gradle = [str(self.source / "apps/multiplatform/gradlew.bat"), "-Psimplex.assets.dir=../../assets"]
         self.assertEqual(recorder.commands, [[*gradle, "createDistributable"], [*gradle, "packageMsi", "-x", "createDistributable"]])
         self.assertEqual(recorder.envs, [{"LDFLAGS": "-Wl,--no-insert-timestamp"}] * 2)

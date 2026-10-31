@@ -3,10 +3,11 @@
 import os
 import shutil
 import tempfile
+import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
-from .common import edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file, touch_tree
+from .common import REPO, edit_lines, fetch_pinned, remove_tree, run, sha256, single_dir, single_file, touch_tree
 from .desktop import (
     DESKTOP_ENV,
     DESKTOP_RELEASE_DIR,
@@ -35,6 +36,28 @@ LINKER_NO_TIMESTAMP = "-Wl,--no-insert-timestamp"
 
 
 WINDOWS_NO_TIMESTAMP = f"-optl{LINKER_NO_TIMESTAMP}"
+
+
+# WiX gives each msi a random package code, which the build replaces with one derived from the msi's content
+MSI_PLACEHOLDER_PACKAGE_CODE = "{00000000-0000-0000-0000-000000000000}"
+
+
+MSI_PACKAGE_CODE_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, REPO)
+
+
+# Windows Installer's automation interface has no type information for PowerShell, which reaches it with InvokeMember
+MSI_SUMMARY_SCRIPT = """param([string]$Msi, [string]$PackageCode, [long]$Epoch)
+$ErrorActionPreference = "Stop"
+$RevisionNumber, $CreateTime, $LastSaveTime = 9, 12, 13
+$time = [DateTimeOffset]::FromUnixTimeSeconds($Epoch).UtcDateTime
+$properties = @(@($RevisionNumber, $PackageCode), @($CreateTime, $time), @($LastSaveTime, $time))
+$installer = New-Object -ComObject WindowsInstaller.Installer
+$summary = $installer.GetType().InvokeMember("SummaryInformation", "GetProperty", $null, $installer, @($Msi, $properties.Count))
+foreach ($property in $properties) {
+    [void]$summary.GetType().InvokeMember("Property", "SetProperty", $null, $summary, $property)
+}
+[void]$summary.GetType().InvokeMember("Persist", "InvokeMethod", $null, $summary, $null)
+"""
 
 
 def disable_ghc_lld() -> None:
@@ -94,7 +117,26 @@ def build_windows_libs(source: Path, out: Path) -> None:
     release_windows_libs(source, host_openssl(openssl_work(source)), out)
 
 
-def package_msi(source: Path) -> Path:
+def set_msi_summary(msi: Path, package_code: str, work: Path) -> None:
+    """The msi's package code, and its creation and save times at SOURCE_DATE_EPOCH."""
+    script = work / "msi-summary.ps1"
+    script.write_text(MSI_SUMMARY_SCRIPT)
+    msi_path = str(PureWindowsPath(msi))
+    run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, msi_path, package_code, SOURCE_DATE_EPOCH])
+    script.unlink()
+
+
+def msi_package_code(msi: Path) -> str:
+    """Windows Installer treats msi files with one package code as copies of one file, so the code is a UUID of the content."""
+    return "{" + str(uuid.uuid5(MSI_PACKAGE_CODE_NAMESPACE, sha256(msi))).upper() + "}"
+
+
+def normalize_msi_summary(msi: Path, work: Path) -> None:
+    set_msi_summary(msi, MSI_PLACEHOLDER_PACKAGE_CODE, work)
+    set_msi_summary(msi, msi_package_code(msi), work)
+
+
+def package_msi(source: Path, work: Path) -> Path:
     """jpackage's msi of the app image without the skiko runtime jar and with fixed times, which the msi's cabinet keeps."""
     multiplatform = source / "apps/multiplatform"
     # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's
@@ -107,7 +149,9 @@ def package_msi(source: Path) -> Path:
     touch_tree(app, SOURCE_DATE_EPOCH)
     # packageMsi would otherwise create the edited app image again
     run([*gradle, "packageMsi", "-x", "createDistributable"], cwd=multiplatform, env=env)
-    return single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi")
+    msi = single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi")
+    normalize_msi_summary(msi, work)
+    return msi
 
 
 def build_desktop_windows(source: Path, out: Path) -> None:
@@ -123,4 +167,4 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         libs = release_windows_libs(source, openssl, out)
         add_vlc_windows(libs, work)
         link_desktop_libs(source, host.libs_dir, "windows-x64")
-        shutil.copy(package_msi(source), out / host.desktop)
+        shutil.copy(package_msi(source, work), out / host.desktop)

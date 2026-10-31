@@ -211,9 +211,9 @@ class HostDesktopTest(unittest.TestCase):
 
         calls = []
 
-        def fake_package_msi(source):
+        def fake_package_msi(source, work):
             calls.append(("msi", source))
-            msi = self.root / "SimpleX-7.1.0.msi"
+            msi = work / "SimpleX-7.1.0.msi"
             msi.write_bytes(b"msi")
             return msi
 

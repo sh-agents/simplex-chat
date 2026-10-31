@@ -306,7 +306,7 @@ def build(command: Build) -> None:
             build_desktop_macos(source, out, require_signing)
         case BuildDesktopWindows():
             require_platform(Platform.WINDOWS)
-            require_tools(["cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool"])
+            require_tools(["cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool", "powershell"])
             build_desktop_windows(source, out)
         case BuildIosArchive(art=art, install_nix=install):
             require_platform(Platform.MACOS)

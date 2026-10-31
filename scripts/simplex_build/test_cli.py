@@ -211,6 +211,19 @@ class MainTest(unittest.TestCase):
             build_script.require_tools(["docker"])
         self.assertIn("daemon", str(e.exception))
 
+    def test_windows_desktop_needs_powershell_for_the_msi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            command = build_script.BuildDesktopWindows(pathlib.Path(tmp), pathlib.Path("."))
+            with (
+                patch_all("require_tools") as require,
+                patch_all("host_platform", return_value=build_script.Platform.WINDOWS),
+                patch_all("build_desktop_windows") as build,
+                patch_all("write_sha256sums"),
+            ):
+                build_script.build(command)
+        self.assertIn("powershell", require.call_args.args[0])
+        build.assert_called_once()
+
     def test_ios_needs_nix_unless_installing_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             command = build_script.BuildIosArchive(pathlib.Path("a"), pathlib.Path(tmp), pathlib.Path("."), False)
