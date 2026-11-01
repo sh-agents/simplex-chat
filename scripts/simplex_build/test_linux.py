@@ -376,32 +376,44 @@ class DesktopTest(unittest.TestCase):
         self.assertEqual(scripts[0].argv[1], "7.0.3")
         self.assertEqual(scripts[1].env, {"ASSETS_DIR": "../../assets"})
 
-    def test_reproduce_reports_mismatches_and_writes_sums_only_when_all_match(self):
+    def reproduce(self, root, released_appimage):
+        results = root / "v7.1.0-simplex-chat"
+
+        def fake_build(source, image, version, out):
+            for name in build_script.desktop_files(image):
+                (out / name).write_bytes(name.encode())
+            (out / f"simplex-chat-libs-linux-{image.arch}.zip").write_bytes(b"not a release file")
+
+        urls = []
+
+        def fake_download(url, target):
+            urls.append(url)
+            target.write_bytes(released_appimage if target.name.endswith(".AppImage") else target.name.encode())
+
+        with (
+            patch_all("checkout"),
+            patch_all("build_desktop_linux", fake_build),
+            patch_all("download", fake_download),
+            patch_all("log"),
+            mock.patch("builtins.print"),
+            mock.patch("platform.machine", return_value="x86_64"),
+        ):
+            mismatched = build_script.reproduce_desktop("v7.1.0", "owner/fork", root, results)
+        return mismatched, urls, results
+
+    def test_reproduce_reports_released_files_that_differ_and_writes_no_sums(self):
         with tempfile.TemporaryDirectory() as tmp:
-            results = pathlib.Path(tmp) / "v7.1.0-simplex-chat"
-
-            def fake_build(source, image, version, out):
-                for name in build_script.desktop_files(image):
-                    (out / name).write_bytes(name.encode())
-
-            urls = []
-
-            def fake_download(url, target):
-                urls.append(url)
-                target.write_bytes(b"other" if target.name.endswith(".AppImage") else target.name.encode())
-
-            with (
-                patch_all("checkout"),
-                patch_all("build_desktop_linux", fake_build),
-                patch_all("download", fake_download),
-                patch_all("log"),
-                mock.patch("platform.machine", return_value="x86_64"),
-            ):
-                mismatched = build_script.reproduce_desktop("v7.1.0", "owner/fork", pathlib.Path(tmp), results)
+            mismatched, urls, results = self.reproduce(pathlib.Path(tmp), b"other")
             self.assertEqual(mismatched, ["simplex-desktop-x86_64.AppImage"])
             self.assertFalse((results / "_sha256sums").exists())
             self.assertIn("https://github.com/owner/fork/releases/download/v7.1.0/simplex-desktop-x86_64.AppImage", urls)
 
+    def test_reproduce_sums_list_the_released_files_when_all_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mismatched, _, results = self.reproduce(pathlib.Path(tmp), b"simplex-desktop-x86_64.AppImage")
+            self.assertEqual(mismatched, [])
+            listed = [line.split()[1] for line in (results / "_sha256sums").read_text().splitlines()]
+            self.assertEqual(listed, sorted(name for image in (JAMMY, NOBLE) for name in build_script.desktop_files(image)))
 
 class LinuxLibsTest(unittest.TestCase):
     def test_host_build_updates_cabal_and_zips_the_libraries(self):

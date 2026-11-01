@@ -142,10 +142,11 @@ def write_sha256sums(directory: Path, target: Path | None = None) -> None:
 
 
 def compare_dirs(built: Path, released: Path) -> list[str]:
-    """Returns the names of the built files that differ from or are missing in the released ones."""
+    """The names of the released files that differ from the built ones or are not built; a build also makes files
+    that releases don't publish."""
     mismatched = []
-    for path in sorted(built.iterdir()):
-        other = released / path.name
+    for path in sorted(released.iterdir()):
+        other = built / path.name
         if not other.is_file() or sha256(path) != sha256(other):
             mismatched.append(path.name)
     return mismatched

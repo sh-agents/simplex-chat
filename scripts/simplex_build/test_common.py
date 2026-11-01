@@ -65,12 +65,12 @@ class FilesTest(unittest.TestCase):
                 f"{build_script.sha256(d / 'a.zip')}  a.zip\n{build_script.sha256(d / 'b.apk')}  b.apk\n",
             )
 
-    def test_compare_dirs_reports_differing_and_missing_files(self):
+    def test_compare_dirs_reports_released_files_that_differ_or_are_not_built(self):
         with tempfile.TemporaryDirectory() as built, tempfile.TemporaryDirectory() as released:
-            for name, data in (("same", b"1"), ("differs", b"2"), ("missing", b"3")):
+            for name, data in (("same", b"1"), ("differs", b"2"), ("libs.zip", b"not released")):
                 (pathlib.Path(built) / name).write_bytes(data)
-            (pathlib.Path(released) / "same").write_bytes(b"1")
-            (pathlib.Path(released) / "differs").write_bytes(b"x")
+            for name, data in (("same", b"1"), ("differs", b"x"), ("missing", b"3")):
+                (pathlib.Path(released) / name).write_bytes(data)
             self.assertEqual(build_script.compare_dirs(pathlib.Path(built), pathlib.Path(released)), ["differs", "missing"])
 
     def test_permissions_are_normalized(self):

@@ -401,6 +401,6 @@ def reproduce_desktop(tag: str, repo: str, source: Path, results: Path) -> list[
     for name in mismatched:
         log(f"{name}: sha256 doesn't match")
     if not mismatched:
-        write_sha256sums(built, results / "_sha256sums")
+        write_sha256sums(released, results / "_sha256sums")
         log(f"checksums: {results / '_sha256sums'}")
     return mismatched
