@@ -289,26 +289,31 @@ class HostDesktopTest(unittest.TestCase):
         ):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
 
-    def test_windows_build(self):
+    def windows_build(self, msi_data=b"msi"):
         libs = self.root / "libs-app"
         libs.mkdir()
         (libs / "libsimplex.dll").write_bytes(b"lib")
         (self.root / "dist").mkdir()
         (self.root / "dist/simplex-chat.exe").write_bytes(b"cli")
         recorder = Recorder(answers={"list-bin": f"{self.root}/dist/simplex-chat.exe\n", "objdump": "\tDLL Name: KERNEL32.dll\n"})
+        seen = {}
 
         def fake_run(args, **kwargs):
             args = [str(a) for a in args]
             if args[0] == "dlltool":
-                (self.source / "libsimplex.lib").write_bytes(b"import lib")
+                (kwargs["cwd"] / "libsimplex.lib").write_bytes(b"import lib")
             return recorder(args, **kwargs)
 
         calls = []
 
         def fake_package_msi(source, work):
             calls.append(("msi", source))
+            seen["env"] = {name: os.environ.get(name) for name in ("CABAL_DIR", "TMP", "TEMP")}
+            app = source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX"
+            app.mkdir(parents=True)
+            (app / "SimpleX.exe").write_bytes("launcher".encode("utf-16-le"))
             msi = work / "SimpleX-7.1.0.msi"
-            msi.write_bytes(b"msi")
+            msi.write_bytes(msi_data)
             return msi
 
         openssl_dirs = []
@@ -318,6 +323,7 @@ class HostDesktopTest(unittest.TestCase):
             return build_script.OpenSsl(self.fetch(work) / "include", self.fetch(work))
 
         with (
+            patch_all("WINDOWS_BUILD_ROOT", self.build_root),
             patch_all("run", fake_run),
             patch_all("host_openssl", fake_openssl),
             patch_all("build_windows_lib", lambda source, openssl: calls.append(("lib", openssl.lib.name)) or libs),
@@ -326,11 +332,16 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("package_msi", fake_package_msi),
         ):
             build_script.build_desktop_windows(self.source, self.out)
-        self.assertEqual(
-            calls,
-            [("lib", f"openssl-{build_script.OPENSSL_VERSION}"), ("link", "windows-x86_64", "windows-x64"), ("msi", self.source)],
-        )
-        self.assertEqual(openssl_dirs, [self.source / "dist-openssl"])
+        return calls, openssl_dirs, seen
+
+    def test_windows_build_runs_in_the_fixed_directory(self):
+        calls, openssl_dirs, seen = self.windows_build()
+        copy = self.build_root / "simplex-chat"
+        lib = ("lib", f"openssl-{build_script.OPENSSL_VERSION}")
+        self.assertEqual(calls, [lib, ("link", "windows-x86_64", "windows-x64"), ("msi", copy)])
+        self.assertEqual(openssl_dirs, [copy / "dist-openssl"])
+        self.assertEqual(seen["env"], build_script.windows_build_env(build_script.BuildRoot.at(self.build_root)))
+        self.assertFalse(self.build_root.exists())
         self.assertEqual((self.out / "simplex-desktop-windows-x86_64.msi").read_bytes(), b"msi")
         self.assertEqual(
             sorted(p.name for p in self.out.iterdir()),

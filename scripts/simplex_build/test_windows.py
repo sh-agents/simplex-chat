@@ -374,3 +374,53 @@ class MsiComparisonTest(unittest.TestCase):
             checkout.assert_called_once_with(pathlib.Path(tmp), "v7.1.0")
             self.assertEqual(urls[0], "https://github.com/owner/fork/releases/download/v7.1.0/simplex-chat-windows-x86-64")
             self.assertFalse((results / "windows/_sha256sums").exists())
+
+
+class WindowsLibsReleaseTest(unittest.TestCase):
+    def build(self, library):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source, fixed = root / "checkout", root / "fixed"
+            source.mkdir()
+            sources = []
+
+            def fake_release(copy, openssl, out):
+                sources.append(copy)
+                libs = copy / "libs"
+                libs.mkdir()
+                (libs / "libsimplex.dll").write_bytes(library(source))
+                return libs
+
+            with (
+                patch_all("WINDOWS_BUILD_ROOT", fixed),
+                patch_all("host_openssl"),
+                patch_all("release_windows_libs", fake_release),
+            ):
+                try:
+                    build_script.build_windows_libs(source, root / "out")
+                finally:
+                    self.assertEqual(sources, [fixed / "simplex-chat"])
+                    self.assertFalse(fixed.exists())
+
+    def test_libraries_are_built_in_the_fixed_directory(self):
+        self.build(lambda source: b"code")
+
+
+class WindowsBuildEnvTest(unittest.TestCase):
+    def test_the_build_environment_has_absolute_windows_paths(self):
+        # as MSYS2's Python writes the paths of the fixed directory
+        root = build_script.BuildRoot.at(pathlib.PurePosixPath("C:/simplex-chat-build"))
+        env = build_script.windows_build_env(root)
+        self.assertEqual(
+            env,
+            {"CABAL_DIR": "C:\\simplex-chat-build\\cabal", "TMP": "C:\\simplex-chat-build\\tmp", "TEMP": "C:\\simplex-chat-build\\tmp"},
+        )
+        for value in env.values():
+            self.assertTrue(build_script.PureWindowsPath(value).is_absolute(), value)
+            self.assertNotIn("/", value)
+
+    def test_the_fixed_directory_is_absolute_on_the_system_drive(self):
+        root = build_script.PureWindowsPath(build_script.WINDOWS_BUILD_ROOT)
+        self.assertTrue(root.is_absolute())
+        self.assertEqual(root.drive, "C:")
+        self.assertTrue(build_script.windows_path(build_script.WINDOWS_BUILD_ROOT).startswith("C:\\"))

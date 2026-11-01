@@ -1,16 +1,17 @@
 """The Windows CLI, msi and core libraries, built in an MSYS2 UCRT64 shell, and their comparison with signed releases."""
 
 import array
+import contextlib
 import dataclasses
 import os
 import shutil
 import struct
 import sys
-import tempfile
 import uuid
 import zipfile
 from pathlib import Path, PureWindowsPath
 
+from .buildroot import BuildRoot, fixed_build_root
 from .common import (
     REPO,
     BuildError,
@@ -167,8 +168,30 @@ def release_windows_libs(source: Path, openssl: OpenSsl, out: Path) -> Path:
     return libs
 
 
+# The release builds run in a copy of the checkout here, with cabal's directory and the temporary directory in it:
+# cabal hashes the paths of OpenSSL's build in the checkout into the package ids that the binaries contain. Any user
+# can make a folder in the root of the system drive.
+WINDOWS_BUILD_ROOT = Path("C:/simplex-chat-build")
+
+
+def windows_path(path: Path) -> str:
+    # MSYS2's Python writes paths with /, which cabal's hackage-security joins to the drive as a relative path: C:dir
+    return str(path).replace("/", "\\")
+
+
+def windows_build_env(root: BuildRoot) -> dict[str, str]:
+    tmp = windows_path(root.tmp)
+    return {"CABAL_DIR": windows_path(root.directory / "cabal"), "TMP": tmp, "TEMP": tmp}
+
+
+def windows_build_root(source: Path) -> contextlib.AbstractContextManager[BuildRoot]:
+    root = BuildRoot.at(WINDOWS_BUILD_ROOT)
+    return fixed_build_root(source, root, windows_build_env(root))
+
+
 def build_windows_libs(source: Path, out: Path) -> None:
-    release_windows_libs(source, host_openssl(openssl_work(source)), out)
+    with windows_build_root(source) as root:
+        release_windows_libs(root.source, host_openssl(openssl_work(root.source)), out)
 
 
 def set_msi_summary(msi: Path, package_code: str, work: Path) -> None:
@@ -228,18 +251,18 @@ def package_msi(source: Path, work: Path) -> Path:
 
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
-    with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp).resolve()
-        openssl_dir = openssl_work(source)
+    with windows_build_root(source) as root:
+        work = root.work
+        openssl_dir = openssl_work(root.source)
         openssl = host_openssl(openssl_dir)
         static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, openssl_dir))
-        cli = build_host_cli(source, static.cabal_local(f"{OPENSSL_WINDOWS_STATIC_LINK} {WINDOWS_NO_TIMESTAMP}"))
+        cli = build_host_cli(root.source, static.cabal_local(f"{OPENSSL_WINDOWS_STATIC_LINK} {WINDOWS_NO_TIMESTAMP}"))
         check_static_openssl(cli, run(["objdump", "-p", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
-        libs = release_windows_libs(source, openssl, out)
+        libs = release_windows_libs(root.source, openssl, out)
         add_vlc_windows(libs, work)
-        link_desktop_libs(source, host.libs_dir, "windows-x64")
-        shutil.copy(package_msi(source, work), out / host.desktop)
+        link_desktop_libs(root.source, host.libs_dir, "windows-x64")
+        shutil.copy(package_msi(root.source, work), out / host.desktop)
 
 
 PE_DOS_MAGIC = b"MZ"
