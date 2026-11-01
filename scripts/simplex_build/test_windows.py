@@ -183,7 +183,7 @@ class MsiTest(unittest.TestCase):
             msi = build_script.package_msi(self.source, self.work)
         self.assertEqual(msi, release_msi)
         normalize.assert_called_once_with(release_msi, self.work)
-        gradle = [str(self.source / "apps/multiplatform/gradlew.bat"), "-Psimplex.assets.dir=../../assets"]
+        gradle = [str(self.source / "apps/multiplatform/gradlew.bat"), "--no-daemon", "-Psimplex.assets.dir=../../assets"]
         init = str(self.work / "msi-from-app-image.gradle")
         self.assertEqual(
             recorder.commands,
@@ -196,6 +196,7 @@ class MsiTest(unittest.TestCase):
         self.assertEqual(seen["names"], ["SimpleX.exe", "app", "app/SimpleX.cfg", "app/desktop-jvm-7.1.7-854b.jar"])
         self.assertEqual(seen["times"], {1704067200})
         self.assertEqual((image / "app/SimpleX.cfg").read_text(), "")
+
 
 
 SECTOR = 512

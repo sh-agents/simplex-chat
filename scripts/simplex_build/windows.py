@@ -252,8 +252,9 @@ def normalize_msi_summary(msi: Path, work: Path) -> None:
 def package_msi(source: Path, work: Path) -> Path:
     """jpackage's msi of the app image without the skiko runtime jar and with fixed times, which the msi's cabinet keeps."""
     multiplatform = source / "apps/multiplatform"
-    # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's
-    gradle: list[str | Path] = [multiplatform / "gradlew.bat", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"]
+    # gradlew.bat, as Windows finds its WSL bash.exe before MSYS2's; a daemon would keep files of the build directory
+    # open after the build, which Windows then can't delete
+    gradle: list[str | Path] = [multiplatform / "gradlew.bat", "--no-daemon", f"-Psimplex.assets.dir={DESKTOP_ENV['ASSETS_DIR']}"]
     # CMake links libapp-lib.dll with LDFLAGS
     env = {"LDFLAGS": LINKER_NO_TIMESTAMP}
     run([*gradle, "createDistributable"], cwd=multiplatform, env=env)
