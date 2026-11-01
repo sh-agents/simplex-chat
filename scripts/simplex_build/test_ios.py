@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import pathlib
+import plistlib
 import shutil
 import tempfile
 import unittest
@@ -63,6 +64,26 @@ class IosDetailsTest(unittest.TestCase):
         self.assertEqual(settings, {"DEVELOPMENT_TEAM": "5NN7GUYB6T", "IPHONEOS_DEPLOYMENT_TARGET": "15.0"})
         with self.assertRaises(build_script.BuildError):
             build_script.build_settings("    DEVELOPMENT_TEAM = 5NN7GUYB6T\n", ["DEVELOPMENT_TEAM", "IPHONEOS_DEPLOYMENT_TARGET"])
+
+    def test_build_machine_is_pinned_in_each_info_plist_in_its_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            products = pathlib.Path(tmp)
+            app = products / "Applications/SimpleX.app"
+            (app / "Frameworks/X.framework").mkdir(parents=True)
+            info = {"BuildMachineOSBuild": "24H232", "CFBundleName": "SimpleX"}
+            (app / "Info.plist").write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+            (app / "Frameworks/X.framework/Info.plist").write_bytes(plistlib.dumps({"BuildMachineOSBuild": "24H232"}))
+            (app / "Settings.bundle").mkdir()
+            unrelated = plistlib.dumps(["a"])
+            (app / "Settings.bundle/Info.plist").write_bytes(unrelated)
+            build_script.pin_build_machine(products)
+            binary = (app / "Info.plist").read_bytes()
+            self.assertTrue(binary.startswith(b"bplist00"))
+            self.assertEqual(plistlib.loads(binary), {"BuildMachineOSBuild": "25G83", "CFBundleName": "SimpleX"})
+            xml = (app / "Frameworks/X.framework/Info.plist").read_bytes()
+            self.assertTrue(xml.startswith(b"<?xml"))
+            self.assertEqual(plistlib.loads(xml), {"BuildMachineOSBuild": "25G83"})
+            self.assertEqual((app / "Settings.bundle/Info.plist").read_bytes(), unrelated)
 
     def test_entitlements_get_the_team_prefix(self):
         self.assertIn("<string>5NN7GUYB6T.chat.simplex.app</string>", build_script.resolve_entitlements(ENTITLEMENTS, "5NN7GUYB6T"))
@@ -175,6 +196,7 @@ class IosArchiveTest(unittest.TestCase):
                 for appex in ("SimpleX NSE", "SimpleX SE"):
                     (app / f"PlugIns/{appex}.appex").mkdir(parents=True)
                 (app / "SimpleX").write_bytes(binary)
+                (app / "Info.plist").write_bytes(plistlib.dumps({"BuildMachineOSBuild": "24H232"}, fmt=plistlib.FMT_BINARY))
                 (archive / "Info.plist").write_bytes(b"plist")
             elif args[0] == "git":
                 apple.commands.append(args)
@@ -195,6 +217,9 @@ class IosArchiveTest(unittest.TestCase):
         self.assertEqual(install_libs.call_args.args[0], source)
         self.assertEqual(install_libs.call_args.args[1].name, build_script.IOS_CORE_ZIP)
         self.assertEqual(self.cwd, source)
+        with zipfile.ZipFile(self.out / "SimpleX.xcarchive.zip") as z:
+            info = plistlib.loads(z.read("SimpleX.xcarchive/Products/Applications/SimpleX.app/Info.plist"))
+        self.assertEqual(info["BuildMachineOSBuild"], build_script.BUILD_MACHINE_OS_BUILD)
         self.assertEqual(paths.call_args.args, (self.source, build_script.CANONICAL_DEVELOPER_DIR))
         self.assertFalse(self.build_root.exists())
         return apple.commands, warn

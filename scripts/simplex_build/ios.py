@@ -91,6 +91,14 @@ IOS_LOCAL_XCCONFIG = "SIMPLEX_ASSETS_DIR = {art}\nSWIFT_ACTIVE_COMPILATION_CONDI
 PLUTIL_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
+# Xcode writes the build of the macOS that it runs on into each bundle's Info.plist; the archives name this one, of
+# macOS 26.6.2, whichever macOS builds them
+BUILD_MACHINE_OS_BUILD = "25G83"
+
+
+BINARY_PLIST = b"bplist00"
+
+
 def version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
@@ -287,6 +295,17 @@ def zip_tree(root: Path, target: Path, epoch: str) -> None:
                 z.writestr(info, os.readlink(path) if kind == stat.S_IFLNK else b"")
 
 
+def pin_build_machine(products: Path) -> None:
+    """Sets BuildMachineOSBuild to BUILD_MACHINE_OS_BUILD in each Info.plist in products that has it."""
+    for info in sorted(products.rglob("Info.plist")):
+        raw = info.read_bytes()
+        data = plistlib.loads(raw)
+        if isinstance(data, dict) and "BuildMachineOSBuild" in data:
+            data["BuildMachineOSBuild"] = BUILD_MACHINE_OS_BUILD
+            fmt = plistlib.FMT_BINARY if raw.startswith(BINARY_PLIST) else plistlib.FMT_XML
+            info.write_bytes(plistlib.dumps(data, fmt=fmt))
+
+
 def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) -> None:
     """The archive and the Nix core package it links, with the brand assets of art, the simplex-chat-art checkout, or
     else with the default icons."""
@@ -345,6 +364,7 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
             ],
             cwd=root.source,
         )
+        pin_build_machine(archive / "Products")
         app = archive / "Products/Applications/SimpleX.app"
         for appex in sorted((app / "PlugIns").glob("*.appex")):
             sign_bundle(appex, root.source / f"apps/ios/{appex.stem}/{appex.stem}.entitlements", team, work)
