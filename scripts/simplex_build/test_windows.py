@@ -376,6 +376,31 @@ class MsiComparisonTest(unittest.TestCase):
             self.assertFalse((results / "windows/_sha256sums").exists())
 
 
+class WindowsMachinePathsTest(unittest.TestCase):
+    def test_the_checkout_home_and_temporary_directories_in_each_form(self):
+        temp = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp"
+        home = pathlib.Path("C:\\Users\\runneradmin")
+        with (
+            mock.patch.dict(build_script.os.environ, {"TMP": temp, "TEMP": temp}),
+            mock.patch.object(build_script.Path, "home", return_value=home),
+        ):
+            paths = build_script.windows_machine_paths(pathlib.Path("D:/a/simplex-chat/simplex-chat"))
+        expected = {
+            "D:\\a\\simplex-chat\\simplex-chat",
+            "D:/a/simplex-chat/simplex-chat",
+            "d:/a/simplex-chat/simplex-chat",
+            "d:\\a\\simplex-chat\\simplex-chat",
+            "/d/a/simplex-chat/simplex-chat",
+            "C:\\Users\\runneradmin",
+            "c:/Users/runneradmin",
+            "/c/Users/runneradmin",
+            "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp",
+            "C:/Users/RUNNER~1/AppData/Local/Temp",
+        }
+        self.assertLessEqual(expected, set(paths))
+        self.assertTrue(all(len(build_script.PureWindowsPath(path).parts) >= 3 for path in paths))
+
+
 class WindowsLibsReleaseTest(unittest.TestCase):
     def build(self, library):
         with tempfile.TemporaryDirectory() as tmp:
@@ -404,6 +429,10 @@ class WindowsLibsReleaseTest(unittest.TestCase):
 
     def test_libraries_are_built_in_the_fixed_directory(self):
         self.build(lambda source: b"code")
+
+    def test_libraries_with_a_path_of_the_checkout_fail(self):
+        with self.assertRaisesRegex(build_script.BuildError, "libsimplex.dll: "):
+            self.build(lambda source: str(build_script.PureWindowsPath(source)).encode("utf-16-le"))
 
 
 class WindowsBuildEnvTest(unittest.TestCase):

@@ -11,7 +11,7 @@ import uuid
 import zipfile
 from pathlib import Path, PureWindowsPath
 
-from .buildroot import BuildRoot, fixed_build_root
+from .buildroot import MIN_MACHINE_PATH_PARTS, BuildRoot, check_machine_paths, find_machine_paths, fixed_build_root
 from .common import (
     REPO,
     BuildError,
@@ -174,6 +174,10 @@ def release_windows_libs(source: Path, openssl: OpenSsl, out: Path) -> Path:
 WINDOWS_BUILD_ROOT = Path("C:/simplex-chat-build")
 
 
+# what the paths of the machine look like in the files: written by Windows, by MSYS2 or by GHC, in UTF-16 or not
+WINDOWS_PATH_ENCODINGS = ("utf-8", "utf-16-le")
+
+
 def windows_path(path: Path) -> str:
     # MSYS2's Python writes paths with /, which cabal's hackage-security joins to the drive as a relative path: C:dir
     return str(path).replace("/", "\\")
@@ -189,9 +193,26 @@ def windows_build_root(source: Path) -> contextlib.AbstractContextManager[BuildR
     return fixed_build_root(source, root, windows_build_env(root))
 
 
+def windows_machine_paths(source: Path) -> list[str]:
+    """The checkout, home and temporary directories, which release files built on other machines can't contain, with
+    either slash, either case of the drive letter and as MSYS2 writes them, and with short names expanded."""
+    paths = [source, Path.home(), *(Path(os.environ[name]) for name in ("TMP", "TEMP") if os.environ.get(name))]
+    forms = set()
+    for path in {*paths, *(path.resolve() for path in paths)}:
+        windows = PureWindowsPath(path)
+        drive, rest = windows.drive, windows.as_posix()[len(windows.drive) :]
+        for written in (str(windows), windows.as_posix()):
+            forms |= {written, written.replace(drive, drive.swapcase(), 1)}
+        forms.add(f"/{drive.rstrip(':').lower()}{rest}")
+    return sorted(form for form in forms if len(PureWindowsPath(form).parts) >= MIN_MACHINE_PATH_PARTS)
+
+
 def build_windows_libs(source: Path, out: Path) -> None:
+    paths = windows_machine_paths(source)
     with windows_build_root(source) as root:
-        release_windows_libs(root.source, host_openssl(openssl_work(root.source)), out)
+        libs = release_windows_libs(root.source, host_openssl(openssl_work(root.source)), out)
+        found = find_machine_paths([libs], paths, encodings=WINDOWS_PATH_ENCODINGS)
+    check_machine_paths(found)
 
 
 def set_msi_summary(msi: Path, package_code: str, work: Path) -> None:
@@ -251,6 +272,7 @@ def package_msi(source: Path, work: Path) -> Path:
 
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
+    paths = windows_machine_paths(source)
     with windows_build_root(source) as root:
         work = root.work
         openssl_dir = openssl_work(root.source)
@@ -262,7 +284,11 @@ def build_desktop_windows(source: Path, out: Path) -> None:
         libs = release_windows_libs(root.source, openssl, out)
         add_vlc_windows(libs, work)
         link_desktop_libs(root.source, host.libs_dir, "windows-x64")
-        shutil.copy(package_msi(root.source, work), out / host.desktop)
+        msi = package_msi(root.source, work)
+        shutil.copy(msi, out / host.desktop)
+        app = single_dir(root.source / DESKTOP_RELEASE_DIR / "app", "*imple*")
+        found = find_machine_paths([out / host.cli, app, msi], paths, encodings=WINDOWS_PATH_ENCODINGS)
+    check_machine_paths(found)
 
 
 PE_DOS_MAGIC = b"MZ"

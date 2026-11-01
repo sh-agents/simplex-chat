@@ -349,6 +349,12 @@ class HostDesktopTest(unittest.TestCase):
         )
         self.assertEqual(self.zip_names("simplex-chat-libs-windows-x86_64.zip"), ["libs/libsimplex.dll", "libs/libsimplex.lib"])
 
+    def test_windows_build_fails_on_paths_of_the_checkout(self):
+        checkout = build_script.PureWindowsPath(self.source).as_posix()
+        with self.assertRaisesRegex(build_script.BuildError, "SimpleX-7.1.0.msi: "):
+            self.windows_build(msi_data=b"Property " + checkout.encode() + b"/dist-openssl")
+        self.assertFalse(self.build_root.exists())
+
     def test_cli_cabal_local_is_static_on_windows(self):
         cabal_locals = []
 
