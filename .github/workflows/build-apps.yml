@@ -116,7 +116,7 @@ jobs:
 
   android-test:
     name: Android ${{ matrix.arch }} APK in the emulator
-    needs: [android, old-database]
+    needs: [android, old-database, desktop-linux]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -157,6 +157,18 @@ jobs:
         run: |
           python3 scripts/simplex-chat-build.py test apk "$RUNNER_TEMP/apks/simplex-${{ matrix.arch }}.apk" \
             --out "$RUNNER_TEMP/screens" --database "$RUNNER_TEMP/old-database"
+
+      # the new CLI is the app's peer on the preset servers
+      - name: Download the CLI
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-ubuntu-24.04-x86_64
+          path: ${{ runner.temp }}/cli
+
+      - name: Upgrade and quantum resistant contact
+        run: |
+          python3 scripts/simplex-chat-build.py test apk "$RUNNER_TEMP/apks/simplex-${{ matrix.arch }}.apk" \
+            --out "$RUNNER_TEMP/screens" --upgrade-from-previous --cli "$RUNNER_TEMP/cli/simplex-chat-ubuntu-24_04-x86_64"
 
       - name: Upload screenshots
         if: ${{ !cancelled() }}
@@ -214,7 +226,7 @@ jobs:
   # the archive's core, from Nix, relabelled for the simulator: the same objects as the archive's, in the simulator app
   ios-test:
     name: iOS app in the simulator
-    needs: [ios, old-database]
+    needs: [ios, old-database, desktop-macos]
     runs-on: macos-26
     timeout-minutes: 120
     steps:
@@ -255,6 +267,16 @@ jobs:
 
       - name: Smoke test
         run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" "$RUNNER_TEMP/screens"
+
+      # the new CLI is the app's peer on the preset servers
+      - name: Download the CLI
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-macos-aarch64-unsigned
+          path: ${{ runner.temp }}/cli
+
+      - name: Quantum resistant contact
+        run: scripts/ci/ios-sim/pq-contact.sh "$RUNNER_TEMP/cli/simplex-chat-macos-aarch64" "$RUNNER_TEMP/peer"
 
       - name: Download the previous release's database
         uses: actions/download-artifact@v8

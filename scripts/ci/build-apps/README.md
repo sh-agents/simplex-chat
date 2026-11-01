@@ -10,6 +10,11 @@ After each build the job runs what it built as users do, with `scripts/simplex-c
 
 The job old-database makes an encrypted database with the previous release's CLI (v7.0.3, pinned by SHA-256), and every build must open it with its key: each CLI opens and migrates it and refuses a wrong key; each desktop app opens and migrates it, which the new CLI then checks; the Android apps open it from the passphrase screen, and the iOS app in the simulator too. Each desktop package is also installed over the v7.0.3 package that the old app started first, and the new app must open the database the old app made (`test desktop --upgrade-from-previous`).
 
+Two tests cover the OpenSSL of the mobile apps' core beyond opening a database:
+
+- **Upgrade** (`test apk --upgrade-from-previous`): the v7.0.3 APK for the same ABI, pinned by its SHA-256 and signed with the same throwaway key as the new APK, installs, makes a profile through onboarding and keeps its database key in the Android keystore; the new APK installs over it (`adb install -r`) and must show the chat list, not the passphrase or database error screen. Screenshots `<apk>.v7.0.3.png` and `<apk>.upgraded.png`.
+- **Quantum resistant contact** (`test apk --cli`, `scripts/ci/ios-sim/pq-contact.sh`): the upgraded Android app, and the iOS simulator app with the archive's core, take a one-time link of the new CLI from the desktop jobs, both on the preset servers (Android through a VIEW intent, iOS pasted, as `simctl openurl` delivered a link the core rejected), and exchange a message each way. The CLI's `/i` must show "quantum resistant end-to-end encryption"; the Android chat must show "quantum resistant e2e encryption", and the iOS contact info "E2E encryption: Quantum resistant", since the iOS accessibility tree has no message texts. sntrup761, the KEM of these connections, hashes with OpenSSL's SHA-512. Screenshots `<apk>.upgraded.pq.png`, `pq-messages` and `pq-contact-info`, with the peer's log and contact info.
+
 ## Running it
 
 The workflow runs only when started by hand, on any branch: in the Actions tab, `build-apps` → Run workflow, or `gh workflow run build-apps.yml --ref <branch>`. A newer run on the same branch cancels the older one. Start it on master or a branch of master: armv7a is built from the same commit, which `stable` only supports once it carries the armv7a build of master.
