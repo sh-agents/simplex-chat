@@ -582,6 +582,13 @@ CODE_SIGNATURE_DIR = "_CodeSignature"
 CODE_RESOURCES = "CodeResources"
 
 
+# jpackage's record of the app, which says whether the app is signed
+JPACKAGE_STATE = ".jpackage.xml"
+
+
+JPACKAGE_UNSIGNED, JPACKAGE_SIGNED = b"<signed>false</signed>", b"<signed>true</signed>"
+
+
 # The designated requirement of Developer ID applications, for the certificate of the SimpleX team
 DEVELOPER_ID_REQUIREMENT = (
     "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and "
@@ -658,6 +665,8 @@ def same_item(released: Path, built: Path, renamed: dict[str, str]) -> bool:
         return True
     if released.suffix == ".cfg":
         return data == rename_jars(built_data.decode(), renamed).encode()
+    if released.name == JPACKAGE_STATE:
+        return data == built_data.replace(JPACKAGE_UNSIGNED, JPACKAGE_SIGNED, 1)
     if released.suffix == ".jar":
         return same_jar(released, built)
     return same_code(data, built_data)

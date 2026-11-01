@@ -570,6 +570,9 @@ def app_volume(root, signature):
     name = "jna-5.14.0-" + ("8b3cc65292435ad9f801e6d9b2a3497" if signature else "1a2b3c4d5e6f")
     jar(app / f"app/{name}.jar", codesign(library, signature) if signature else library)
     (app / "app/SimpleX.cfg").write_text(f"[Application]\napp.classpath=$APPDIR/{name}.jar\napp.mainclass=MainKt\n")
+    signed = "true" if signature else "false"
+    state = f'<jpackage-state version="17.0.21" platform="macOS">\n  <signed>{signed}</signed></jpackage-state>'
+    (app / "app/.jpackage.xml").write_text(state)
     return app
 
 
@@ -628,6 +631,13 @@ class MacReproduceTest(unittest.TestCase):
             build_script.volume_differences(self.released, self.built),
             [f"SimpleX.app/Contents/app/{name}" for name in ("SimpleX.cfg", jar_path.name)],
         )
+
+    def test_jpackage_state_differs_only_in_whether_the_app_is_signed(self):
+        state = self.released / "SimpleX.app/Contents/app/.jpackage.xml"
+        state.write_text(state.read_text().replace('version="17.0.21"', 'version="17.0.22"'))
+        self.assertEqual(build_script.volume_differences(self.released, self.built), ["SimpleX.app/Contents/app/.jpackage.xml"])
+        state.write_text(state.read_text().replace('version="17.0.22"', 'version="17.0.21"').replace("true", "false"))
+        self.assertEqual(build_script.volume_differences(self.released, self.built), [])
 
     def test_jars_differ_in_their_entries_metadata(self):
         released = single_file(self.released / "SimpleX.app/Contents/app", "jna-*.jar")
