@@ -2,13 +2,15 @@ import base64
 import json
 import os
 import pathlib
+import plistlib
+import re
 import struct
 import tempfile
 import unittest
 import zipfile
 from unittest import mock
 
-from .testing import FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
+from .testing import REPO_ROOT, FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
 
 XCODE_SDK_LIB = "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"
 
@@ -146,6 +148,20 @@ class MacLibTest(unittest.TestCase):
             link.unlink()
             link.symlink_to(xcode_sdk)
             build_script.check_command_line_tools_sdk(xcode_sdk)
+
+    def test_the_app_declares_the_deployment_target_as_its_minimum_macos(self):
+        app = self.root / "SimpleX.app"
+        (app / "Contents").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": "11.0"}))
+        build_script.check_minimum_system_version(app)
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": "10.13"}))
+        with self.assertRaises(build_script.BuildError) as raised:
+            build_script.check_minimum_system_version(app)
+        self.assertIn("declares macOS 10.13, not 11.0", str(raised.exception))
+
+    def test_the_gradle_build_sets_the_deployment_target_as_the_minimum_macos(self):
+        gradle = (REPO_ROOT / "apps/multiplatform/desktop/build.gradle.kts").read_text()
+        self.assertEqual(re.findall(r'minimumSystemVersion = "([^"]+)"', gradle), [build_script.MACOS_DEPLOYMENT_TARGET])
 
     def test_binaries_for_a_newer_macos_than_the_deployment_target_fail(self):
         libs = self.root / "libs"

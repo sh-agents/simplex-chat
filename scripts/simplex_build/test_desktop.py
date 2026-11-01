@@ -1,6 +1,7 @@
 import contextlib
 import os
 import pathlib
+import plistlib
 import shutil
 import tempfile
 import unittest
@@ -141,6 +142,8 @@ class HostDesktopTest(unittest.TestCase):
 
         def build_app(source, keychain):
             calls.append(("app", keychain))
+            (self.app / "Contents").mkdir(parents=True, exist_ok=True)
+            (self.app / "Contents/Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": "11.0"}))
             shutil.copytree(libs, self.app / build_script.COMPOSE_RESOURCES)
             names = ("CABAL_DIR", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "LC_ALL", "TZ")
             self.app_env = {name: os.environ.get(name) for name in names}
