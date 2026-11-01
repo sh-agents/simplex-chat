@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from .testing import build_script
+from . import buildroot
+from .testing import build_script, patch_all
 
 
 class FixedBuildRootTest(unittest.TestCase):
@@ -31,6 +32,37 @@ class FixedBuildRootTest(unittest.TestCase):
             self.assertEqual(os.environ["TMP"], "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp")
             self.assertNotIn("TEMP", os.environ)
         self.assertFalse(root.directory.exists())
+
+
+class FailedCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.source = pathlib.Path(self.tmp.name) / "checkout"
+        self.source.mkdir()
+        self.root = build_script.BuildRoot.at(pathlib.Path(self.tmp.name) / "fixed")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_failed_build_keeps_its_error_when_the_directory_can_not_be_removed(self):
+        open_file = build_script.BuildError("cannot remove fixed: a file is open")
+        with (
+            mock.patch.object(buildroot, "clear_build_root", side_effect=[None, open_file]),
+            patch_all("warn") as warn,
+            self.assertRaisesRegex(build_script.BuildError, "packageMsi failed"),
+            build_script.fixed_build_root(self.source, self.root, {}),
+        ):
+            raise build_script.BuildError("packageMsi failed")
+        warn.assert_called_once_with("cannot remove fixed: a file is open")
+
+    def test_a_built_release_fails_when_the_directory_can_not_be_removed(self):
+        open_file = build_script.BuildError("cannot remove fixed: a file is open")
+        with (
+            mock.patch.object(buildroot, "clear_build_root", side_effect=[None, open_file]),
+            self.assertRaisesRegex(build_script.BuildError, "a file is open"),
+            build_script.fixed_build_root(self.source, self.root, {}),
+        ):
+            pass
 
 
 class FindMachinePathsTest(unittest.TestCase):

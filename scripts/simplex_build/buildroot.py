@@ -9,7 +9,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import BuildError, normalize_permissions, remove_tree
+from .common import BuildError, normalize_permissions, remove_tree, warn
 
 # the umask of GitHub's runners
 BUILD_UMASK = 0o022
@@ -54,8 +54,10 @@ def fixed_build_root(source: Path, root: BuildRoot, env: Mapping[str, str]) -> I
     saved = {name: os.environ.get(name) for name in env}
     umask = os.umask(BUILD_UMASK)
     os.environ.update(env)
+    built = False
     try:
         yield root
+        built = True
     finally:
         os.umask(umask)
         for name, value in saved.items():
@@ -63,7 +65,13 @@ def fixed_build_root(source: Path, root: BuildRoot, env: Mapping[str, str]) -> I
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-        clear_build_root(root.directory)
+        try:
+            clear_build_root(root.directory)
+        except BuildError as e:
+            # the error of a failed build says more than the cleanup's
+            if built:
+                raise
+            warn(str(e))
 
 
 # fewer parts would match unrelated paths, as / would match every path
