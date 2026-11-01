@@ -1,5 +1,6 @@
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -116,6 +117,58 @@ class BuildRootTest(unittest.TestCase):
         with self.patched(), self.assertRaises(build_script.BuildError), build_script.build_root(inside, {}):
             pass
         self.assertTrue(inside.is_dir())
+
+
+class SpawnTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_spawn_runs_the_program_on_path_in_the_directory_with_the_environment(self):
+        with mock.patch.dict(os.environ, {"SPAWN_TEST": "value"}):
+            code = build_script.spawn(["sh", "-c", 'pwd > out; echo "$SPAWN_TEST" >> out; exit 3'], self.root, 0)
+        self.assertEqual(code, 3)
+        self.assertEqual((self.root / "out").read_text().splitlines(), [str(self.root.resolve()), "value"])
+
+    def test_a_program_that_cannot_start_fails(self):
+        with self.assertRaises(build_script.BuildError) as raised:
+            build_script.spawn(["simplex-no-such-program"], self.root, 0)
+        self.assertIn("posix_spawnp", str(raised.exception))
+
+    def probes(self, addresses):
+        """Stands in for spawn: writes the next of addresses where the probe would write its load address."""
+        calls = []
+
+        def fake_spawn(args, cwd, flags):
+            calls.append((args[0], flags))
+            pathlib.Path(args[-1]).write_text(addresses[len(calls) - 1])
+            return 0
+
+        return calls, fake_spawn
+
+    def test_aslr_is_off_when_two_programs_load_at_the_same_address(self):
+        calls, fake_spawn = self.probes(["0x100000000", "0x100000000"])
+        with patch_all("spawn", fake_spawn), patch_all("log"):
+            build_script.check_aslr_off(self.root)
+        self.assertEqual(calls, [(sys.executable, build_script.POSIX_SPAWN_DISABLE_ASLR)] * 2)
+
+    def test_programs_at_different_addresses_mean_aslr_is_on(self):
+        _, fake_spawn = self.probes(["0x100000000", "0x104538000"])
+        with patch_all("spawn", fake_spawn), self.assertRaises(build_script.BuildError) as raised:
+            build_script.check_aslr_off(self.root)
+        self.assertIn("0x100000000 and 0x104538000", str(raised.exception))
+
+    def test_the_build_runs_without_aslr_and_fails_with_its_program(self):
+        calls = []
+        with patch_all("spawn", lambda args, cwd, flags: calls.append((args, cwd, flags)) or 0):
+            build_script.run_without_aslr(["xcodebuild", "archive"], self.root)
+        self.assertEqual(calls, [(["xcodebuild", "archive"], self.root, 0x0100)])
+        with patch_all("spawn", return_value=65), self.assertRaises(build_script.BuildError) as raised:
+            build_script.run_without_aslr(["xcodebuild", "archive"], self.root)
+        self.assertIn("failed (65): xcodebuild archive", str(raised.exception))
 
 
 USER_TEMP = "/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/"

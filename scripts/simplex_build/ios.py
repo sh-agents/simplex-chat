@@ -15,10 +15,12 @@ from .apple import (
     CANONICAL_DEVELOPER_DIR,
     XCODE,
     build_root,
+    check_aslr_off,
     check_machine_paths,
     find_machine_paths,
     machine_paths,
     require_xcode,
+    run_without_aslr,
 )
 from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
 from .macho import simulator_archive
@@ -352,7 +354,8 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         # Xcode refuses ad-hoc signing for iOS devices ("Ad Hoc code signing is not allowed with SDK"), so the archive
         # is built unsigned and its bundles are signed after.
         archive = work / "SimpleX.xcarchive"
-        run(
+        check_aslr_off(work)
+        run_without_aslr(
             [
                 "xcodebuild", "archive", "-quiet", *xcode,
                 "-destination", "generic/platform=iOS",
@@ -363,7 +366,7 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
                 "-skipMacroValidation",
                 "CODE_SIGNING_ALLOWED=NO",
             ],
-            cwd=root.source,
+            root.source,
         )
         pin_build_machine(archive / "Products")
         app = archive / "Products/Applications/SimpleX.app"

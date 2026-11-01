@@ -210,6 +210,8 @@ class IosArchiveTest(unittest.TestCase):
             patch_all("install_ios_libs") as install_libs,
             patch_all("require_xcode", return_value=build_script.CANONICAL_DEVELOPER_DIR) as xcode,
             patch_all("BUILD_ROOT", self.build_root),
+            patch_all("check_aslr_off") as aslr,
+            patch_all("run_without_aslr", lambda args, cwd: fake_run(args, cwd=cwd)),
             patch_all("machine_paths", return_value=["/Users/builder"]) as paths,
             patch_all("warn") as warn,
         ):
@@ -218,6 +220,7 @@ class IosArchiveTest(unittest.TestCase):
         self.assertEqual(install_libs.call_args.args[1].name, build_script.IOS_CORE_ZIP)
         self.assertEqual(self.cwd, source)
         xcode.assert_called_once_with(build_script.XCODE)
+        aslr.assert_called_once_with(self.build_root / "work")
         with zipfile.ZipFile(self.out / "SimpleX.xcarchive.zip") as z:
             info = plistlib.loads(z.read("SimpleX.xcarchive/Products/Applications/SimpleX.app/Info.plist"))
         self.assertEqual(info["BuildMachineOSBuild"], build_script.BUILD_MACHINE_OS_BUILD)
