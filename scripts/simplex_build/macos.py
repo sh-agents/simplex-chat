@@ -48,6 +48,11 @@ LIBFFI_URL = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3
 LIBFFI_SHA256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
 
 
+# GHC's libraries list the Command Line Tools' SDK, where GHC's configure found libiconv, in their library directories,
+# which the linker searches before SDKROOT
+COMMAND_LINE_TOOLS_SDK = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+
+
 # The minimum macOS of the CLI and libraries: that of the launcher and the JDK runtime, the newest of the app's parts that
 # are not built here, on both arches (VLC's, skiko's and GHC's libraries need 10.8 to 11.0)
 MACOS_DEPLOYMENT_TARGET = "11.0"
@@ -416,10 +421,19 @@ def release_macos_libs(
     return libs
 
 
+def check_command_line_tools_sdk(sdk: Path) -> None:
+    if COMMAND_LINE_TOOLS_SDK.exists() and COMMAND_LINE_TOOLS_SDK.resolve() != sdk.resolve():
+        raise BuildError(
+            f"{COMMAND_LINE_TOOLS_SDK} is not the macOS SDK of the selected Xcode, {sdk}, and GHC's links take libraries "
+            f"from it: link it there with sudo ln -sfn {sdk} {COMMAND_LINE_TOOLS_SDK}"
+        )
+
+
 def macos_build_env() -> dict[str, str]:
     """The macOS SDK of the selected Xcode, which GHC's links don't find without SDKROOT, and the deployment target, which
     is the build machine's macOS without MACOSX_DEPLOYMENT_TARGET."""
     sdk = run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture=True).stdout.strip()
+    check_command_line_tools_sdk(Path(sdk))
     return {"SDKROOT": sdk, "MACOSX_DEPLOYMENT_TARGET": MACOS_DEPLOYMENT_TARGET}
 
 

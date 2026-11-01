@@ -24,6 +24,12 @@ class HostDesktopTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    @contextlib.contextmanager
+    def fixed_build(self):
+        """The build directory in the test's directory, on a Mac without the Command Line Tools."""
+        with patch_all("BUILD_ROOT", self.build_root), patch_all("COMMAND_LINE_TOOLS_SDK", self.root / "no-command-line-tools"):
+            yield
+
     def fetch(self, work):
         source = work / f"openssl-{build_script.OPENSSL_VERSION}"
         source.mkdir(exist_ok=True)
@@ -155,7 +161,7 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("apple_signing", return_value=signed),
             patch_all("require_xcode", return_value=XCODE_DEVELOPER) as xcode,
             patch_all("apple_keychain", lambda work: contextlib.nullcontext(self.keychain)),
-            patch_all("BUILD_ROOT", self.build_root),
+            self.fixed_build(),
             patch_all("machine_paths", return_value=["/Users/builder"]),
             patch_all("build_mac_lib", lambda source, arch, database, work: calls.append(("lib", arch)) or libs),
             patch_all("add_vlc_mac", add_vlc),
@@ -246,7 +252,7 @@ class HostDesktopTest(unittest.TestCase):
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             patch_all("apple_signing", return_value=False),
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
-            patch_all("BUILD_ROOT", self.build_root),
+            self.fixed_build(),
             patch_all("release_macos_libs", release),
             patch_all("link_desktop_libs", lambda *args: calls.append(("link", *args))),
         ):
@@ -270,7 +276,7 @@ class HostDesktopTest(unittest.TestCase):
             mock.patch.object(build_script.platform, "machine", return_value="x86_64"),
             patch_all("apple_signing", return_value=False),
             patch_all("require_xcode", return_value=XCODE_DEVELOPER),
-            patch_all("BUILD_ROOT", self.build_root),
+            self.fixed_build(),
             patch_all("static_libcrypto", return_value=self.root),
             self.assertRaises(build_script.BuildError),
         ):

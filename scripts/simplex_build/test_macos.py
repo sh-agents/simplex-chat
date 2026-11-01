@@ -126,10 +126,26 @@ class MacLibTest(unittest.TestCase):
 
     def test_builds_use_the_selected_sdk_and_the_minimum_macos_of_the_launcher(self):
         recorder = Recorder(answers={"--show-sdk-path": f"{XCODE_SDK_LIB.removesuffix('/usr/lib')}\n"})
-        with patch_all("run", recorder):
+        with patch_all("run", recorder), patch_all("COMMAND_LINE_TOOLS_SDK", self.root / "missing"):
             env = build_script.macos_build_env()
         self.assertEqual(recorder.commands, [["xcrun", "--sdk", "macosx", "--show-sdk-path"]])
         self.assertEqual(env, {"SDKROOT": XCODE_SDK_LIB.removesuffix("/usr/lib"), "MACOSX_DEPLOYMENT_TARGET": "11.0"})
+
+    def test_the_command_line_tools_sdk_must_be_the_selected_one_when_it_exists(self):
+        xcode_sdk = self.root / "Xcode.app/SDKs/MacOSX26.5.sdk"
+        other_sdk = self.root / "CommandLineTools/SDKs/MacOSX27.0.sdk"
+        xcode_sdk.mkdir(parents=True)
+        other_sdk.mkdir(parents=True)
+        link = self.root / "CommandLineTools/SDKs/MacOSX.sdk"
+        with patch_all("COMMAND_LINE_TOOLS_SDK", link):
+            build_script.check_command_line_tools_sdk(xcode_sdk)
+            link.symlink_to(other_sdk)
+            with self.assertRaises(build_script.BuildError) as raised:
+                build_script.check_command_line_tools_sdk(xcode_sdk)
+            self.assertIn(f"sudo ln -sfn {xcode_sdk} {link}", str(raised.exception))
+            link.unlink()
+            link.symlink_to(xcode_sdk)
+            build_script.check_command_line_tools_sdk(xcode_sdk)
 
     def test_binaries_for_a_newer_macos_than_the_deployment_target_fail(self):
         libs = self.root / "libs"
