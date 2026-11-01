@@ -197,6 +197,24 @@ class MsiTest(unittest.TestCase):
         self.assertEqual(seen["times"], {1704067200})
         self.assertEqual((image / "app/SimpleX.cfg").read_text(), "")
 
+    def test_failed_msi_prints_what_jpackage_and_wix_printed(self):
+        logs = self.source / "apps/multiplatform" / build_script.JPACKAGE_MSI_LOGS
+        logs.mkdir(parents=True)
+        (logs / "jpackage-out.txt").write_text("Running light.exe\n")
+        (logs / "jpackage-err.txt").write_text("light.exe : error LGHT0217 : Error executing ICE action 'ICE01'\n")
+        image = self.source / build_script.DESKTOP_RELEASE_DIR / "app/SimpleX"
+        (image / "app").mkdir(parents=True)
+        (image / "app/SimpleX.cfg").write_text("")
+        recorder = Recorder(fail_once=["packageMsi"])
+        with (
+            patch_all("run", recorder),
+            mock.patch("builtins.print") as printed,
+            self.assertRaises(build_script.BuildError),
+        ):
+            build_script.package_msi(self.source, self.work)
+        output = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertIn("light.exe : error LGHT0217 : Error executing ICE action 'ICE01'\n", output)
+        self.assertIn("Running light.exe\n", output)
 
 
 SECTOR = 512

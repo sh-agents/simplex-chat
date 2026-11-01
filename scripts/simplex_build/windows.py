@@ -20,6 +20,7 @@ from .common import (
     download_release,
     edit_lines,
     fetch_pinned,
+    log_group,
     remove_tree,
     run,
     sha256,
@@ -249,6 +250,16 @@ def normalize_msi_summary(msi: Path, work: Path) -> None:
     set_msi_storage_time(msi)
 
 
+# where Compose keeps what jpackage and WiX print, which Gradle doesn't show when they fail
+JPACKAGE_MSI_LOGS = "desktop/build/compose/logs/packageMsi"
+
+
+def print_jpackage_logs(logs: Path) -> None:
+    for log_file in sorted(logs.glob("*.txt")):
+        with log_group(log_file.name):
+            print(log_file.read_text(errors="replace"), flush=True)
+
+
 def package_msi(source: Path, work: Path) -> Path:
     """jpackage's msi of the app image without the skiko runtime jar and with fixed times, which the msi's cabinet keeps."""
     multiplatform = source / "apps/multiplatform"
@@ -264,7 +275,11 @@ def package_msi(source: Path, work: Path) -> Path:
     init = work / "msi-from-app-image.gradle"
     init.write_text(MSI_FROM_APP_IMAGE_INIT)
     # packageMsi would otherwise create the edited app image again
-    run([*gradle, "--init-script", init, "packageMsi", "-x", "createDistributable"], cwd=multiplatform, env=env)
+    try:
+        run([*gradle, "--init-script", init, "packageMsi", "-x", "createDistributable"], cwd=multiplatform, env=env)
+    except BuildError:
+        print_jpackage_logs(multiplatform / JPACKAGE_MSI_LOGS)
+        raise
     init.unlink()
     msi = single_file(source / DESKTOP_RELEASE_DIR / "msi", "*imple*.msi")
     normalize_msi_summary(msi, work)
