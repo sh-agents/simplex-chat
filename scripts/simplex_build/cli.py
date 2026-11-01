@@ -42,9 +42,11 @@ ANDROID_KEY_PASSWORD are set, and unsigned otherwise.
 
 import argparse
 import enum
+import io
 import os
 import platform
 import re
+import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -651,6 +653,10 @@ def parse_compare_args(argv: Sequence[str]) -> Compare:
 
 
 def main(argv: Sequence[str]) -> int:
+    # Windows consoles print in a code page without the characters of msi stream names, which compare logs
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="backslashreplace")
     command = parse_args(argv)
     os.environ["DOCKER_BUILDKIT"] = "1"
     try:

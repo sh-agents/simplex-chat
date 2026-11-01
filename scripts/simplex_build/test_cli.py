@@ -234,6 +234,16 @@ class MainTest(unittest.TestCase):
             self.assertEqual(build_script.main(["reproduce", "v7.1.0"]), 1)
         self.assertIn("error: boom", err.getvalue())
 
+    def test_characters_the_console_can_not_print_are_escaped(self):
+        console = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        with (
+            patch_all("execute", side_effect=lambda command: build_script.log("/\u4840\u3f3f differs")),
+            mock.patch("sys.stdout", console),
+        ):
+            self.assertEqual(build_script.main(["compare", "a", "b"]), 0)
+        console.flush()
+        self.assertIn(b"/\\u4840\\u3f3f differs", console.buffer.getvalue())
+
     def test_build_commands_go_to_build(self):
         with patch_all("build") as build:
             self.assertEqual(build_script.main(["build", "aab", "--libs", "l", "--out", "o"]), 0)
