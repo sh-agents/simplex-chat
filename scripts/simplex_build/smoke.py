@@ -2,16 +2,20 @@
 
 import base64
 import contextlib
+import functools
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import time
 import zipfile
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -83,6 +87,51 @@ ANDROID_UPGRADE_BUTTON = "Upgrade and open chat"
 # what the app may ask once a database with a user opens: a database upgrade, background notifications and the
 # battery optimization notes that follow them, delivery receipts
 ANDROID_DISMISS_BUTTONS = (ANDROID_UPGRADE_BUTTON, "Disable notifications", "OK", "Don't enable")
+# The previous release's APK for each ABI, which the upgrade test installs before the new one
+OLD_RELEASE_APK_SHA256 = {
+    "arm64-v8a": ("simplex-aarch64.apk", "d535e5a8986d4e11b9abd5656a3c0e1be5a08e06b00a7b20d6b7587ed0c3457f"),
+    "armeabi-v7a": ("simplex-armv7a.apk", "3a89d2f825ce1a30ff51b30487c1b0b58de6eba03426d1500112b7417e659fdc"),
+}
+ANDROID_STEP_SECONDS = 60
+ANDROID_PROFILE = "citester"
+ANDROID_GET_STARTED_BUTTON = "Get started"
+ANDROID_PROFILE_FIELD = "Enter profile name"
+ANDROID_CREATE_PROFILE_BUTTON = "Create profile"
+ANDROID_CONTINUE_BUTTON = "Continue"
+# the app's notifications alert (Allow, or OK before Android 13), the system's battery dialog and the conditions, which
+# come in turn after onboarding; Continue again when the slowed app missed the first tap on it
+ANDROID_ONBOARDING_BUTTONS = ("Allow", "OK", "Accept", "Continue")
+ANDROID_OK_BUTTON = "OK"
+ANDROID_WHATS_NEW_TEXT = "New in"
+ANDROID_CHAT_LIST_BUTTON = "Start new chat"
+# a profile without conversations sees the onboarding pages in place of the list
+ANDROID_EMPTY_CHAT_LIST_TEXT = "Talk to someone"
+# the titles of the app's database error screen, which shows instead of the chat list when the database doesn't open
+ANDROID_DATABASE_ERROR_TITLES = (
+    "Encrypted database",
+    "Wrong database passphrase",
+    "Database error",
+    "Keychain error",
+    "Incompatible database version",
+    "Database upgrade",
+    "Database downgrade",
+)
+# the ARM translation drops characters typed faster than the app takes them
+ANDROID_TYPED_CHARACTERS = 8
+ANDROID_VIEW_ACTION = "android.intent.action.VIEW"
+ANDROID_USE_PROFILE_BUTTON = "Use current profile"
+ANDROID_CONNECTION_SENT_TEXT = "Connection request sent"
+ANDROID_MESSAGE_FIELD = "Message"
+ANDROID_SEND_BUTTON = "Send Message"
+ANDROID_PQ_TEXT = "quantum resistant e2e encryption"
+# The CLI peer that connects with the app, both on the preset servers as users connect
+PEER_NAME = "pq_peer"
+PEER_ONLINE_SECONDS = 5
+PEER_CONNECT_SECONDS = 300
+PEER_INVITATION_QUERY = "SELECT conn_req_inv FROM connections WHERE conn_req_inv IS NOT NULL ORDER BY connection_id DESC LIMIT 1"
+PEER_PQ_TEXT = "quantum resistant end-to-end encryption"
+PEER_MESSAGE = "peer-to-app"
+APP_MESSAGE = "app-to-peer"
 WINDOWS_SCREENSHOT = """Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
@@ -426,10 +475,12 @@ def find_apksigner() -> str:
 
 
 def signed_for_test(apk: Path, work: Path) -> Path:
-    """A copy of apk signed with a throwaway key, as Android installs only signed APKs."""
+    """A copy of apk signed with a throwaway key, as Android installs only signed APKs; the APKs signed in one work
+    directory share the key, so that one installs over another."""
     keystore, password = work / "test.keystore", "test-key"
-    keytool: list[str | Path] = ["keytool", "-genkeypair", "-keystore", keystore, "-storepass", password, "-alias", "test"]
-    run([*keytool, "-keyalg", "RSA", "-keysize", "2048", "-validity", "1", "-dname", "CN=test"])
+    if not keystore.exists():
+        keytool: list[str | Path] = ["keytool", "-genkeypair", "-keystore", keystore, "-storepass", password, "-alias", "test"]
+        run([*keytool, "-keyalg", "RSA", "-keysize", "2048", "-validity", "1", "-dname", "CN=test"])
     signed = work / apk.name
     signer: list[str | Path] = [find_apksigner(), "sign", "--ks", keystore, "--ks-pass", f"pass:{password}", "--out", signed, apk]
     run(signer, title=f"apksigner sign {apk.name}")
@@ -439,8 +490,7 @@ def signed_for_test(apk: Path, work: Path) -> Path:
 def emulator_screenshot(target: Path, work: Path) -> None:
     """The emulator's screen: without a window it composes the screen on the host, where the guest's screencap can't
     read it."""
-    shots = work / "screenshot"
-    shots.mkdir()
+    shots = Path(tempfile.mkdtemp(prefix="screenshot", dir=work))
     run(["adb", "emu", "screenrecord", "screenshot", shots], capture=True)
     wait_until(lambda: any(png.stat().st_size for png in shots.glob("*.png")), EMULATOR_SCREENSHOT_SECONDS, "emulator screenshot")
     shutil.move(next(png for png in shots.glob("*.png") if png.stat().st_size), target)
@@ -461,21 +511,211 @@ def android_screen_loaded() -> bool:
 
 
 def android_node_centre(ui: str, text: str) -> tuple[int, int] | None:
-    """The centre of the first node whose text starts with text, from uiautomator's dump."""
-    hierarchy = ElementTree.fromstring(ui[ui.index("<?xml") : ui.rindex(">") + 1])
-    for node in hierarchy.iter("node"):
+    """The centre of the node on screen whose text or content description is text, else of the first that starts with
+    it, from uiautomator's dump; None also when the dump failed, as it does while the screen changes."""
+    start = ui.find("<hierarchy")
+    try:
+        hierarchy = ElementTree.fromstring(ui[start : ui.rfind(">") + 1]) if start >= 0 else None
+    except ElementTree.ParseError:
+        hierarchy = None
+    starting: list[tuple[int, int]] = []
+    for node in hierarchy.iter("node") if hierarchy is not None else ():
         bounds = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
-        if node.get("text", "").startswith(text) and bounds:
-            left, top, right, bottom = map(int, bounds.groups())
-            return (left + right) // 2, (top + bottom) // 2
-    return None
+        left, top, right, bottom = map(int, bounds.groups()) if bounds else (0, 0, 0, 0)
+        labels = (node.get("text", ""), node.get("content-desc", ""))
+        # nodes off the screen, such as the chat list under an open chat, have empty bounds
+        if right > left and bottom > top and any(label.startswith(text) for label in labels):
+            centre = (left + right) // 2, (top + bottom) // 2
+            if text in labels:
+                return centre
+            starting.append(centre)
+    return starting[0] if starting else None
 
 
-def android_tap(text: str) -> bool:
-    if centre := android_node_centre(android_screen(), text):
+def android_shows(ui: str, text: str) -> bool:
+    return android_node_centre(ui, text) is not None
+
+
+def android_tap(text: str, ui: str | None = None) -> bool:
+    """Taps the node with the text on the screen, or on the screen already dumped as ui."""
+    if centre := android_node_centre(android_screen() if ui is None else ui, text):
         run(["adb", "shell", "input", "tap", str(centre[0]), str(centre[1])])
         return True
     return False
+
+
+def android_tap_when_shown(text: str, seconds: float = ANDROID_STEP_SECONDS) -> None:
+    wait_until(lambda: android_tap(text), seconds, f'"{text}" to tap')
+
+
+def android_field_shows(text: str) -> bool:
+    return f'text="{text}"' in android_screen()
+
+
+def android_type(text: str) -> None:
+    """Types text, without spaces or shell characters, into the focused field a few characters at a time, each part
+    checked on the field."""
+    for end in range(ANDROID_TYPED_CHARACTERS, len(text) + ANDROID_TYPED_CHARACTERS, ANDROID_TYPED_CHARACTERS):
+        run(["adb", "shell", "input", "text", text[end - ANDROID_TYPED_CHARACTERS : end]])
+        wait_until(functools.partial(android_field_shows, text[:end]), ANDROID_STEP_SECONDS, f'"{text[:end]}" in the field')
+
+
+def android_onboarding() -> None:
+    """Onboarding in the started app to its chat list, as smoke-test.sh does it, with the profile ANDROID_PROFILE."""
+
+    def first_screen() -> bool:
+        ui = android_screen()
+        if android_shows(ui, ANDROID_WHATS_NEW_TEXT):
+            android_tap(ANDROID_OK_BUTTON, ui)
+        return android_shows(ui, ANDROID_GET_STARTED_BUTTON)
+
+    wait_until(first_screen, ANDROID_FIRST_SCREEN_SECONDS, "first onboarding screen")
+    android_tap_when_shown(ANDROID_GET_STARTED_BUTTON)
+    android_tap_when_shown(ANDROID_PROFILE_FIELD)
+    android_type(ANDROID_PROFILE)
+    android_tap_when_shown(ANDROID_CREATE_PROFILE_BUTTON)
+    android_tap_when_shown(ANDROID_CONTINUE_BUTTON)
+
+    def chat_list_shown() -> bool:
+        ui = android_screen()
+        if android_shows(ui, ANDROID_EMPTY_CHAT_LIST_TEXT):
+            return True
+        for button in ANDROID_ONBOARDING_BUTTONS:
+            if android_tap(button, ui):
+                break
+        return False
+
+    wait_until(chat_list_shown, ANDROID_FIRST_SCREEN_SECONDS, "chat list after onboarding")
+
+
+def wait_android_chat_list() -> None:
+    """Waits for the chat list, closing the What's new sheet; the database error screen fails at once."""
+
+    def chat_list_shown() -> bool:
+        ui = android_screen()
+        if errors := [title for title in ANDROID_DATABASE_ERROR_TITLES if android_shows(ui, title)]:
+            raise BuildError(f'the app shows "{errors[0]}" in place of its chat list')
+        if android_shows(ui, ANDROID_WHATS_NEW_TEXT):
+            android_tap(ANDROID_OK_BUTTON, ui)
+            return False
+        return android_shows(ui, ANDROID_CHAT_LIST_BUTTON)
+
+    wait_until(chat_list_shown, ANDROID_FIRST_SCREEN_SECONDS, "chat list")
+
+
+def save_android_screen(prefix: Path, work: Path) -> None:
+    """The screen's dump and screenshot, for a failed test."""
+    Path(f"{prefix}.xml").write_text(android_screen())
+    try:
+        emulator_screenshot(Path(f"{prefix}.png"), work)
+    except BuildError as e:
+        warn(f"no screenshot of the failed test: {e}")
+
+
+def old_release_apk(apk: Path, work: Path) -> Path:
+    """The previous release's APK for apk's ABI, as released."""
+    abis = sorted(apk_abis(apk) & OLD_RELEASE_APK_SHA256.keys())
+    if len(abis) != 1:
+        raise BuildError(f"{apk.name} has the ABIs {', '.join(sorted(apk_abis(apk)))}: expected one of {', '.join(OLD_RELEASE_APK_SHA256)}")
+    name, digest = OLD_RELEASE_APK_SHA256[abis[0]]
+    target = work / OLD_RELEASE / f"{OLD_RELEASE}-{name}"
+    target.parent.mkdir()
+    return fetch_pinned(release_url(OLD_RELEASE, name), digest, target)
+
+
+def install_over_old_release(apk: Path, out: Path, work: Path) -> None:
+    """The previous release installs and makes a profile in its encrypted database, then apk installs over it, signed
+    with the same test key, and keeps the old app's data and the database key that it stored in the Android keystore."""
+    run(["adb", "install", "-g", signed_for_test(old_release_apk(apk, work), work)])
+    old_version = android_app_version()
+    run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
+    android_onboarding()
+    time.sleep(SETTLE_SECONDS)
+    emulator_screenshot(out / f"{apk.name}.{OLD_RELEASE}.png", work)
+    run(["adb", "install", "-r", "-g", signed_for_test(apk, work)])
+    new_version = android_app_version()
+    record(out, f"{apk.name}.upgrade", f"{OLD_RELEASE} installed as {old_version}, then {apk.name} as {new_version}\n")
+    if new_version == old_version:
+        raise BuildError(f"{apk.name} installed as {new_version}, the version of {OLD_RELEASE}")
+
+
+def android_app_version() -> str:
+    dump = run(["adb", "shell", "dumpsys", "package", ANDROID_PACKAGE], capture=True).stdout
+    if version := re.search(r"versionName=(\S+)", dump):
+        return version.group(1)
+    raise BuildError(f"{ANDROID_PACKAGE} is not installed")
+
+
+@dataclass(frozen=True, slots=True)
+class CliPeer:
+    """A CLI client with its database, which connects with an app and exchanges messages with it; it is online only
+    while a command runs, for PEER_ONLINE_SECONDS after it."""
+
+    cli: Path
+    database: Path
+    log: Path
+
+    def chat(self, command: str) -> str:
+        args: list[str | Path] = [self.cli, "-d", self.database, "--user-display-name", PEER_NAME]
+        output = run([*args, "-e", command, "-t", str(PEER_ONLINE_SECONDS)], input="", capture=True).stdout
+        with open(self.log, "a") as f:
+            f.write(f"> {command}\n{output}\n")
+        return output
+
+    def invitation(self) -> str:
+        """A new one-time link in its full simplex: form, which the apps open without asking the server for the link's
+        data; the CLI prints only the short link with -e, so the link is read from its database."""
+        output = self.chat("/c")
+        try:
+            with contextlib.closing(sqlite3.connect(f"file:{self.database}_chat.db?mode=ro", uri=True)) as db:
+                row = db.execute(PEER_INVITATION_QUERY).fetchone()
+        except sqlite3.Error as e:
+            raise BuildError(f"cannot read the peer CLI's database: {e}") from e
+        if row is None:
+            raise BuildError(f"the peer CLI made no one-time link: {output!r}")
+        link = row[0]
+        return link.decode() if isinstance(link, bytes) else str(link)
+
+    def wait(self, command: str, expected: str, what: str) -> str:
+        outputs: list[str] = []
+
+        def shown() -> bool:
+            outputs.append(self.chat(command))
+            return expected in outputs[-1]
+
+        wait_until(shown, PEER_CONNECT_SECONDS, what)
+        return outputs[-1]
+
+
+def connect_android_peer(cli: Path, profile: str, name: str, out: Path, work: Path) -> None:
+    """The app, at its chat list with the profile, opens the one-time link of a CLI peer, and they exchange messages;
+    the peer's contact info and the app's chat must show quantum resistant encryption, whose sntrup761 KEM hashes with
+    the core's OpenSSL."""
+    (work / "peer").mkdir()
+    peer = CliPeer(runnable_cli(cli, work), work / "peer" / PEER_NAME, out / f"{name}.peer.log")
+    link = peer.invitation()
+    run(["adb", "shell", "am", "start", "-W", "-a", ANDROID_VIEW_ACTION, "-d", shlex.quote(link), "-n", ANDROID_ACTIVITY])
+    android_tap_when_shown(ANDROID_USE_PROFILE_BUTTON)
+    wait_until(lambda: android_shows(android_screen(), ANDROID_CONNECTION_SENT_TEXT), ANDROID_STEP_SECONDS, "connection request sent")
+    android_tap_when_shown(ANDROID_OK_BUTTON)
+    peer.wait(f"/i @{profile}", PEER_PQ_TEXT, f"quantum resistant contact {profile} in the peer CLI")
+    peer.chat(f"@{profile} {PEER_MESSAGE}")
+    android_tap_when_shown(PEER_NAME, PEER_CONNECT_SECONDS)
+
+    def peer_message_shown() -> bool:
+        ui = android_screen()
+        return android_shows(ui, PEER_MESSAGE) and ANDROID_PQ_TEXT in ui
+
+    wait_until(peer_message_shown, PEER_CONNECT_SECONDS, f'"{PEER_MESSAGE}" in a chat with "{ANDROID_PQ_TEXT}"')
+    android_tap_when_shown(ANDROID_MESSAGE_FIELD)
+    android_type(APP_MESSAGE)
+    android_tap_when_shown(ANDROID_SEND_BUTTON)
+    peer.wait(f"/tail @{profile} 5", APP_MESSAGE, f'"{APP_MESSAGE}" from the app in the peer CLI')
+    info = peer.chat(f"/i @{profile}")
+    record(out, f"{name}.peer-contact", info)
+    if PEER_PQ_TEXT not in info:
+        raise BuildError(f"the peer's contact {profile} is not quantum resistant after the messages: {name}.peer-contact.txt")
+    emulator_screenshot(out / f"{name}.pq.png", work)
 
 
 def push_android_old_database(database: Path) -> None:
@@ -516,35 +756,54 @@ def open_android_old_database(out: Path, work: Path) -> None:
         raise
 
 
-def test_apk(apk: Path, out: Path, database: Path | None = None) -> None:
-    """The APK installs in the running emulator, starts and draws its first screen without exiting; given the previous
-    release's database, the app opens it with its key and shows its chat list."""
+def test_apk(apk: Path, out: Path, database: Path | None = None, upgrade: bool = False, cli: Path | None = None) -> None:
+    """The APK installs in the running emulator, starts and draws its first screen without exiting. Given the previous
+    release's database, the app opens it with its key and shows its chat list; with upgrade, it installs over the
+    previous release and opens the database that release made. Then, given a CLI, the app connects with it as a peer
+    with quantum resistant encryption."""
+    if database and upgrade:
+        raise BuildError("the app opens either the previous release's database or its own after an upgrade, not both")
+    if cli and not (database or upgrade):
+        raise BuildError("the peer test needs the app's profile, from the previous release's database or an upgrade")
     require_tools(["adb", "keytool"])
     device_abis = set(run(["adb", "shell", "getprop", "ro.product.cpu.abilist"], capture=True).stdout.strip().split(","))
     if not apk_abis(apk) & device_abis:
         warn(f"{apk.name} is for {', '.join(sorted(apk_abis(apk)))}, which the emulator can't run ({', '.join(sorted(device_abis))})")
         add_summary(f"`{apk.name}`: not tested, the emulator runs {', '.join(sorted(device_abis))}\n\n")
         return
+    name = f"{apk.name}.upgraded" if upgrade else apk.name
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        unsigned = run([find_apksigner(), "verify", apk], check=False, capture=True).returncode != 0
-        installable = signed_for_test(apk, work) if unsigned else apk
         run(["adb", "uninstall", ANDROID_PACKAGE], check=False, capture=True)
-        run(["adb", "install", "-g", installable])
-        if database:
-            push_android_old_database(database)
-        run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
-        if database:
-            open_android_old_database(out, work)
-        else:
-            wait_until(android_screen_loaded, ANDROID_FIRST_SCREEN_SECONDS, "screen past the database loading")
-        time.sleep(SETTLE_SECONDS)
-        screen = out / f"{apk.name}.png"
-        emulator_screenshot(screen, work)
+        try:
+            if upgrade:
+                install_over_old_release(apk, out, work)
+            else:
+                unsigned = run([find_apksigner(), "verify", apk], check=False, capture=True).returncode != 0
+                run(["adb", "install", "-g", signed_for_test(apk, work) if unsigned else apk])
+            if database:
+                push_android_old_database(database)
+            run(["adb", "shell", "am", "start", "-W", "-n", ANDROID_ACTIVITY])
+            if database:
+                open_android_old_database(out, work)
+            elif upgrade:
+                wait_android_chat_list()
+            else:
+                wait_until(android_screen_loaded, ANDROID_FIRST_SCREEN_SECONDS, "screen past the database loading")
+            time.sleep(SETTLE_SECONDS)
+            screen = out / f"{name}.png"
+            emulator_screenshot(screen, work)
+            if cli:
+                connect_android_peer(cli, OLD_DATABASE_USER if database else ANDROID_PROFILE, name, out, work)
+        except BuildError:
+            save_android_screen(out / f"{name}.failed", work)
+            raise
     if not run(["adb", "shell", "pidof", ANDROID_PACKAGE], check=False, capture=True).stdout.strip():
         logcat = run(["adb", "logcat", "-d", "-t", "200"], check=False, capture=True).stdout
-        record(out, f"{apk.name}.logcat", logcat)
-        raise BuildError(f"{ANDROID_PACKAGE} is not running after it started: logcat in {apk.name}.logcat.txt")
+        record(out, f"{name}.logcat", logcat)
+        raise BuildError(f"{ANDROID_PACKAGE} is not running after it started: logcat in {name}.logcat.txt")
     opened = f", opens the {OLD_RELEASE} database" if database else ""
-    log(f"{apk.name}: the app runs{opened}, {screen.name}")
-    add_summary(f"`{apk.name}`: the app runs{opened}, screenshot `{screen.name}`\n\n")
+    upgraded = f", installs over {OLD_RELEASE} and opens its database" if upgrade else ""
+    connected = ", connects with the CLI with quantum resistant encryption" if cli else ""
+    log(f"{apk.name}: the app runs{opened}{upgraded}{connected}, {screen.name}")
+    add_summary(f"`{apk.name}`: the app runs{opened}{upgraded}{connected}, screenshot `{screen.name}`\n\n")

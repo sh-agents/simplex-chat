@@ -23,7 +23,7 @@ Run release files as their users do, with screenshots of the apps; apk needs a r
     simplex-chat-build.py test cli <binary> --out <dir>
     simplex-chat-build.py test desktop <.deb|.AppImage|.dmg|.msi> --out <dir>
     simplex-chat-build.py test desktop <.deb|.AppImage|.dmg|.msi> --out <dir> --upgrade-from-previous --cli <cli>
-    simplex-chat-build.py test apk <apk> --out <dir>
+    simplex-chat-build.py test apk <apk> --out <dir> [--upgrade-from-previous] [--cli <cli>]
 
 Install prebuilt core libraries where the apps' builds take them, as the test workflows do:
     simplex-chat-build.py install libs linux <libs zip>
@@ -218,7 +218,8 @@ type Build = (
 @dataclass(frozen=True, slots=True)
 class TestRelease:
     """A smoke test of a release file: what it is, the file, and the previous release's database it must open, with
-    the CLI that checks it after a desktop app; or a desktop package installed over the previous release's app."""
+    the CLI that checks it after a desktop app or connects with an Android app as its peer; or a package installed over
+    the previous release's app."""
 
     kind: str
     file: Path
@@ -354,7 +355,7 @@ def test(command: TestRelease) -> None:
             else:
                 test_desktop(file, out, database, cli)
         case _:
-            test_apk(file, out, database)
+            test_apk(file, out, database, command.upgrade, cli)
 
 
 def execute(command: Command) -> None:
@@ -486,12 +487,13 @@ def parse_test_args(argv: Sequence[str]) -> TestRelease | MakeOldDatabase:
         sub.add_argument("file", type=Path, help=file)
         sub.add_argument("--out", type=Path, required=True, help="where the screenshots and logs go")
         sub.add_argument("--database", type=Path, help=f"the directory of test old-database: the file must open {OLD_RELEASE}'s database")
-        if name == "desktop":
-            sub.add_argument("--cli", type=Path, help="the new CLI, which checks that the app migrated the database")
+        if name in ("desktop", "apk"):
+            peer = "checks that the app migrated the database" if name == "desktop" else "connects with the app as its peer"
+            sub.add_argument("--cli", type=Path, help=f"the new CLI, which {peer}")
             sub.add_argument(
                 "--upgrade-from-previous",
                 action="store_true",
-                help=f"install the file over {OLD_RELEASE}'s app, which makes its database first; needs --cli and no --database",
+                help=f"install the file over {OLD_RELEASE}'s app, which makes its database first; no --database",
             )
     old = kinds.add_parser("old-database", help=f"an encrypted database made by {OLD_RELEASE}'s CLI, on Linux")
     old.add_argument("--out", type=Path, required=True, help="where the database goes")
@@ -499,8 +501,10 @@ def parse_test_args(argv: Sequence[str]) -> TestRelease | MakeOldDatabase:
     if args.kind == "old-database":
         return MakeOldDatabase(args.out)
     upgrade = getattr(args, "upgrade_from_previous", False)
-    if upgrade and (args.database or not args.cli):
-        parser.error("--upgrade-from-previous needs --cli, and the app makes its own database instead of --database")
+    if upgrade and args.database:
+        parser.error("--upgrade-from-previous: the app makes its own database instead of --database")
+    if upgrade and args.kind == "desktop" and not args.cli:
+        parser.error("--upgrade-from-previous needs --cli, which checks that the desktop app migrated its database")
     return TestRelease(args.kind, args.file, args.out, args.database, getattr(args, "cli", None), upgrade)
 
 

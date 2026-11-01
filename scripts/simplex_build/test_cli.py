@@ -156,10 +156,22 @@ class PrebuiltLibsTest(unittest.TestCase):
             build_script.parse_args(["test", "apk", "simplex-armv7a.apk", "--out", "o", "--database", "old"]),
             build_script.TestRelease("apk", pathlib.Path("simplex-armv7a.apk"), pathlib.Path("o"), pathlib.Path("old")),
         )
+        upgrade = ["test", "apk", "simplex-aarch64.apk", "--out", "o", "--upgrade-from-previous", "--cli", "simplex-chat"]
+        self.assertEqual(
+            build_script.parse_args(upgrade),
+            build_script.TestRelease(
+                "apk", pathlib.Path("simplex-aarch64.apk"), pathlib.Path("o"), cli=pathlib.Path("simplex-chat"), upgrade=True
+            ),
+        )
         self.assertEqual(
             build_script.parse_args(["test", "old-database", "--out", "old"]), build_script.MakeOldDatabase(pathlib.Path("old"))
         )
-        for argv in (["test", "desktop", "app.deb"], ["test", "ios", "x", "--out", "o"], ["test", "cli", "x", "--out", "o", "--cli", "y"]):
+        for argv in (
+            ["test", "desktop", "app.deb"],
+            ["test", "ios", "x", "--out", "o"],
+            ["test", "cli", "x", "--out", "o", "--cli", "y"],
+            ["test", "apk", "app.apk", "--out", "o", "--upgrade-from-previous", "--database", "old"],
+        ):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 build_script.parse_args(argv)
 
@@ -219,6 +231,17 @@ class MainTest(unittest.TestCase):
         with patch_all("build") as build:
             self.assertEqual(build_script.main(["build", "aab", "--libs", "l", "--out", "o"]), 0)
         self.assertIsInstance(build.call_args.args[0], build_script.BuildBundle)
+
+    def test_apk_test_gets_the_upgrade_and_the_peer_cli(self):
+        with tempfile.TemporaryDirectory() as tmp, patch_all("test_apk") as test_apk:
+            out = pathlib.Path(tmp) / "screens"
+            argv = ["test", "apk", "simplex-aarch64.apk", "--out", str(out), "--upgrade-from-previous", "--cli", "simplex-chat"]
+            self.assertEqual(build_script.main(argv), 0)
+            self.assertTrue(out.is_dir())
+        self.assertEqual(
+            test_apk.call_args.args,
+            (pathlib.Path("simplex-aarch64.apk").resolve(), out.resolve(), None, True, pathlib.Path("simplex-chat").resolve()),
+        )
 
     def test_missing_tools_are_named(self):
         with mock.patch.object(build_script.shutil, "which", return_value=None), self.assertRaises(build_script.BuildError) as e:
