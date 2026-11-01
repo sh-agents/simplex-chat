@@ -14,6 +14,7 @@ class ReleaseDetailsTest(unittest.TestCase):
     def test_tag_version(self):
         self.assertEqual(build_script.tag_version("v7.1.0-beta.7"), "7.1.0")
         self.assertEqual(build_script.tag_version("v6.4.8"), "6.4.8")
+        self.assertEqual(build_script.tag_version("v7.1.99-repro-test"), "7.1.99-repro")
 
     def test_release_url_and_clone_of_simplex_chat_or_a_fork(self):
         self.assertEqual(

@@ -235,8 +235,8 @@ def compare_release(names: Sequence[str], out: Path, differences: Callable[[Path
 
 
 def tag_version(tag: str) -> str:
-    """v7.1.0-beta.7 -> 7.1.0, as the desktop CLI deb is versioned"""
-    return tag.lstrip("v").split("-")[0]
+    """v7.1.0-beta.7 -> 7.1.0, as build.yml versions the desktop CLI deb: without the tag's last -suffix"""
+    return tag.lstrip("v").rsplit("-", 1)[0]
 
 
 def clone(workdir: Path, repo: str = SIMPLEX_REPO) -> Path:
