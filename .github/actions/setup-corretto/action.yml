@@ -28,7 +28,8 @@ runs:
         esac
         archive="$RUNNER_TEMP/$file"
         curl --proto '=https' --tlsv1.2 -fsSL -o "$archive" "https://corretto.aws/downloads/resources/$CORRETTO_VERSION/$file"
-        actual=$( (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") | cut -d' ' -f1)
+        # from stdin, as sha256sum prefixes the digest of a path with backslashes with "\"
+        actual=$( { sha256sum 2>/dev/null || shasum -a 256; } < "$archive" | cut -d' ' -f1)
         if [ "$actual" != "$digest" ]; then
           echo "::error::$file has SHA-256 $actual, not the pinned $digest"
           exit 1
