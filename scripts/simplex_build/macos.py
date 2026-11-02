@@ -92,8 +92,9 @@ DOS_EPOCH_YEAR = 1980
 HFS_PARTITION = "Apple_HFS"
 
 
-# rpaths relative to the library or the app, the only ones that the libraries' links keep
-RELATIVE_RPATH = "@"
+# rpaths relative to the library or the app, the only ones that the libraries keep: dyld searches an absolute one, which
+# another user can create, before @loader_path, and the app's entitlements disable library validation
+RELATIVE_RPATHS = ("@loader_path", "@executable_path")
 
 
 # directories of the build machine that the libraries must not load from
@@ -180,6 +181,12 @@ def copy_mac_dependencies(lib: Path, deps: Path, ghc_libdir: Path, libraries: Se
         copy_mac_dependencies(dependency, deps, ghc_libdir, libraries, copied)
 
 
+def check_relative_rpaths(libraries: Sequence[Path]) -> None:
+    absolute = [f"{lib.name} ({rpath})" for lib in libraries for rpath in rpaths(lib) if not rpath.startswith(RELATIVE_RPATHS)]
+    if absolute:
+        raise BuildError(f"these libraries have rpaths that are not relative to them: {', '.join(absolute)}")
+
+
 def bundle_mac_libcrypto(libs: Path, database: Database) -> None:
     """Copies the libcrypto that the libraries link into libs, and points them at the copy and their rpaths at libs."""
     smplxmq = single_file(libs, "libHSsmplxmq-*.dylib")
@@ -199,9 +206,7 @@ def bundle_mac_libcrypto(libs: Path, database: Database) -> None:
         if linked:
             run(["install_name_tool", "-change", linked, f"@rpath/{bundled}", lib])
     dylibs = sorted(p for p in libs.rglob("*.dylib") if p.is_file())
-    absolute = [f"{lib.name} ({rpath})" for lib in dylibs for rpath in rpaths(lib) if not rpath.startswith(RELATIVE_RPATH)]
-    if absolute:
-        raise BuildError(f"these libraries were linked with absolute rpaths: {', '.join(absolute)}")
+    check_relative_rpaths(dylibs)
     local = [lib.name for lib in dylibs if any(LOCAL_DIRS.search(line) for line in otool("-l", lib))]
     if local:
         message = f"these libraries still point to local directories: {', '.join(local)}"
@@ -537,6 +542,7 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         sign_app(app, keychain)
         # the app's resources have the libraries and the app's own JNI library, which Gradle builds
         check_deployment_target([out / host.cli, app / COMPOSE_RESOURCES])
+        check_relative_rpaths(sorted((app / COMPOSE_RESOURCES).glob("*.dylib")))
         check_minimum_system_version(app)
         found += find_machine_paths([app], paths, skip=[app / COMPOSE_RESOURCES])
         dmg = work / host.desktop

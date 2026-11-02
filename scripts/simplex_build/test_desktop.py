@@ -222,7 +222,7 @@ class HostDesktopTest(unittest.TestCase):
         self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.dylib"])
         checked = [c[-1] for c in self.recorder.commands if c[:2] == ["otool", "-l"]]
         resources = self.app / build_script.COMPOSE_RESOURCES
-        self.assertEqual(checked, [str(self.out / "simplex-chat-macos-aarch64"), str(resources / "libsimplex.dylib")])
+        self.assertEqual(checked, [str(self.out / "simplex-chat-macos-aarch64"), *[str(resources / "libsimplex.dylib")] * 2])
 
     def test_macos_build_with_a_path_of_the_machine_fails_after_its_files_are_written(self):
         with self.assertRaises(build_script.BuildError) as raised:

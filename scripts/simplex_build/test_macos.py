@@ -122,6 +122,24 @@ class MacLibTest(unittest.TestCase):
         self.assertIn(["install_name_tool", "-id", "libcrypto.3.0.dylib", str(libs / "libcrypto.3.0.dylib")], fake.commands)
         self.assertEqual(kept, ["@loader_path", "@executable_path/../lib"])
 
+    def test_only_rpaths_relative_to_the_library_or_the_app_pass(self):
+        libs = ["libapp-lib.dylib", "libsimplex.dylib", "libHSbase.dylib"]
+        fake = FakeOtool(
+            small_l={
+                "libapp-lib.dylib": otool_l(["@loader_path", "/private/tmp/simplex-chat-build/simplex-chat/libs/mac-aarch64"]),
+                "libsimplex.dylib": otool_l(["@loader_path", "@executable_path/../Frameworks"]),
+                "libHSbase.dylib": otool_l(["@rpath/../lib"]),
+            }
+        )
+        with patch_all("run", fake), self.assertRaises(build_script.BuildError) as raised:
+            build_script.check_relative_rpaths([pathlib.Path(name) for name in libs])
+        message = str(raised.exception)
+        self.assertIn("libapp-lib.dylib (/private/tmp/simplex-chat-build/simplex-chat/libs/mac-aarch64)", message)
+        self.assertIn("libHSbase.dylib (@rpath/../lib)", message)
+        self.assertNotIn("libsimplex", message)
+        with patch_all("run", fake):
+            build_script.check_relative_rpaths([pathlib.Path("libsimplex.dylib")])
+
     def test_libraries_linked_with_absolute_rpaths_fail(self):
         libs = self.root / "libs"
         libs.mkdir()
