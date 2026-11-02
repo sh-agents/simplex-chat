@@ -34,6 +34,19 @@ class FixedBuildRootTest(unittest.TestCase):
         self.assertFalse(root.directory.exists())
 
 
+class CheckoutCopyTest(unittest.TestCase):
+    def test_the_build_outputs_of_the_checkout_are_not_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp) / "checkout"
+            for path in ("dist-newstyle/build/simplex-chat.exe", "dist-openssl/libcrypto.a", "apps/dist-newstyle/kept", "src/Main.hs"):
+                (source / path).parent.mkdir(parents=True, exist_ok=True)
+                (source / path).write_text("x")
+            root = build_script.BuildRoot.at(pathlib.Path(tmp) / "fixed")
+            with build_script.fixed_build_root(source, root, {}):
+                copied = sorted(p.relative_to(root.source).as_posix() for p in root.source.rglob("*") if p.is_file())
+            self.assertEqual(copied, ["apps/dist-newstyle/kept", "src/Main.hs"])
+
+
 class FailedCleanupTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

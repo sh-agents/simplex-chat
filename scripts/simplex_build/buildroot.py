@@ -15,6 +15,10 @@ from .common import BuildError, normalize_permissions, remove_tree, warn
 BUILD_UMASK = 0o022
 
 
+# what earlier builds left in the checkout, which the release build makes again: copied, they would only take space
+CHECKOUT_BUILD_DIRS = ("dist-newstyle", "dist-openssl")
+
+
 @dataclass(frozen=True, slots=True)
 class BuildRoot:
     """The copy of the checkout that a release builds in, an empty directory for the rest of its build, and its
@@ -40,6 +44,10 @@ def clear_build_root(directory: Path) -> None:
         raise BuildError(f"cannot remove {directory}, where the release builds run: {e}") from e
 
 
+def checkout_build_dirs(source: Path, directory: str, names: list[str]) -> list[str]:
+    return [name for name in names if name in CHECKOUT_BUILD_DIRS] if Path(directory) == source else []
+
+
 @contextlib.contextmanager
 def fixed_build_root(source: Path, root: BuildRoot, env: Mapping[str, str]) -> Iterator[BuildRoot]:
     """source copied into root, with the modes of normalize_permissions, and BUILD_UMASK and the variables of env set
@@ -49,7 +57,7 @@ def fixed_build_root(source: Path, root: BuildRoot, env: Mapping[str, str]) -> I
     clear_build_root(root.directory)
     root.work.mkdir(parents=True)
     root.tmp.mkdir()
-    shutil.copytree(source, root.source, symlinks=True)
+    shutil.copytree(source, root.source, symlinks=True, ignore=lambda directory, names: checkout_build_dirs(source, directory, names))
     normalize_permissions(root.source)
     saved = {name: os.environ.get(name) for name in env}
     umask = os.umask(BUILD_UMASK)
