@@ -11,6 +11,7 @@ from .testing import (
     JAMMY,
     JAMMY_ARM,
     NOBLE,
+    REPO_ROOT,
     FakeRunner,
     Recorder,
     build_script,
@@ -148,21 +149,25 @@ class DesktopTest(unittest.TestCase):
         self.write_exports("chat_send_cmd\n", '"chat_send_cmd"\n')
         build = self.source / "dist-newstyle/build/x86_64-linux/ghc-9.6.3/simplex-chat-7.1.0/build"
         build.mkdir(parents=True)
-        (build / "libHSsimplex-chat-7.1.0-inplace-ghc9.6.3.so").write_bytes(b"lib")
+        (build / "libHSsimplex-chat-7.1.0-inplace-ghc9.6.3.so").write_bytes(b"\x7fELF simplex")
         (self.multiplatform / "desktop/build/cmake").mkdir(parents=True)
 
         def copy_ghc_libs(step):
             for name in step.argv[1:-1]:
-                (pathlib.Path(step.argv[-1]) / pathlib.Path(name).name).write_bytes(b"ghc")
+                (pathlib.Path(step.argv[-1]) / pathlib.Path(name).name).write_bytes(b"\x7fELF ghc")
 
         ldd = "\tlibHSbase-4.18-ghc9.6.3.so => /ghc/lib/libHSbase-4.18-ghc9.6.3.so (0x1)\n\tlibc.so.6 => /lib/libc.so.6 (0x2)\n"
-        runner = FakeRunner(actions={"cp": copy_ghc_libs}, answers={"ldd": ldd})
+        libs = self.source / build_script.DESKTOP_LIBS_DIR / "linux-x86_64"
+        ghc_runpath, store_runpath = [("RUNPATH", "$ORIGIN")], [("RUNPATH", f"{STORE}:$ORIGIN")]
+        shipped = readelf({libs / "libHSbase-4.18-ghc9.6.3.so": ghc_runpath, libs / "libsimplex.so": store_runpath})
+        runner = FakeRunner(actions={"cp": copy_ghc_libs}, answers={"ldd": ldd, "readelf": shipped})
         libs = build_script.build_linux_lib(runner, self.source, "x86_64", build_script.Database.POSTGRES)
         cabal = runner.argvs()[0]
         self.assertIn("--builddir=dist-newstyle", cabal)
         self.assertIn("simplexmq +client_library +client_postgres", cabal)
         self.assertIn(("patchelf", "--replace-needed", "libffi.so.7", "libffi.so.8", "libsimplex.so"), runner.argvs())
-        self.assertEqual(runner.argvs()[-1], ("cp", "/ghc/lib/libHSbase-4.18-ghc9.6.3.so", str(build / "deps")))
+        self.assertIn(("cp", "/ghc/lib/libHSbase-4.18-ghc9.6.3.so", str(build / "deps")), runner.argvs())
+        self.assertEqual(runner.argvs()[-1], ("patchelf", "--set-rpath", "$ORIGIN", str(libs / "libsimplex.so")))
         self.assertEqual(libs, self.source / build_script.DESKTOP_LIBS_DIR / "linux-x86_64")
         self.assertEqual(sorted(p.name for p in libs.iterdir()), ["libHSbase-4.18-ghc9.6.3.so", "libsimplex.so"])
         self.assertFalse((self.multiplatform / "desktop/build/cmake").exists())
@@ -450,3 +455,81 @@ class LinuxLibsTest(unittest.TestCase):
                 build_script.build_linux_libs(root, JAMMY, build_script.Database.SQLITE, "dist-lib", builder, root)
             self.assertEqual(recorder.commands, [["docker", "exec", "-w", "/project", "builder", "cabal", "update"]])
             self.assertEqual(lib.call_args.args[4], "dist-lib")
+
+
+STORE = "/home/builder/.cabal/store/ghc-9.6.3/hashable-1.4.3.0-98ac/lib"
+
+
+def readelf(entries):
+    """What readelf -d prints of each file: entries maps a file to its (kind, value) search paths."""
+    blocks = []
+    for file, paths in entries.items():
+        lines = [f"File: {file}", "", "Dynamic section at offset 0x2d6e8 contains 3 entries:", "  Tag        Type        Name/Value"]
+        lines.append(" 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]")
+        for kind, value in paths:
+            name = "Library rpath" if kind == "RPATH" else "Library runpath"
+            lines.append(f" 0x000000000000001d ({kind})            {name}: [{value}]")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
+
+
+class LibrarySearchPathTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.libs = pathlib.Path(self.tmp.name) / "libs"
+        (self.libs / "vlc").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def elf(self, name):
+        path = self.libs / name
+        path.write_bytes(b"\x7fELF\x02\x01\x01" + bytes(57))
+        return path
+
+    def test_search_paths_of_one_or_many_files(self):
+        one = self.elf("libsimplex.so")
+        single = readelf({one: [("RUNPATH", f"{STORE}:$ORIGIN")]}).split("\n", 2)[2]
+        self.assertEqual(build_script.library_search_paths(FakeRunner(answers={"readelf": single}), [one]), {one: [STORE, "$ORIGIN"]})
+        other = self.elf("libHSbase-4.18.1.0-ghc9.6.3.so")
+        output = readelf({one: [("RUNPATH", "$ORIGIN")], other: [("RPATH", "$ORIGIN/../lib"), ("RUNPATH", "/usr/lib")]})
+        self.assertEqual(
+            build_script.library_search_paths(FakeRunner(answers={"readelf": output}), [one, other]),
+            {one: ["$ORIGIN"], other: ["$ORIGIN/../lib", "/usr/lib"]},
+        )
+        self.assertEqual(build_script.library_search_paths(FakeRunner(), []), {})
+
+    def test_libraries_that_look_elsewhere_look_only_in_their_own_directory(self):
+        store = self.elf("libHShashable-1.4.3.0-98ac-ghc9.6.3.so")
+        simplex = self.elf("libsimplex.so")
+        ghc = self.elf("libHSbase-4.18.1.0-ghc9.6.3.so")
+        ffi = self.elf("libffi.so.8")
+        (self.libs / "README").write_text("not a library")
+        output = readelf({ffi: [], ghc: [("RUNPATH", "$ORIGIN")], simplex: [("RUNPATH", f"{STORE}:$ORIGIN")], store: [("RUNPATH", STORE)]})
+        runner = FakeRunner(answers={"readelf": output})
+        build_script.set_origin_runpaths(runner, self.libs)
+        patched = [argv for argv in runner.argvs() if argv[0] == "patchelf"]
+        self.assertEqual(patched, [("patchelf", "--set-rpath", "$ORIGIN", str(path)) for path in (store, simplex)])
+        self.assertNotIn(str(self.libs / "README"), runner.argvs()[0])
+
+    def test_files_that_look_for_libraries_outside_their_directory_fail(self):
+        planted = self.elf("libHSaeson-2.2.1.0-cf52-ghc9.6.3.so")
+        vlc = self.elf("vlc/libvlc.so.5")
+        runtime = self.elf("libawt.so")
+        vlc_paths = [("RUNPATH", "$ORIGIN/../:$ORIGIN")]
+        output = readelf({planted: [("RUNPATH", f"$ORIGIN:{STORE}")], runtime: [("RPATH", "$ORIGIN")], vlc: vlc_paths})
+        with self.assertRaises(build_script.BuildError) as raised:
+            build_script.check_origin_runpaths(FakeRunner(answers={"readelf": output}), [self.libs])
+        self.assertEqual(str(raised.exception), f"these files look for libraries outside their own directory:\n{planted} ({STORE})")
+        relative = readelf({planted: [("RUNPATH", "$ORIGIN")], runtime: [("RPATH", "$ORIGIN")], vlc: [("RUNPATH", "$ORIGIN/../:$ORIGIN")]})
+        build_script.check_origin_runpaths(FakeRunner(answers={"readelf": relative}), [self.libs])
+        lookalike = readelf({planted: [("RUNPATH", "$ORIGINAL/lib")], runtime: [("RPATH", "$ORIGIN")], vlc: []})
+        with self.assertRaisesRegex(build_script.BuildError, r"\(\$ORIGINAL/lib\)"):
+            build_script.check_origin_runpaths(FakeRunner(answers={"readelf": lookalike}), [self.libs])
+
+    def test_app_library_is_linked_with_its_own_directory_only(self):
+        cmake = (REPO_ROOT / "apps/multiplatform/common/src/commonMain/cpp/desktop/CMakeLists.txt").read_text()
+        linux = cmake.split("if(UNIX AND NOT APPLE)", 1)[1].split("elseif(WIN32)", 1)[0]
+        self.assertIn("set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)", linux)
+        self.assertIn('set(CMAKE_INSTALL_RPATH "$ORIGIN")', linux)
+        self.assertNotIn("CMAKE_BUILD_RPATH", linux)

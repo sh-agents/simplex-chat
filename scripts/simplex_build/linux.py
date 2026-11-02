@@ -5,6 +5,7 @@ import platform
 import re
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,6 +94,21 @@ DEB_ARCHES = {"x86_64": "amd64", "aarch64": "arm64"}
 LINUX_LIB_GHC_OPTIONS = "-optl-Wl,-rpath,$ORIGIN -optl-Wl,-soname,libsimplex.so -flink-rts -threaded"
 
 
+# The only directory where the released libraries and programs look for libraries: their own. GHC and cabal link each
+# library with the absolute directories, in the build container, of the libraries it loads.
+ORIGIN = "$ORIGIN"
+
+
+ELF_MAGIC = b"\x7fELF"
+
+
+# readelf -d names each file before its dynamic section when it is given more than one
+READELF_FILE = "File: "
+
+
+READELF_SEARCH_PATHS = ("(RPATH)", "(RUNPATH)")
+
+
 # The builds of the continuous releases of simplex-chat/appimagetool and simplex-chat/type2-runtime of 2025-06-04
 APPIMAGE_TOOLS = {
     "x86_64": (
@@ -132,7 +148,56 @@ def build_linux_lib(runner: Runner, source: Path, arch: str, database: Database,
     libs.mkdir(parents=True)
     for path in [*deps.iterdir(), build / "libsimplex.so"]:
         shutil.copy(path, libs)
+    set_origin_runpaths(runner, libs)
     return libs
+
+
+def elf_files(roots: Sequence[Path]) -> list[Path]:
+    """The ELF files that are roots or in them, without symbolic links."""
+    candidates = []
+    for root in roots:
+        candidates += [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+    found = []
+    for candidate in candidates:
+        with candidate.open("rb") as f:
+            if f.read(len(ELF_MAGIC)) == ELF_MAGIC:
+                found.append(candidate)
+    return found
+
+
+def library_search_paths(runner: Runner, files: Sequence[Path]) -> dict[Path, list[str]]:
+    """The RPATH and RUNPATH entries of each of files, as readelf -d prints them."""
+    if not files:
+        return {}
+    named = {runner.path(file): file for file in files}
+    found: dict[Path, list[str]] = {file: [] for file in files}
+    current = files[0]
+    for line in runner.run(Step(("readelf", "-d", *named)), capture=True).splitlines():
+        if line.startswith(READELF_FILE):
+            current = named[line.removeprefix(READELF_FILE).strip()]
+        elif any(kind in line for kind in READELF_SEARCH_PATHS):
+            found[current] += [entry for entry in line.split("[", 1)[1].rstrip().rstrip("]").split(":") if entry]
+    return found
+
+
+def set_origin_runpaths(runner: Runner, libs: Path) -> None:
+    """Each library in libs that looks for libraries elsewhere than in its own directory looks only there, where the
+    release puts the libraries it loads."""
+    for lib, entries in library_search_paths(runner, elf_files([libs])).items():
+        if entries and entries != [ORIGIN]:
+            runner.run(Step(("patchelf", "--set-rpath", ORIGIN, runner.path(lib)), runner.path(libs)))
+
+
+def check_origin_runpaths(runner: Runner, roots: Sequence[Path]) -> None:
+    """Fails unless each ELF file in roots looks for libraries only in directories relative to its own."""
+    outside = [
+        f"{file} ({entry})"
+        for file, entries in library_search_paths(runner, elf_files(roots)).items()
+        for entry in entries
+        if entry != ORIGIN and not entry.startswith(f"{ORIGIN}/")
+    ]
+    if outside:
+        raise BuildError("these files look for libraries outside their own directory:\n" + "\n".join(outside))
 
 
 def add_vlc_linux(runner: Runner, libs: Path, arch: str, work: Path) -> None:
@@ -200,6 +265,7 @@ def package_desktop_deb(runner: Runner, source: Path, arch: str, codename: str) 
         edit_lines(entry, register_url_schemes)
         if DESKTOP_MIME_TYPES not in entry.read_text().splitlines():
             raise BuildError(f"{entry.name} does not register simplexchat: and simplex:")
+    check_origin_runpaths(runner, [extracted])
     touch_tree(extracted, SOURCE_DATE_EPOCH)
     epoch = {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}
     build = ("dpkg-deb", "--build", "--root-owner-group", "--uniform-compression", "./extracted", runner.path(final))
@@ -257,6 +323,7 @@ def package_appimage(runner: Runner, source: Path, arch: str, libcrypto: Path, w
     remove_skiko_runtime(appdir / "usr/lib/app")
     touch_tree(appdir, SOURCE_DATE_EPOCH)
     epoch = {"SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}
+    check_origin_runpaths(runner, [appdir])
     appimagetool = (runner.path(tool), "--verbose", "--no-appstream", "--runtime-file", runner.path(runtime), ".")
     runner.run(Step(appimagetool, runner.path(appdir), epoch))
     image = shutil.move(single_file(appdir, "*imple*.AppImage"), multiplatform / "release/main")
@@ -324,6 +391,7 @@ def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Pat
             cli = container.run(Step(("cabal", "list-bin", "exe:simplex-chat"), container.path(source)), capture=True).strip()
             container.run(Step(("cp", cli, container.path(work / "simplex-chat")), container.path(source)))
             container.run(Step(("strip", container.path(work / "simplex-chat")), container.path(source)))
+            check_origin_runpaths(container, [work / "simplex-chat"])
             shutil.copy(work / "simplex-chat", out / desktop_files(image)[0])
             if (source / TAG_DESKTOP_DEB_SCRIPT).exists():
                 build_desktop_linux_with_tag_scripts(container, source, image, version, work, out)
@@ -331,6 +399,7 @@ def build_desktop_linux(source: Path, image: UbuntuImage, version: str, out: Pat
             shutil.copy(build_cli_deb(container, work / "simplex-chat", version, image.arch, work), out / desktop_files(image)[1])
             libs = build_linux_lib(container, source, image.arch, Database.SQLITE)
             add_vlc_linux(container, libs, image.arch, work)
+            check_origin_runpaths(container, [libs])
             link_desktop_libs(source, f"linux-{image.arch}", f"linux-{COMPOSE_ARCHES[image.arch]}")
             deb = package_desktop_deb(container, source, image.arch, ubuntu_codename(container))
             shutil.copy(deb, out / desktop_files(image)[2])
@@ -384,6 +453,7 @@ def build_linux_libs(source: Path, image: UbuntuImage, database: Database, dist_
             runner = stack.enter_context(linux_container(source, image, work))
         runner.run(Step(("cabal", "update"), runner.path(source)))
         libs = build_linux_lib(runner, source, image.arch, database, dist_dir)
+        check_origin_runpaths(runner, [libs])
     zip_desktop_libs(libs, [], out / linux_libs_zip(image.arch, database))
 
 
