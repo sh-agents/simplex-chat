@@ -1428,7 +1428,8 @@ jobs:
         with:
           minimum-size: 16GB
           maximum-size: 16GB
-          disk-root: "C:"
+          # C: holds the fixed directory of the Windows builds, and has about 30 GB free
+          disk-root: "D:"
   
       - name: 'Setup MSYS2'
         uses: simplex-chat/setup-msys2@v2
