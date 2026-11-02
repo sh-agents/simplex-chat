@@ -469,6 +469,11 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
+      # Git for Windows checks files out with CRLF line endings, which the Windows build would compile into the binaries
+      - name: Check out with the repository's line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
       - name: Checkout code
         uses: actions/checkout@v6
         with:
