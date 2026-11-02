@@ -946,13 +946,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-26
             arch: aarch64
             ghc: ${{ needs.variables.outputs.GHC_VER }}
             cli_asset_name: simplex-chat-macos-aarch64
             desktop_asset_name: simplex-desktop-macos-aarch64.dmg
             should_run: ${{ needs.maybe-release.outputs.haskell == 'true' }}
-          - os: macos-15-intel
+          - os: macos-26-intel
             arch: x86_64
             ghc: ${{ needs.variables.outputs.GHC_VER }}
             cli_asset_name: simplex-chat-macos-x86-64
@@ -964,6 +964,9 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: recursive
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
 
       - name: Point Command Line Tools SDK to Xcode SDK
         if: matrix.should_run == true
@@ -1153,8 +1156,6 @@ jobs:
           APPLE_SIMPLEX_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_SIMPLEX_NOTARIZATION_APPLE_ID }}
           APPLE_SIMPLEX_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_SIMPLEX_NOTARIZATION_PASSWORD }}
           REQUIRE_SIGNING: ${{ github.repository == 'simplex-chat/simplex-chat' && '--require-signing' || '' }}
-          # the Xcode of the release builds, XCODE_VERSION in scripts/simplex_build/apple.py
-          DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
         run: |
           python3 scripts/simplex-chat-build.py build desktop macos $REQUIRE_SIGNING --out release-files
           for output in "cli=${{ matrix.cli_asset_name }}" "desktop=${{ matrix.desktop_asset_name }}"; do
@@ -1192,8 +1193,6 @@ jobs:
           APPLE_SIMPLEX_SIGNING_KEYCHAIN: ${{ secrets.APPLE_SIMPLEX_SIGNING_KEYCHAIN }}
           APPLE_SIMPLEX_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_SIMPLEX_NOTARIZATION_APPLE_ID }}
           APPLE_SIMPLEX_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_SIMPLEX_NOTARIZATION_PASSWORD }}
-          # the Xcode of the release builds, XCODE_VERSION in scripts/simplex_build/apple.py
-          DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
         run: python3 scripts/simplex-chat-build.py build libs macos --require-signing --out release-libs
 
       - name: Upload library
@@ -1290,16 +1289,19 @@ jobs:
           key: ${{ steps.keys.outputs.dist }}-O0-${{ env.branch }}-${{ github.sha }}
 
   build-ios:
-    name: "macos-latest (iOS)"
+    name: "macos-26 (iOS)"
     needs: maybe-release
     if: needs.maybe-release.outputs.ios == 'true'
-    runs-on: macos-latest
+    runs-on: macos-26
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-ios
       cancel-in-progress: ${{ github.event_name != 'push' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
 
       - name: Point Command Line Tools SDK to Xcode SDK
         shell: bash

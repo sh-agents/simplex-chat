@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Moves the Xcode of the release builds, XCODE_VERSION in scripts/simplex_build/apple.py, to /Applications/Xcode.app,
+# Moves the Xcode of the iOS release builds, IOS_XCODE in scripts/simplex_build/apple.py, to /Applications/Xcode.app,
 # where the iOS build needs it; the runner images link that path to their default Xcode.
 
 set -euo pipefail
 
-release=/Applications/Xcode_26.3.app
+release=/Applications/Xcode_26.6.app
 usual=/Applications/Xcode.app
 
 if [ -L "$usual" ]; then

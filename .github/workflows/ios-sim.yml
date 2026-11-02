@@ -105,6 +105,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
+
       - name: Show runner
         run: |
           sw_vers
@@ -151,6 +154,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
 
       - name: Show runner
         run: |
@@ -212,6 +218,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
 
       - name: Show runner
         run: |
@@ -341,6 +350,9 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
 
       - name: Show runner
         run: |

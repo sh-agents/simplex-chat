@@ -35,7 +35,7 @@ Results:
 
 ### Scopes
 
-The reduced build runs one Linux job, build-linux (ubuntu-22.04 x86_64), for every scope except ios, and one macOS job, build-ios (macos-latest), for ios.
+The reduced build runs one Linux job, build-linux (ubuntu-22.04 x86_64), for every scope except ios, and one macOS job, build-ios (macos-26), for ios.
 
 #### core
 
