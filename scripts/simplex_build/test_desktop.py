@@ -9,6 +9,8 @@ from unittest import mock
 
 from .testing import XCODE_DEVELOPER, Recorder, build_script, patch_all
 
+MINOS_11 = "lib.dylib:\nLoad command 9\n      cmd LC_BUILD_VERSION\n platform 1\n    minos 11.0\n      sdk 26.5\n"
+
 
 class HostDesktopTest(unittest.TestCase):
     def setUp(self):
@@ -114,7 +116,7 @@ class HostDesktopTest(unittest.TestCase):
         (built / "openssl/lib").mkdir(parents=True)
         (built / "openssl/lib/libcrypto.a").write_bytes(b"static")
         answers = {"list-bin": f"{self.root}/dist/simplex-chat\n", "otool -L": "\t/usr/lib/libSystem.B.dylib\n"}
-        recorder = Recorder(answers={**answers, "show-sdk-path": "/X/MacOSX.sdk\n"})
+        recorder = self.recorder = Recorder(answers={**answers, "show-sdk-path": "/X/MacOSX.sdk\n", "otool -l": MINOS_11})
         (self.root / "dist").mkdir()
         (self.root / "dist/simplex-chat").write_bytes(cli)
         calls = []
@@ -134,7 +136,8 @@ class HostDesktopTest(unittest.TestCase):
         def build_app(source, keychain):
             calls.append(("app", keychain))
             shutil.copytree(libs, self.app / build_script.COMPOSE_RESOURCES)
-            self.app_env = {name: os.environ.get(name) for name in ("CABAL_DIR", "SDKROOT", "LC_ALL", "TZ")}
+            names = ("CABAL_DIR", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "LC_ALL", "TZ")
+            self.app_env = {name: os.environ.get(name) for name in names}
             self.app_umask = os.umask(0o077)
             os.umask(self.app_umask)
             self.app_cabal_local = (source / "cabal.project.local").read_text()
@@ -195,7 +198,8 @@ class HostDesktopTest(unittest.TestCase):
         self.assertEqual((self.out / "simplex-desktop-macos-aarch64.dmg").read_bytes(), b"dmg")
         self.assertIn(f"extra-lib-dirs: {self.root / 'openssl-build/openssl/lib'}", self.app_cabal_local)
         cabal_dir = str(self.build_root / "cabal")
-        self.assertEqual(self.app_env, {"CABAL_DIR": cabal_dir, "SDKROOT": "/X/MacOSX.sdk", "LC_ALL": "en_US.UTF-8", "TZ": "UTC"})
+        expected = {"CABAL_DIR": cabal_dir, "SDKROOT": "/X/MacOSX.sdk", "MACOSX_DEPLOYMENT_TARGET": "11.0", "LC_ALL": "en_US.UTF-8"}
+        self.assertEqual(self.app_env, {**expected, "TZ": "UTC"})
         self.assertEqual(self.app_umask, 0o022)
         self.assertNotIn(cabal_dir, os.environ.values())
         self.assertEqual(
@@ -203,6 +207,9 @@ class HostDesktopTest(unittest.TestCase):
             ["simplex-chat-libs-macos-aarch64.zip", "simplex-chat-macos-aarch64", "simplex-desktop-macos-aarch64.dmg"],
         )
         self.assertEqual(self.zip_names("simplex-chat-libs-macos-aarch64.zip"), ["libs/libsimplex.dylib"])
+        checked = [c[-1] for c in self.recorder.commands if c[:2] == ["otool", "-l"]]
+        resources = self.app / build_script.COMPOSE_RESOURCES
+        self.assertEqual(checked, [str(self.out / "simplex-chat-macos-aarch64"), str(resources / "libsimplex.dylib")])
 
     def test_macos_build_with_a_path_of_the_machine_fails_after_its_files_are_written(self):
         with self.assertRaises(build_script.BuildError) as raised:
@@ -234,7 +241,7 @@ class HostDesktopTest(unittest.TestCase):
             return released
 
         with (
-            patch_all("run", Recorder(answers={"show-sdk-path": "/X/MacOSX.sdk\n"})),
+            patch_all("run", Recorder(answers={"show-sdk-path": "/X/MacOSX.sdk\n", "otool -l": MINOS_11})),
             patch_all("host_openssl", return_value=build_script.OpenSsl(self.root, self.root)),
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             patch_all("apple_signing", return_value=False),

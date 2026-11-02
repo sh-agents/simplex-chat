@@ -124,6 +124,38 @@ class MacLibTest(unittest.TestCase):
                 build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
             self.assertIn("libHSsmplxmq-6.5.dylib", str(raised.exception))
 
+    def test_builds_use_the_selected_sdk_and_the_minimum_macos_of_the_launcher(self):
+        recorder = Recorder(answers={"--show-sdk-path": f"{XCODE_SDK_LIB.removesuffix('/usr/lib')}\n"})
+        with patch_all("run", recorder):
+            env = build_script.macos_build_env()
+        self.assertEqual(recorder.commands, [["xcrun", "--sdk", "macosx", "--show-sdk-path"]])
+        self.assertEqual(env, {"SDKROOT": XCODE_SDK_LIB.removesuffix("/usr/lib"), "MACOSX_DEPLOYMENT_TARGET": "11.0"})
+
+    def test_binaries_for_a_newer_macos_than_the_deployment_target_fail(self):
+        libs = self.root / "libs"
+        libs.mkdir()
+        for name in ("libsimplex.dylib", "libHSbase-4.18.1.0-ghc9.6.3.dylib", "libcrypto.3.0.dylib"):
+            (libs / name).write_bytes(b"")
+        (libs / "vlc").mkdir()
+        cli = self.root / "simplex-chat"
+        cli.write_bytes(b"")
+
+        def otool(minos):
+            return f"{minos}:\nLoad command 9\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n platform 1\n    minos {minos}\n      sdk 26.5\n"
+
+        minimums = {"simplex-chat": "11.0", "libsimplex.dylib": "11.0", "libHSbase-4.18.1.0-ghc9.6.3.dylib": "10.10"}
+        fake = FakeOtool(small_l={name: otool(minos) for name, minos in {**minimums, "libcrypto.3.0.dylib": "11.0"}.items()})
+        with patch_all("run", fake):
+            build_script.check_deployment_target([cli, libs])
+        self.assertEqual(sorted(c[-1] for c in fake.commands), sorted(str(p) for p in [cli, *libs.glob("*.dylib")]))
+        fake.small_l["libcrypto.3.0.dylib"] = otool("26.0")
+        with patch_all("run", fake), self.assertRaises(build_script.BuildError) as raised:
+            build_script.check_deployment_target([cli, libs])
+        self.assertIn("libcrypto.3.0.dylib (26.0)", str(raised.exception))
+        fake.small_l["libcrypto.3.0.dylib"] = "libcrypto.3.0.dylib:\nLoad command 0\n      cmd LC_ID_DYLIB\n"
+        with patch_all("run", fake), self.assertRaises(build_script.BuildError):
+            build_script.check_deployment_target([cli, libs])
+
     def test_vlc_gets_rpaths_and_its_plugin_cache(self):
         libs, work = self.root / "libs", self.root / "work"
         libs.mkdir()

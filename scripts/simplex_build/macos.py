@@ -10,7 +10,7 @@ import shutil
 import struct
 import tarfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from .apk_zip import LOCAL_HEADER, central_directory
@@ -33,6 +33,7 @@ from .desktop import (
     zip_desktop_libs,
 )
 from .dmg import build_dmg, build_libdmg
+from .ios import minimum_versions, version_tuple
 from .openssl import OpenSsl, check_static_openssl, host_openssl, openssl_work, static_libcrypto
 
 APPLE_TEAM = "5NN7GUYB6T"
@@ -45,6 +46,11 @@ LIBFFI_URL = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3
 
 
 LIBFFI_SHA256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
+
+
+# The minimum macOS of the CLI and libraries: that of the launcher and the JDK runtime, the newest of the app's parts that
+# are not built here, on both arches (VLC's, skiko's and GHC's libraries need 10.8 to 11.0)
+MACOS_DEPLOYMENT_TARGET = "11.0"
 
 
 # where Compose copies the libraries directory into the app; VLC's libraries there have the paths of the machine that
@@ -410,9 +416,26 @@ def release_macos_libs(
     return libs
 
 
-def macos_sdk_env() -> dict[str, str]:
-    # GHC's links find the Command Line Tools' SDK without it, which needn't be the selected Xcode's
-    return {"SDKROOT": run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture=True).stdout.strip()}
+def macos_build_env() -> dict[str, str]:
+    """The macOS SDK of the selected Xcode, which GHC's links don't find without SDKROOT, and the deployment target, which
+    is the build machine's macOS without MACOSX_DEPLOYMENT_TARGET."""
+    sdk = run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture=True).stdout.strip()
+    return {"SDKROOT": sdk, "MACOSX_DEPLOYMENT_TARGET": MACOS_DEPLOYMENT_TARGET}
+
+
+def check_deployment_target(binaries: Sequence[Path]) -> None:
+    """Fails unless each of binaries, with each dylib in it when it is a directory, runs on MACOS_DEPLOYMENT_TARGET."""
+    files = [path for binary in binaries for path in ([binary] if binary.is_file() else sorted(binary.glob("*.dylib")))]
+    newer = []
+    for path in files:
+        versions = minimum_versions(run(["otool", "-l", path], capture=True).stdout)
+        if not versions:
+            raise BuildError(f"{path.name} has no minimum macOS version")
+        newest = max(versions, key=version_tuple)
+        if version_tuple(newest) > version_tuple(MACOS_DEPLOYMENT_TARGET):
+            newer.append(f"{path.name} ({newest})")
+    if newer:
+        raise BuildError(f"these need a newer macOS than {MACOS_DEPLOYMENT_TARGET}: {', '.join(newer)}")
 
 
 def install_macos_libs(libs: Path, source: Path) -> None:
@@ -427,10 +450,11 @@ def install_macos_libs(libs: Path, source: Path) -> None:
 def build_macos_libs(source: Path, database: Database, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
     paths = machine_paths(source, require_xcode(XCODE))
-    with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
+    with build_root(source, macos_build_env()) as root, contextlib.ExitStack() as stack:
         keychain = stack.enter_context(apple_keychain(root.work)) if signed else None
         openssl = host_openssl(openssl_work(root.source))
         libs = release_macos_libs(root.source, openssl, database, keychain, root.work, out)
+        check_deployment_target([libs])
         found = find_machine_paths([libs], paths)
         install_macos_libs(libs, source)
     check_machine_paths(found)
@@ -440,7 +464,7 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     host = macos_desktop()
     signed = apple_signing(require_signing)
     paths = machine_paths(source, require_xcode(XCODE))
-    with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
+    with build_root(source, macos_build_env()) as root, contextlib.ExitStack() as stack:
         work = root.work
         keychain = stack.enter_context(apple_keychain(work)) if signed else None
         openssl_dir = openssl_work(root.source)
@@ -455,6 +479,8 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         app = build_app(root.source, keychain)
         normalize_app(app)
         sign_app(app, keychain)
+        # the app's resources have the libraries and the app's own JNI library, which Gradle builds
+        check_deployment_target([out / host.cli, app / COMPOSE_RESOURCES])
         found += find_machine_paths([app], paths, skip=[app / COMPOSE_RESOURCES])
         dmg = work / host.desktop
         build_dmg(build_libdmg(work), app, java_home(), work, dmg)
