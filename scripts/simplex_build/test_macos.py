@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import json
 import os
 import pathlib
@@ -12,17 +13,13 @@ import unittest
 import zipfile
 from unittest import mock
 
-from .testing import (
-    REPO_ROOT,
-    FakeOtool,
-    Recorder,
-    build_script,
-    otool_big_l,
-    otool_l,
-    patch_all,
-)
+from .test_dmg import udif
+from .test_macho import AD_HOC, DATA, DEVELOPER_ID, codesign, executable
+from .testing import REPO_ROOT, FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
 
 XCODE_SDK_LIB = "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"
+
+single_file = build_script.single_file
 
 
 class MacLibTest(unittest.TestCase):
@@ -545,3 +542,219 @@ class MacLibTest(unittest.TestCase):
             self.assertEqual(build_script.java_home(), pathlib.Path("/jdk"))
         with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(build_script.BuildError):
             build_script.java_home()
+
+
+def jar(path, native):
+    with zipfile.ZipFile(path, "w") as z:
+        for name, data in (("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"), ("darwin/libjnidispatch.jnilib", native)):
+            info = zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, data)
+
+
+def app_volume(root, signature):
+    """A volume of the desktop app as build_dmg stages it, its code signed with signature or, without one, as the
+    unsigned build leaves it: the launcher unsigned and the libraries signed ad hoc."""
+    app = root / "SimpleX.app/Contents"
+    for directory in ("MacOS", "app", "runtime/Contents/Home/lib", "_CodeSignature"):
+        (app / directory).mkdir(parents=True)
+    (root / "Applications").symlink_to("/Applications")
+    (root / ".DS_Store").write_bytes(b"window")
+    launcher, library = executable(), executable(code=DATA * 4)
+    (app / "MacOS/SimpleX").write_bytes(codesign(launcher, signature) if signature else launcher)
+    (app / "MacOS/SimpleX").chmod(0o755)
+    (app / "runtime/Contents/Home/lib/libjli.dylib").write_bytes(codesign(library, signature or AD_HOC))
+    if signature:
+        (app / "_CodeSignature/CodeResources").write_bytes(b"sealed resources")
+        (app / "CodeResources").write_bytes(b"notarization ticket")
+    name = "jna-5.14.0-" + ("8b3cc65292435ad9f801e6d9b2a3497" if signature else "1a2b3c4d5e6f")
+    jar(app / f"app/{name}.jar", codesign(library, signature) if signature else library)
+    (app / "app/SimpleX.cfg").write_text(f"[Application]\napp.classpath=$APPDIR/{name}.jar\napp.mainclass=MainKt\n")
+    return app
+
+
+class MacReproduceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.released, self.built = self.root / "released", self.root / "built"
+        app_volume(self.released, DEVELOPER_ID)
+        app_volume(self.built, None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_signed_volume_matches_the_unsigned_build(self):
+        self.assertEqual(build_script.volume_differences(self.released, self.built), [])
+
+    def test_each_kind_of_change_is_found(self):
+        app = self.released / "SimpleX.app/Contents"
+        (app / "MacOS/SimpleX").write_bytes(codesign(executable(code=DATA * 9), DEVELOPER_ID))
+        (app / "MacOS/SimpleX").chmod(0o755)
+        (app / "runtime/Contents/Home/lib/libjli.dylib").chmod(0o600)
+        cfg = app / "app/SimpleX.cfg"
+        cfg.write_text(cfg.read_text().replace("MainKt", "OtherKt"))
+        (self.released / "Applications").unlink()
+        (self.released / "Applications").symlink_to("/tmp")
+        (app / "Resources").mkdir()
+        (app / "Resources/extra.icns").write_bytes(b"icon")
+        jar(single_file(app / "app", "jna-*.jar"), codesign(executable(code=DATA * 5), DEVELOPER_ID))
+        self.assertEqual(
+            build_script.volume_differences(self.released, self.built),
+            [
+                "Applications",
+                "SimpleX.app/Contents/MacOS/SimpleX",
+                "SimpleX.app/Contents/app/SimpleX.cfg",
+                "SimpleX.app/Contents/app/jna-5.14.0-8b3cc65292435ad9f801e6d9b2a3497.jar",
+                "SimpleX.app/Contents/runtime/Contents/Home/lib/libjli.dylib",
+                "SimpleX.app/Contents/Resources (only one has it)",
+                "SimpleX.app/Contents/Resources/extra.icns (only one has it)",
+            ],
+        )
+
+    def test_code_signature_folders_hold_only_the_hashes_of_the_resources(self):
+        (self.released / "SimpleX.app/Contents/_CodeSignature/CodeDirectory").write_bytes(b"extra")
+        self.assertEqual(
+            build_script.volume_differences(self.released, self.built),
+            ["SimpleX.app/Contents/_CodeSignature/CodeDirectory (only one has it)"],
+        )
+
+    def test_files_that_are_no_jars_or_text_differ(self):
+        app = self.released / "SimpleX.app/Contents/app"
+        jar_path = single_file(app, "jna-*.jar")
+        jar_path.write_bytes(b"not a zip")
+        (app / "SimpleX.cfg").write_bytes(b"\xff\xfe")
+        self.assertEqual(
+            build_script.volume_differences(self.released, self.built),
+            [f"SimpleX.app/Contents/app/{name}" for name in ("SimpleX.cfg", jar_path.name)],
+        )
+
+    def test_jars_differ_in_their_entries_metadata(self):
+        released = single_file(self.released / "SimpleX.app/Contents/app", "jna-*.jar")
+        built = single_file(self.built / "SimpleX.app/Contents/app", "jna-*.jar")
+        self.assertTrue(build_script.same_jar(released, built))
+        with zipfile.ZipFile(built, "a") as z:
+            z.writestr("extra.class", b"class")
+        self.assertFalse(build_script.same_jar(released, built))
+
+    def test_classpath_names_the_released_jars(self):
+        cfg = "[Application]\napp.classpath=$APPDIR/a-12.jar\napp.classpath=$APPDIR/b-34.jar\napp.mainclass=a-12.jar\n"
+        self.assertEqual(
+            build_script.rename_jars(cfg, {"a-12.jar": "a-56.jar"}),
+            "[Application]\napp.classpath=$APPDIR/a-56.jar\napp.classpath=$APPDIR/b-34.jar\napp.mainclass=a-12.jar\n",
+        )
+
+
+class DmgReproduceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.volumes = {"released.dmg": self.root / "released-volume", "built.dmg": self.root / "built-volume"}
+        app_volume(self.volumes["released.dmg"], DEVELOPER_ID)
+        app_volume(self.volumes["built.dmg"], None)
+        self.released, self.built = self.root / "released.dmg", self.root / "built.dmg"
+        self.released.write_bytes(udif(b"volume", b"signature"))
+        self.built.write_bytes(udif(b"volume"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def differences(self, repo="owner/fork", rebuilt=b"volume", codesign=0):
+        @contextlib.contextmanager
+        def fake_mounted(dmg, mountpoint):
+            yield self.volumes[dmg.name]
+
+        def fake_build_dmg(tools, app, java_home, work, target):
+            self.assertTrue((app / "Contents/_CodeSignature/CodeResources").is_file())
+            target.write_bytes(udif(rebuilt))
+
+        recorder = Recorder()
+
+        def fake_run(args, **kwargs):
+            recorder(args, **kwargs)
+            return mock.Mock(returncode=codesign)
+
+        with (
+            patch_all("mounted", fake_mounted),
+            patch_all("build_libdmg"),
+            patch_all("build_dmg", fake_build_dmg),
+            patch_all("java_home", return_value=pathlib.Path("/jdk")),
+            patch_all("run", fake_run),
+        ):
+            work = pathlib.Path(tempfile.mkdtemp(dir=self.root)) / "work"
+            differences = build_script.macos_differences(self.released, self.built, repo, work)
+        return differences, recorder.commands
+
+    def test_signed_dmg_of_a_fork_is_verified_without_the_team_requirement(self):
+        differences, commands = self.differences()
+        self.assertEqual(differences, [])
+        self.assertEqual([c[:3] for c in commands], [["codesign", "--verify", "--strict"], ["codesign", "--verify", "--deep"]])
+        self.assertFalse(any(arg.startswith("-R=") for command in commands for arg in command))
+        self.assertEqual(pathlib.Path(commands[1][-1]).name, "SimpleX.app")
+
+    def test_simplex_chat_dmg_must_have_the_team_developer_id_signature(self):
+        differences, commands = self.differences(repo="simplex-chat/simplex-chat")
+        self.assertEqual(differences, [])
+        self.assertTrue(all(f"-R={build_script.DEVELOPER_ID_REQUIREMENT}" in command for command in commands))
+        self.assertIn('leaf[subject.OU] = "5NN7GUYB6T"', build_script.DEVELOPER_ID_REQUIREMENT)
+        differences, _ = self.differences(repo="simplex-chat/simplex-chat", codesign=1)
+        self.assertEqual(
+            differences, [f"codesign doesn't verify the signature of {name}" for name in ("released.dmg", "SimpleX.app")]
+        )
+        self.released.write_bytes(udif(b"volume"))
+        differences, _ = self.differences(repo="simplex-chat/simplex-chat")
+        self.assertEqual(differences, ["it is not signed"])
+
+    def test_image_must_be_the_one_the_build_makes_of_the_released_app(self):
+        differences, _ = self.differences(rebuilt=b"volumE")
+        self.assertEqual(differences, ["it is not the dmg that the build makes of its app"])
+
+    def test_volume_differences_are_reported_without_making_the_image(self):
+        (self.volumes["released.dmg"] / ".DS_Store").write_bytes(b"other window")
+        differences, commands = self.differences()
+        self.assertEqual(differences, [".DS_Store"])
+        self.assertEqual(commands, [])
+
+    def test_other_files_are_compared_as_code(self):
+        released, built = self.root / "cli", self.root / "cli.built"
+        released.write_bytes(codesign(executable(), DEVELOPER_ID))
+        built.write_bytes(executable())
+        self.assertEqual(build_script.macos_differences(released, built, "a/b", self.root), [])
+        built.write_bytes(executable(code=DATA * 3))
+        self.assertEqual(build_script.macos_differences(released, built, "a/b", self.root), [build_script.CODE_DIFFERS])
+
+    def test_volume_is_detached_after_a_failure(self):
+        recorder = Recorder()
+        with patch_all("run", recorder), self.assertRaises(RuntimeError), build_script.mounted(self.released, self.root / "mnt"):
+            raise RuntimeError
+        self.assertEqual(recorder.commands[0][:3], ["hdiutil", "attach", "-readonly"])
+        self.assertEqual(recorder.commands[0][-3:], ["-mountpoint", str(self.root / "mnt"), str(self.released)])
+        self.assertEqual(recorder.commands[1], ["hdiutil", "detach", str(self.root / "mnt")])
+
+    def test_reproduce_builds_unsigned_and_compares_the_cli_and_dmg(self):
+        results = self.root / "results"
+        urls = []
+
+        def fake_download(url, target):
+            urls.append(url)
+            target.write_bytes(b"cli" if target.suffix != ".dmg" else b"dmg")
+
+        def fake_build(source, out, require_signing):
+            self.assertFalse(require_signing)
+            (out / "simplex-chat-macos-aarch64").write_bytes(b"cli")
+            (out / "simplex-desktop-macos-aarch64.dmg").write_bytes(b"dmg")
+
+        with (
+            mock.patch("platform.machine", return_value="arm64"),
+            patch_all("download", fake_download),
+            patch_all("checkout"),
+            patch_all("build_desktop_macos", fake_build),
+            patch_all("dmg_differences", return_value=["SimpleX.app/Contents/Info.plist"]) as dmg,
+            patch_all("log"),
+        ):
+            failed = build_script.reproduce_macos("v7.1.0", "owner/fork", self.root, results)
+        self.assertEqual(failed, ["simplex-desktop-macos-aarch64.dmg"])
+        names = ("simplex-chat-macos-aarch64", "simplex-desktop-macos-aarch64.dmg")
+        self.assertEqual(urls, [f"https://github.com/owner/fork/releases/download/v7.1.0/{name}" for name in names])
+        built = (results / "macos/prebuilt" / names[1], results / "macos/from-source" / names[1], "owner/fork")
+        self.assertEqual(dmg.call_args.args[:3], built)

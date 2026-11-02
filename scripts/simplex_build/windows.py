@@ -14,6 +14,9 @@ from pathlib import Path, PureWindowsPath
 from .common import (
     REPO,
     BuildError,
+    checkout,
+    compare_release,
+    download_release,
     edit_lines,
     fetch_pinned,
     remove_tree,
@@ -437,3 +440,21 @@ def msi_differences(released: bytes, built: bytes) -> list[str]:
         # signtool saves the root storage with the time it signs at
         theirs["/"] = dataclasses.replace(theirs["/"], modified=ours["/"].modified)
     return sorted(path for path in theirs.keys() | ours.keys() if theirs.get(path) != ours.get(path))
+
+
+def windows_differences(released: Path, built: Path) -> list[str]:
+    """What differs other than the Authenticode signature: the msi's streams and storages, or the PE file's bytes."""
+    data, built_data = released.read_bytes(), built.read_bytes()
+    if data.startswith(CFB_SIGNATURE):
+        return [f"{path} differs" for path in msi_differences(data, built_data)]
+    return [] if same_pe(data, built_data) else [PE_DIFFERS]
+
+
+def reproduce_windows(tag: str, repo: str, source: Path, results: Path) -> list[str]:
+    out = results / "windows"
+    names = (WINDOWS_DESKTOP.cli, WINDOWS_DESKTOP.desktop)
+    download_release(tag, repo, names, out / "prebuilt")
+    checkout(source, tag)
+    (out / "from-source").mkdir(exist_ok=True)
+    build_desktop_windows(source, out / "from-source")
+    return compare_release(names, out, windows_differences)

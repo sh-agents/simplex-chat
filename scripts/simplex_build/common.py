@@ -206,6 +206,33 @@ def release_url(tag: str, name: str, repo: str = SIMPLEX_REPO) -> str:
     return f"https://github.com/{repo}/releases/download/{tag}/{name}"
 
 
+def download_release(tag: str, repo: str, names: Sequence[str], target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        download(release_url(tag, name, repo), target / name)
+
+
+def byte_differences(released: Path, built: Path) -> list[str]:
+    return [] if sha256(released) == sha256(built) else ["sha256 doesn't match"]
+
+
+def compare_release(names: Sequence[str], out: Path, differences: Callable[[Path, Path], list[str]]) -> list[str]:
+    """The names of the released files in out/prebuilt that differ from the built ones in out/from-source other than
+    as differences allows; when none does, out/_sha256sums lists the released files."""
+    released, built = out / "prebuilt", out / "from-source"
+    failed = []
+    for name in names:
+        found = differences(released / name, built / name) if (built / name).is_file() else ["it is not built"]
+        for difference in found:
+            log(f"{name}: {difference}")
+        log(f"{name} is {'NOT ' if found else ''}reproduced")
+        if found:
+            failed.append(name)
+    if not failed:
+        write_sha256sums(released, out / "_sha256sums")
+    return failed
+
+
 def tag_version(tag: str) -> str:
     """v7.1.0-beta.7 -> 7.1.0, as the desktop CLI deb is versioned"""
     return tag.lstrip("v").split("-")[0]

@@ -22,7 +22,18 @@ from .apple import (
     require_xcode,
     run_without_aslr,
 )
-from .common import BuildError, fetch_pinned, log, run, touch_tree, warn
+from .common import (
+    BuildError,
+    byte_differences,
+    checkout,
+    compare_release,
+    download_release,
+    fetch_pinned,
+    log,
+    run,
+    touch_tree,
+    warn,
+)
 from .macho import simulator_archive
 from .nix import install_nix, nix_env
 from .openssl import host_openssl
@@ -31,6 +42,17 @@ IOS_CORE_JOB = ".#hydraJobs.aarch64-darwin.aarch64-darwin-ios:lib:simplex-chat"
 
 
 IOS_CORE_ZIP = "pkg-ios-aarch64-swift-json.zip"
+
+
+IOS_ARCHIVE_ZIP = "SimpleX.xcarchive.zip"
+
+
+# The unsigned archive that the App Store build is exported from, and the core it links, which a release publishes
+IOS_RELEASE_FILES = (IOS_ARCHIVE_ZIP, IOS_CORE_ZIP)
+
+
+# The app's Info.plist in the archive, where Xcode records its own build as DTXcodeBuild
+IOS_ARCHIVE_APP_INFO = "SimpleX.xcarchive/Products/Applications/SimpleX.app/Info.plist"
 
 
 IOS_PROJECT = "apps/ios/SimpleX.xcodeproj"
@@ -379,5 +401,25 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         creation_date = time.strftime(PLUTIL_DATE_FORMAT, time.gmtime(int(epoch)))
         run(["plutil", "-replace", "CreationDate", "-date", creation_date, archive / "Info.plist"])
         found = find_machine_paths([archive], paths)
-        zip_tree(archive, out / "SimpleX.xcarchive.zip", epoch)
+        zip_tree(archive, out / IOS_ARCHIVE_ZIP, epoch)
     check_machine_paths(found)
+
+
+def archive_xcode(archive: Path) -> str:
+    with zipfile.ZipFile(archive) as z:
+        info = plistlib.loads(z.read(IOS_ARCHIVE_APP_INFO))
+    return str(info["DTXcodeBuild"])
+
+
+def reproduce_ios(tag: str, repo: str, art: Path | None, install: bool, source: Path, results: Path) -> list[str]:
+    """The release's archive and core package, built with the pinned Xcode, which must have built them, and compared
+    byte for byte."""
+    out = results / "ios"
+    download_release(tag, repo, IOS_RELEASE_FILES, out / "prebuilt")
+    released = archive_xcode(out / "prebuilt" / IOS_ARCHIVE_ZIP)
+    if released != XCODE.build:
+        raise BuildError(f"{tag} is archived with Xcode build {released}, and this script builds with {XCODE}")
+    checkout(source, tag)
+    (out / "from-source").mkdir(exist_ok=True)
+    build_ios_archive(source, art, out / "from-source", install)
+    return compare_release(IOS_RELEASE_FILES, out, byte_differences)

@@ -1,7 +1,8 @@
 """Builds SimpleX Chat release files and reproduces releases.
 
-Reproduce a release (desktop is the default target):
-    simplex-chat-build.py reproduce <tag> [desktop] [android] [--arches aarch64,armv7a] [--nix-cache] [--repo <owner/name>]
+Reproduce a release on the platform of each target, Linux for desktop and android (desktop is the default target):
+    simplex-chat-build.py reproduce <tag> [desktop] [android] [macos] [windows] [ios] [--arches aarch64,armv7a] [--nix-cache]
+        [--art <simplex-chat-art>] [--install-nix] [--repo <owner/name>]
 
 Build one commit's release files, as CI does; desktop, libs and openssl build for the machine they run on:
     simplex-chat-build.py build desktop linux <22.04|24.04> --version <x.y.z> --out <dir>
@@ -70,7 +71,7 @@ from .common import (
     write_sha256sums,
 )
 from .desktop import Database
-from .ios import IOS_TOOLS, build_ios_archive, build_ios_sim_libs, install_ios_libs
+from .ios import IOS_TOOLS, build_ios_archive, build_ios_sim_libs, install_ios_libs, reproduce_ios
 from .linux import (
     APPIMAGE_IMAGE,
     DESKTOP_IMAGES,
@@ -82,11 +83,11 @@ from .linux import (
     linux_image,
     reproduce_desktop,
 )
-from .macos import build_desktop_macos, build_macos_libs
+from .macos import build_desktop_macos, build_macos_libs, reproduce_macos
 from .nix import NIX_PROFILE
 from .openssl import build_host_openssl
 from .smoke import OLD_RELEASE, make_old_database, test_apk, test_cli, test_desktop, test_desktop_upgrade
-from .windows import build_desktop_windows, build_windows_libs
+from .windows import build_desktop_windows, build_windows_libs, reproduce_windows
 
 GITHUB_REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
 
@@ -94,6 +95,33 @@ GITHUB_REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
 class Target(enum.StrEnum):
     DESKTOP = "desktop"
     ANDROID = "android"
+    MACOS = "macos"
+    WINDOWS = "windows"
+    IOS = "ios"
+
+
+MACOS_DESKTOP_TOOLS = ("cabal", "ghc", "perl", "make", "otool", "cmake", "codesign", "hdiutil", "fsck_hfs", "xcodebuild", "xcrun")
+
+
+WINDOWS_DESKTOP_TOOLS = ("cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool", "powershell")
+
+
+TARGET_PLATFORMS = {
+    Target.DESKTOP: Platform.LINUX,
+    Target.ANDROID: Platform.LINUX,
+    Target.MACOS: Platform.MACOS,
+    Target.WINDOWS: Platform.WINDOWS,
+    Target.IOS: Platform.MACOS,
+}
+
+
+TARGET_TOOLS = {
+    Target.DESKTOP: ("docker",),
+    Target.ANDROID: ("docker",),
+    Target.MACOS: MACOS_DESKTOP_TOOLS,
+    Target.WINDOWS: WINDOWS_DESKTOP_TOOLS,
+    Target.IOS: IOS_TOOLS,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +131,8 @@ class Reproduce:
     targets: tuple[Target, ...]
     arches: tuple[Arch, ...]
     nix_cache: bool
+    art: Path | None = None
+    install_nix: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,8 +272,17 @@ class MakeOldDatabase:
 type Command = Reproduce | Build | InstallLibs | TestRelease | MakeOldDatabase
 
 
+def require_nix(install: bool) -> None:
+    if not install and not (NIX_PROFILE / "bin/nix").exists():
+        raise BuildError(f"Nix is not installed ({NIX_PROFILE / 'bin/nix'} not found): install it, or pass --install-nix")
+
+
 def reproduce(command: Reproduce) -> None:
-    require_tools(["git", "docker"])
+    for target in command.targets:
+        require_platform(TARGET_PLATFORMS[target])
+    require_tools(list(dict.fromkeys(["git", *(tool for target in command.targets for tool in TARGET_TOOLS[target])])))
+    if Target.IOS in command.targets:
+        require_nix(command.install_nix)
     results = Path.cwd() / f"{command.tag}-{command.repo.split('/')[1]}"
     failed: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -252,6 +291,13 @@ def reproduce(command: Reproduce) -> None:
             failed += reproduce_desktop(command.tag, command.repo, source, results)
         if Target.ANDROID in command.targets:
             failed += reproduce_android(command.tag, command.repo, command.arches, command.nix_cache, source, results)
+        if Target.MACOS in command.targets:
+            failed += reproduce_macos(command.tag, command.repo, source, results)
+        if Target.WINDOWS in command.targets:
+            failed += reproduce_windows(command.tag, command.repo, source, results)
+        if Target.IOS in command.targets:
+            art = command.art.resolve() if command.art else None
+            failed += reproduce_ios(command.tag, command.repo, art, command.install_nix, source, results)
     if failed:
         add_summary(f"{command.tag} is not reproduced: {', '.join(f'`{name}`' for name in failed)}\n")
         raise BuildError(f"{command.tag} is not reproduced: {', '.join(failed)}")
@@ -310,17 +356,16 @@ def build(command: Build) -> None:
             build_host_openssl(source, out)
         case BuildDesktopMacos(require_signing=require_signing):
             require_platform(Platform.MACOS)
-            require_tools(["cabal", "ghc", "perl", "make", "otool", "cmake", "codesign", "hdiutil", "fsck_hfs", "xcodebuild", "xcrun"])
+            require_tools(MACOS_DESKTOP_TOOLS)
             build_desktop_macos(source, out, require_signing)
         case BuildDesktopWindows():
             require_platform(Platform.WINDOWS)
-            require_tools(["cabal", "ghc", "perl", "make", "gcc", "objdump", "dlltool", "powershell"])
+            require_tools(WINDOWS_DESKTOP_TOOLS)
             build_desktop_windows(source, out)
         case BuildIosArchive(art=art, install_nix=install):
             require_platform(Platform.MACOS)
             require_tools(IOS_TOOLS)
-            if not install and not (NIX_PROFILE / "bin/nix").exists():
-                raise BuildError(f"Nix is not installed ({NIX_PROFILE / 'bin/nix'} not found): install it, or pass --install-nix")
+            require_nix(install)
             build_ios_archive(source, art.resolve() if art else None, out, install)
     write_sha256sums(out)
 
@@ -549,8 +594,11 @@ def parse_reproduce_args(argv: Sequence[str]) -> Reproduce:
     parser.add_argument("--repo", type=parse_repo, default=SIMPLEX_REPO, help=f"the release's GitHub repository (default: {SIMPLEX_REPO})")
     parser.add_argument("--arches", type=parse_arches, default=tuple(Arch), help="Android arches, e.g. aarch64,armv7a")
     parser.add_argument("--nix-cache", action="store_true", help="substitute the Android toolchains from zw3rk's and IOG's caches")
+    parser.add_argument("--art", type=Path, help="ios: checkout of simplex-chat-art, with the brand assets of the release's archive")
+    parser.add_argument("--install-nix", action="store_true", help="ios: install Nix first, as on a CI runner")
     args = parser.parse_args(argv)
-    return Reproduce(args.tag, args.repo, tuple(args.targets) or (Target.DESKTOP,), args.arches, args.nix_cache)
+    targets = tuple(args.targets) or (Target.DESKTOP,)
+    return Reproduce(args.tag, args.repo, targets, args.arches, args.nix_cache, args.art, args.install_nix)
 
 
 def main(argv: Sequence[str]) -> int:

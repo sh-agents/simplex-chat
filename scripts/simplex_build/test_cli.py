@@ -31,7 +31,7 @@ class ParseArgsTest(unittest.TestCase):
                 build_script.parse_args(["reproduce", "v7.1.0", "--repo", repo])
 
     def test_reproduce_rejects_unknown_arch_and_target(self):
-        for argv in (["reproduce", "v7.1.0", "android", "--arches", "x86"], ["reproduce", "v7.1.0", "ios"], ["v7.1.0"], []):
+        for argv in (["reproduce", "v7.1.0", "android", "--arches", "x86"], ["reproduce", "v7.1.0", "web"], ["v7.1.0"], []):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 build_script.parse_args(argv)
 
@@ -288,3 +288,60 @@ class MainTest(unittest.TestCase):
             ):
                 build_script.build(command)
         self.assertIn("--install-nix", str(e.exception))
+
+
+class ReproduceTest(unittest.TestCase):
+    def run_reproduce(self, command, host, failed=()):
+        with (
+            patch_all("host_platform", return_value=host),
+            patch_all("require_tools") as require,
+            patch_all("clone", return_value=pathlib.Path("src")) as clone,
+            patch_all("reproduce_macos", return_value=list(failed)) as macos,
+            patch_all("reproduce_windows", return_value=[]) as windows,
+            patch_all("reproduce_ios", return_value=[]) as ios,
+            patch_all("reproduce_desktop", return_value=[]) as desktop,
+            patch_all("log"),
+            mock.patch.object(build_script.Path, "cwd", return_value=pathlib.Path("/r")),
+        ):
+            build_script.reproduce(command)
+        return require, clone, {"macos": macos, "windows": windows, "ios": ios, "desktop": desktop}
+
+    def test_reproduce_parses_the_targets_of_other_platforms_and_their_options(self):
+        command = build_script.parse_args(["reproduce", "v7.1.0", "macos", "ios", "--art", "art", "--install-nix", "--repo", "a/b"])
+        self.assertEqual(command.targets, (Target.MACOS, Target.IOS))
+        self.assertEqual((command.art, command.install_nix, command.repo), (pathlib.Path("art"), True, "a/b"))
+
+    def test_macos_and_ios_reproduce_on_macos_with_their_tools(self):
+        command = build_script.Reproduce("v7.1.0", "a/fork", (Target.MACOS, Target.IOS), (), False, None, True)
+        require, clone, called = self.run_reproduce(command, build_script.Platform.MACOS)
+        tools = require.call_args.args[0]
+        self.assertEqual(tools[0], "git")
+        self.assertIn("hdiutil", tools)
+        self.assertIn("xcodebuild", tools)
+        self.assertEqual(len(tools), len(set(tools)))
+        self.assertEqual(clone.call_args.args[1], "a/fork")
+        self.assertEqual(called["macos"].call_args.args[:2], ("v7.1.0", "a/fork"))
+        self.assertEqual(called["macos"].call_args.args[3], pathlib.Path("/r/v7.1.0-fork"))
+        self.assertEqual(called["ios"].call_args.args[2:4], (None, True))
+        called["windows"].assert_not_called()
+        called["desktop"].assert_not_called()
+
+    def test_each_target_runs_only_on_its_platform(self):
+        elsewhere = ((Target.WINDOWS, "macos"), (Target.MACOS, "linux"), (Target.DESKTOP, "windows"), (Target.IOS, "linux"))
+        for target, platform_name in elsewhere:
+            command = build_script.Reproduce("v7.1.0", "a/b", (target,), (), False)
+            with self.subTest(target=target), self.assertRaisesRegex(build_script.BuildError, "this build runs on"):
+                self.run_reproduce(command, build_script.Platform(platform_name))
+
+    def test_ios_needs_nix_unless_installing_it(self):
+        command = build_script.Reproduce("v7.1.0", "a/b", (Target.IOS,), (), False)
+        with (
+            mock.patch.object(build_script, "NIX_PROFILE", pathlib.Path("/no/nix")),
+            self.assertRaisesRegex(build_script.BuildError, "--install-nix"),
+        ):
+            self.run_reproduce(command, build_script.Platform.MACOS)
+
+    def test_files_that_are_not_reproduced_fail_the_run(self):
+        command = build_script.Reproduce("v7.1.0", "a/b", (Target.MACOS,), (), False)
+        with self.assertRaisesRegex(build_script.BuildError, "simplex-desktop-macos-aarch64.dmg"):
+            self.run_reproduce(command, build_script.Platform.MACOS, ["simplex-desktop-macos-aarch64.dmg"])

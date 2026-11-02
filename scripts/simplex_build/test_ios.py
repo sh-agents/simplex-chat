@@ -472,3 +472,56 @@ class ZeroArHeadersTest(unittest.TestCase):
                 zero_ar_headers.main([str(other)])
             self.assertIn("SimpleX.h: not an ar archive", str(exit.exception.code))
             self.assertEqual(other.read_bytes(), b"#import")
+
+
+def archive_zip(path, xcode):
+    with zipfile.ZipFile(path, "w") as z:
+        info = plistlib.dumps({"DTXcodeBuild": xcode}, fmt=plistlib.FMT_BINARY)
+        z.writestr("SimpleX.xcarchive/Products/Applications/SimpleX.app/Info.plist", info)
+
+
+class IosReproduceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.results = self.root / "results"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def reproduce(self, released_xcode, built_core=b"core"):
+        def fake_download(url, target):
+            if target.name == "SimpleX.xcarchive.zip":
+                archive_zip(target, released_xcode)
+            else:
+                target.write_bytes(b"core")
+
+        def fake_build(source, art, out, install):
+            archive_zip(out / "SimpleX.xcarchive.zip", released_xcode)
+            (out / "pkg-ios-aarch64-swift-json.zip").write_bytes(built_core)
+
+        with (
+            patch_all("download", fake_download),
+            patch_all("checkout") as checkout,
+            patch_all("build_ios_archive", fake_build),
+            patch_all("log"),
+            mock.patch("builtins.print"),
+        ):
+            failed = build_script.reproduce_ios("v7.1.0", "owner/fork", self.root / "art", True, self.root, self.results)
+        return failed, checkout
+
+    def test_archive_records_the_xcode_that_built_it(self):
+        archive_zip(self.root / "a.zip", "17A324")
+        self.assertEqual(build_script.archive_xcode(self.root / "a.zip"), "17A324")
+
+    def test_archive_and_core_are_compared_byte_for_byte(self):
+        failed, checkout = self.reproduce(build_script.XCODE.build)
+        self.assertEqual(failed, [])
+        checkout.assert_called_once_with(self.root, "v7.1.0")
+        self.assertTrue((self.results / "ios/_sha256sums").is_file())
+        failed, _ = self.reproduce(build_script.XCODE.build, built_core=b"other core")
+        self.assertEqual(failed, ["pkg-ios-aarch64-swift-json.zip"])
+
+    def test_a_release_of_another_xcode_is_refused_before_the_build(self):
+        with self.assertRaisesRegex(build_script.BuildError, "archived with Xcode build 17A324, and this script builds with Xcode 26.6"):
+            self.reproduce("17A324")
