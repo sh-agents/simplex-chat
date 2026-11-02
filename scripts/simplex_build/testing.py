@@ -11,6 +11,7 @@ from . import (
     android,
     apk_zip,
     apple,
+    buildroot,
     cli,
     common,
     desktop,
@@ -30,6 +31,7 @@ from . import (
 MODULES = (
     common,
     apk_zip,
+    buildroot,
     apple,
     docker,
     nix,

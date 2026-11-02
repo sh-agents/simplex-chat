@@ -16,12 +16,11 @@ from .apple import (
     XCODE,
     build_root,
     check_aslr_off,
-    check_machine_paths,
-    find_machine_paths,
     machine_paths,
     require_xcode,
     run_without_aslr,
 )
+from .buildroot import check_machine_paths, find_machine_paths
 from .common import (
     BuildError,
     byte_differences,
