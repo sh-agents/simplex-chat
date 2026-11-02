@@ -20,6 +20,7 @@ from .common import (
     download_release,
     edit_lines,
     fetch_pinned,
+    log,
     log_group,
     remove_tree,
     run,
@@ -250,14 +251,19 @@ def normalize_msi_summary(msi: Path, work: Path) -> None:
     set_msi_storage_time(msi)
 
 
+MEBIBYTE = 1 << 20
+
+
 # where Compose keeps what jpackage and WiX print, which Gradle doesn't show when they fail
 JPACKAGE_MSI_LOGS = "desktop/build/compose/logs/packageMsi"
 
 
 def print_jpackage_logs(logs: Path) -> None:
+    """What jpackage printed, and the free space of the drive that it wrote to."""
     for log_file in sorted(logs.glob("*.txt")):
         with log_group(log_file.name):
             print(log_file.read_text(errors="replace"), flush=True)
+    log(f"{shutil.disk_usage(logs).free // MEBIBYTE} MiB free on the drive of {logs}")
 
 
 def package_msi(source: Path, work: Path) -> Path:

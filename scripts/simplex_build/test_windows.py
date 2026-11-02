@@ -215,6 +215,7 @@ class MsiTest(unittest.TestCase):
         output = [call.args[0] for call in printed.call_args_list if call.args]
         self.assertIn("light.exe : error LGHT0217 : Error executing ICE action 'ICE01'\n", output)
         self.assertIn("Running light.exe\n", output)
+        self.assertTrue(any(f"MiB free on the drive of {logs}" in line for line in output), output)
 
 
 SECTOR = 512
