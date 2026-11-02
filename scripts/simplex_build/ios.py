@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .apple import (
     CANONICAL_DEVELOPER_DIR,
+    XCODE,
     build_root,
     check_machine_paths,
     find_machine_paths,
@@ -313,7 +314,7 @@ def build_ios_archive(source: Path, art: Path | None, out: Path, install: bool) 
         warn("no simplex-chat-art checkout (--art): the archive has the default icons, not the release's brand assets")
     elif not (art / "ios/Assets.xcassets").is_dir():
         raise BuildError(f"no ios/Assets.xcassets in {art}")
-    developer = require_xcode()
+    developer = require_xcode(XCODE)
     # the dSYMs name Xcode's paths in the Swift modules that they embed and in the API notes of Clang's modules, which
     # -debug-prefix-map doesn't change
     if developer != CANONICAL_DEVELOPER_DIR:

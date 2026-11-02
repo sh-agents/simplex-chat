@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .apk_zip import LOCAL_HEADER, central_directory
-from .apple import build_root, check_machine_paths, find_machine_paths, machine_paths, require_xcode
+from .apple import XCODE, build_root, check_machine_paths, find_machine_paths, machine_paths, require_xcode
 from .common import GHC, BuildError, edit_lines, fetch_pinned, remove_tree, run, single_dir, single_file, touch_tree, warn
 from .desktop import (
     COMPOSE_ARCHES,
@@ -426,7 +426,7 @@ def install_macos_libs(libs: Path, source: Path) -> None:
 
 def build_macos_libs(source: Path, database: Database, out: Path, require_signing: bool) -> None:
     signed = apple_signing(require_signing)
-    paths = machine_paths(source, require_xcode())
+    paths = machine_paths(source, require_xcode(XCODE))
     with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
         keychain = stack.enter_context(apple_keychain(root.work)) if signed else None
         openssl = host_openssl(openssl_work(root.source))
@@ -439,7 +439,7 @@ def build_macos_libs(source: Path, database: Database, out: Path, require_signin
 def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
     host = macos_desktop()
     signed = apple_signing(require_signing)
-    paths = machine_paths(source, require_xcode())
+    paths = machine_paths(source, require_xcode(XCODE))
     with build_root(source, macos_sdk_env()) as root, contextlib.ExitStack() as stack:
         work = root.work
         keychain = stack.enter_context(apple_keychain(work)) if signed else None

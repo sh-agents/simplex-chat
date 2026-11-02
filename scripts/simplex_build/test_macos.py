@@ -10,7 +10,7 @@ from unittest import mock
 
 from .testing import FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
 
-XCODE_SDK_LIB = "/Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"
+XCODE_SDK_LIB = "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"
 
 
 class MacLibTest(unittest.TestCase):

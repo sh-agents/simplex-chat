@@ -150,7 +150,7 @@ class HostDesktopTest(unittest.TestCase):
             patch_all("host_openssl", lambda openssl_dir: self.openssl_dirs.append(openssl_dir) or openssl),
             mock.patch.object(build_script.platform, "machine", return_value="arm64"),
             patch_all("apple_signing", return_value=signed),
-            patch_all("require_xcode", return_value=XCODE_DEVELOPER),
+            patch_all("require_xcode", return_value=XCODE_DEVELOPER) as xcode,
             patch_all("apple_keychain", lambda work: contextlib.nullcontext(self.keychain)),
             patch_all("BUILD_ROOT", self.build_root),
             patch_all("machine_paths", return_value=["/Users/builder"]),
@@ -169,6 +169,7 @@ class HostDesktopTest(unittest.TestCase):
         ):
             build_script.build_desktop_macos(self.source, self.out, require_signing=False)
         self.assertEqual(sign_libs.called, signed)
+        xcode.assert_called_once_with(build_script.XCODE)
         self.assertFalse(self.build_root.exists())
         return calls, sign_dmg, self.build_root / "work"
 

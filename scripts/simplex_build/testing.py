@@ -66,7 +66,7 @@ UTF8_FLAG = 0x800
 GITHUB = {"GITHUB_ACTIONS": "true"}
 
 
-XCODE_DEVELOPER = pathlib.Path("/Applications/Xcode_26.3.app/Contents/Developer")
+XCODE_DEVELOPER = pathlib.Path("/Applications/Xcode_26.6.app/Contents/Developer")
 
 
 APKSIGNER_PADDING = struct.pack("<HHH", 0xD935, 2, 4)
