@@ -421,12 +421,27 @@ class WindowsMachinePathsTest(unittest.TestCase):
         self.assertTrue(all(len(build_script.PureWindowsPath(path).parts) >= 3 for path in paths))
 
 
+class LineEndingsTest(unittest.TestCase):
+    def test_a_checkout_with_crlf_line_endings_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp)
+            (source / "simplex-chat.cabal").write_bytes(b"name: simplex-chat\nversion: 7.1.0\n")
+            build_script.check_line_endings(source)
+            (source / "simplex-chat.cabal").write_bytes(b"name: simplex-chat\r\nversion: 7.1.0\r\n")
+            with self.assertRaisesRegex(build_script.BuildError, "core.autocrlf=false"):
+                build_script.check_line_endings(source)
+            with patch_all("windows_build_root") as root, self.assertRaises(build_script.BuildError):
+                build_script.build_desktop_windows(source, source / "out")
+            root.assert_not_called()
+
+
 class WindowsLibsReleaseTest(unittest.TestCase):
     def build(self, library):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             source, fixed = root / "checkout", root / "fixed"
             source.mkdir()
+            (source / "simplex-chat.cabal").write_bytes(b"name: simplex-chat\n")
             sources = []
 
             def fake_release(copy, openssl, out):

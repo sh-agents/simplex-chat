@@ -28,7 +28,7 @@ class ReleaseDetailsTest(unittest.TestCase):
         with patch_all("run", recorder):
             self.assertEqual(build_script.clone(pathlib.Path("w"), "owner/fork"), pathlib.Path("w/simplex-chat"))
             build_script.clone(pathlib.Path("w"))
-        self.assertEqual(recorder.commands[0][-2:], ["https://github.com/owner/fork.git", "simplex-chat"])
+        self.assertEqual(recorder.commands[0][-4:], ["-c", "core.autocrlf=false", "https://github.com/owner/fork.git", "simplex-chat"])
         self.assertEqual(recorder.commands[1][-2], "https://github.com/simplex-chat/simplex-chat.git")
 
     def test_android_build_tag(self):

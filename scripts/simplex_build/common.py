@@ -240,7 +240,8 @@ def tag_version(tag: str) -> str:
 
 
 def clone(workdir: Path, repo: str = SIMPLEX_REPO) -> Path:
-    run(["git", "-C", workdir, "clone", f"https://github.com/{repo}.git", "simplex-chat"])
+    # the files as they are committed: Git for Windows converts their line endings to CRLF by default
+    run(["git", "-C", workdir, "clone", "-c", "core.autocrlf=false", f"https://github.com/{repo}.git", "simplex-chat"])
     return workdir / "simplex-chat"
 
 

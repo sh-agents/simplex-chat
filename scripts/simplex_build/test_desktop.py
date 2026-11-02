@@ -21,6 +21,7 @@ class HostDesktopTest(unittest.TestCase):
         self.source.mkdir()
         self.out.mkdir()
         self.build_root = self.root / "fixed"
+        (self.source / "simplex-chat.cabal").write_bytes(b"name: simplex-chat\nversion: 7.1.0\n")
 
     def tearDown(self):
         self.tmp.cleanup()

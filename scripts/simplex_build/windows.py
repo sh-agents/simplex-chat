@@ -209,7 +209,19 @@ def windows_machine_paths(source: Path) -> list[str]:
     return sorted(form for form in forms if len(PureWindowsPath(form).parts) >= MIN_MACHINE_PATH_PARTS)
 
 
+# a file of the checkout that is committed with LF line endings
+LINE_ENDINGS_PROBE = "simplex-chat.cabal"
+
+
+def check_line_endings(source: Path) -> None:
+    """Fails unless source has the line endings it is committed with: the binaries contain text of the source, such as the
+    SQL of the database migrations."""
+    if b"\r\n" in (source / LINE_ENDINGS_PROBE).read_bytes():
+        raise BuildError(f"{source} is checked out with CRLF line endings: check it out with git -c core.autocrlf=false")
+
+
 def build_windows_libs(source: Path, out: Path) -> None:
+    check_line_endings(source)
     paths = windows_machine_paths(source)
     with windows_build_root(source) as root:
         libs = release_windows_libs(root.source, host_openssl(openssl_work(root.source)), out)
@@ -294,6 +306,7 @@ def package_msi(source: Path, work: Path) -> Path:
 
 def build_desktop_windows(source: Path, out: Path) -> None:
     host = WINDOWS_DESKTOP
+    check_line_endings(source)
     paths = windows_machine_paths(source)
     with windows_build_root(source) as root:
         work = root.work
