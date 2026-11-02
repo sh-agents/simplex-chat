@@ -1,4 +1,5 @@
 import contextlib
+import itertools
 import pathlib
 import re
 import sqlite3
@@ -510,14 +511,20 @@ class OldDatabaseTest(unittest.TestCase):
     ANDROID_SCREEN = (
         '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\' ?><hierarchy rotation="0">'
         '<node text="Database passphrase is required to open chat." bounds="[0,100][1080,200]" />'
-        '<node text="Enter passphrase…" bounds="[100,500][980,600]" />'
+        '<node text="" class="android.widget.EditText" focused="true" bounds="[100,500][980,600]">'
+        '<node text="Enter passphrase…" bounds="[100,500][600,600]" /></node>'
         '<node text="Save passphrase and open chat" bounds="[300,700][780,800]" />'
         '<node text="Upgrade and open chat" bounds="[300,900][780,1000]" /></hierarchy>'
         "UI hierchary dumped to: /dev/tty"
     )
 
+    def passphrase_screen(self, typed):
+        """ANDROID_SCREEN with typed characters of the passphrase in its field, masked as the app masks them."""
+        return self.ANDROID_SCREEN.replace('text="" class', f'text="{"*" * typed}" class')
+
     def test_android_node_centre_from_uiautomator_dump(self):
         self.assertEqual(build_script.android_node_centre(self.ANDROID_SCREEN, "Upgrade and"), (540, 950))
+        self.assertEqual(build_script.android_node_centre(self.ANDROID_SCREEN, "Enter passphrase"), (350, 550))
         self.assertIsNone(build_script.android_node_centre(self.ANDROID_SCREEN, "Open chat"))
 
     def test_android_old_database_is_pushed_as_the_app_owns_it(self):
@@ -532,7 +539,7 @@ class OldDatabaseTest(unittest.TestCase):
 
     def test_android_app_opens_the_old_database_with_its_key_and_confirms_its_upgrade(self):
         chat_list = '<?xml version="1.0"?><hierarchy><node text="team" bounds="[0,300][1080,400]" /></hierarchy>'
-        screens = iter([self.ANDROID_SCREEN] * 5 + [chat_list])
+        screens = iter([self.ANDROID_SCREEN] * 3 + [self.passphrase_screen(8)] + [self.passphrase_screen(15)] * 4 + [chat_list])
         recorder = Recorder()
         with (
             patch_all("run", recorder),
@@ -543,8 +550,9 @@ class OldDatabaseTest(unittest.TestCase):
         self.assertEqual(
             recorder.commands,
             [
-                ["adb", "shell", "input", "tap", "540", "550"],
-                ["adb", "shell", "input", "text", "old-release-key"],
+                ["adb", "shell", "input", "tap", "350", "550"],
+                ["adb", "shell", "input", "text", "old-rele"],
+                ["adb", "shell", "input", "text", "ase-key"],
                 ["adb", "shell", "input", "tap", "540", "750"],
                 ["adb", "shell", "input", "tap", "540", "950"],
             ],
@@ -557,7 +565,8 @@ class OldDatabaseTest(unittest.TestCase):
         )
         receipts = '<?xml version="1.0"?><hierarchy><node text="Don\'t enable" bounds="[300,1950][800,2050]" /></hierarchy>'
         chat_list = '<?xml version="1.0"?><hierarchy><node text="team" bounds="[0,300][1080,400]" /></hierarchy>'
-        screens = iter([self.ANDROID_SCREEN] * 3 + [notifications, notifications, receipts, receipts, chat_list])
+        typed = [self.ANDROID_SCREEN] * 3 + [self.passphrase_screen(8)] + [self.passphrase_screen(15)] * 2
+        screens = iter(typed + [notifications, notifications, receipts, receipts, chat_list])
         recorder = Recorder()
         with (
             patch_all("run", recorder),
@@ -572,7 +581,14 @@ class OldDatabaseTest(unittest.TestCase):
         recorder = Recorder()
         with (
             patch_all("run", recorder),
-            patch_all("android_screen", return_value=self.ANDROID_SCREEN.replace("Upgrade and open chat", "Opening")),
+            patch_all(
+                "android_screen",
+                side_effect=itertools.chain(
+                    [self.ANDROID_SCREEN] * 3,
+                    [self.passphrase_screen(8)],
+                    itertools.repeat(self.passphrase_screen(15).replace("Upgrade and open chat", "Opening")),
+                ),
+            ),
             patch_all("emulator_screenshot") as screenshot,
             patch_all("ANDROID_FIRST_SCREEN_SECONDS", 0),
             mock.patch.object(build_script.time, "sleep"),
@@ -740,10 +756,11 @@ NODE_HEIGHT = 100
 
 
 def android_dump(*nodes):
-    """A uiautomator dump with a node for each (text, content description), NODE_HEIGHT pixels below the one before."""
+    """A uiautomator dump with a node for each (text, content description) or (text, content description, attributes),
+    NODE_HEIGHT pixels below the one before."""
     lines = "".join(
-        f'<node text="{text}" content-desc="{desc}" bounds="[0,{i * NODE_HEIGHT}][1000,{(i + 1) * NODE_HEIGHT}]" />'
-        for i, (text, desc) in enumerate(nodes)
+        f'<node text="{text}" content-desc="{desc}" {"".join(attributes)}bounds="[0,{i * NODE_HEIGHT}][1000,{(i + 1) * NODE_HEIGHT}]" />'
+        for i, (text, desc, *attributes) in enumerate(nodes)
     )
     return f'<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0">{lines}</hierarchy>UI hierchary dumped to: /dev/tty'
 
@@ -752,15 +769,27 @@ def texts(*labels):
     return android_dump(*((label, "") for label in labels))
 
 
+def field(text, focused=True):
+    """A text field node for android_dump."""
+    return text, "", f'class="android.widget.EditText" focused="{str(focused).lower()}" '
+
+
+def fields(*shown):
+    """A screen for each text shown in the focused field."""
+    return [android_dump(field(text)) for text in shown]
+
+
 class FakeAndroid:
     """Stands in for run() with adb: a dump shows the current screen, and each tap or typed text moves to the next one.
-    Taps are recorded by the label tapped, typed text as typed; other commands go to others, else are recorded."""
+    Taps are recorded by the label tapped, typed text as typed, key events as sent; other commands go to others, else
+    are recorded."""
 
     def __init__(self, screens, others=None):
         self.screens = [(screen, re.findall(r'text="([^"]*)" content-desc="([^"]*)"', screen)) for screen in screens]
         self.dumps = 0
         self.taps = []
         self.typed = []
+        self.keys = []
         self.commands = []
         self.others = others
 
@@ -776,6 +805,9 @@ class FakeAndroid:
             self.next_screen()
         elif args[:4] == ["adb", "shell", "input", "text"]:
             self.typed.append(args[4])
+            self.next_screen()
+        elif args[:4] == ["adb", "shell", "input", "keyevent"]:
+            self.keys.append(args[4:])
             self.next_screen()
         elif self.others:
             return self.others(args, **kwargs)
@@ -836,16 +868,83 @@ class AndroidUiTest(unittest.TestCase):
         self.assertEqual(android.taps, ["Continue"])
 
     def test_text_is_typed_a_few_characters_at_a_time_and_checked_on_the_field(self):
-        android = FakeAndroid([android_dump(("", "")), android_dump(("app-to-p", "")), android_dump(("app-to-peer", ""))])
+        android = FakeAndroid(fields("", "app-to-p", "app-to-peer"))
         with patch_all("run", android):
             build_script.android_type("app-to-peer")
         self.assertEqual(android.typed, ["app-to-p", "eer"])
+        self.assertEqual(android.keys, [])
 
-    def test_text_the_field_drops_fails(self):
-        android = FakeAndroid([android_dump(("", "")), android_dump(("app-to", ""))])
+    def test_dropped_first_character_is_cleared_and_typed_again(self):
+        android = FakeAndroid(fields("", "pp-to-p", "", "app-to-p", "app-to-peer"))
+        with patch_all("run", android):
+            build_script.android_type("app-to-peer")
+        self.assertEqual(android.typed, ["app-to-p", "app-to-p", "eer"])
+        self.assertEqual(android.keys, [["KEYCODE_MOVE_END"] + ["KEYCODE_DEL"] * len("pp-to-p")])
+
+    def test_masked_field_short_of_the_text_is_cleared_and_typed_again(self):
+        android = FakeAndroid(fields("", "*" * 8, "*" * 14, "", "*" * 8, "*" * 15))
+        with patch_all("run", android):
+            build_script.android_type("old-release-key", masked=True)
+        self.assertEqual(android.typed, ["old-rele", "ase-key", "old-rele", "ase-key"])
+        self.assertEqual(android.keys, [["KEYCODE_MOVE_END"] + ["KEYCODE_DEL"] * 14])
+
+    def test_masked_field_with_the_texts_length_is_not_typed_again(self):
+        android = FakeAndroid(fields("", "*" * 8, "*" * 15))
+        with patch_all("run", android):
+            build_script.android_type("old-release-key", masked=True)
+        self.assertEqual(android.typed, ["old-rele", "ase-key"])
+        self.assertEqual(android.keys, [])
+
+    def test_field_that_shows_its_hint_while_empty_is_typed_in(self):
+        android = FakeAndroid(fields("Message", "app-to-p", "app-to-peer"))
+        with patch_all("run", android):
+            build_script.android_type("app-to-peer", hint="Message")
+        self.assertEqual(android.typed, ["app-to-p", "eer"])
+        self.assertEqual(android.keys, [])
+
+    def test_field_with_a_hint_is_cleared_back_to_it_and_typed_again(self):
+        android = FakeAndroid(fields("Message", "pp-to-p", "Message", "app-to-p", "app-to-peer"))
+        with patch_all("run", android):
+            build_script.android_type("app-to-peer", hint="Message")
+        self.assertEqual(android.typed, ["app-to-p", "app-to-p", "eer"])
+        self.assertEqual(android.keys, [["KEYCODE_MOVE_END"] + ["KEYCODE_DEL"] * len("pp-to-p")])
+
+    def test_field_with_text_before_typing_is_cleared_first(self):
+        android = FakeAndroid(fields("draft", "", "citester"))
+        with patch_all("run", android):
+            build_script.android_type("citester")
+        self.assertEqual(android.keys, [["KEYCODE_MOVE_END"] + ["KEYCODE_DEL"] * len("draft")])
+        self.assertEqual(android.typed, ["citester"])
+
+    def test_field_that_drops_a_character_at_every_attempt_fails(self):
+        android = FakeAndroid(fields("", "pp-to-p", "", "pp-to-p", "", "pp-to-p"))
+        with patch_all("run", android), self.assertRaises(build_script.BuildError) as raised:
+            build_script.android_type("app-to-peer")
+        self.assertEqual(android.typed, ["app-to-p"] * 3)
+        self.assertIn('the field shows "pp-to-p" in place of "app-to-peer" after 3 attempts', str(raised.exception))
+
+    def test_text_is_not_typed_without_a_focused_field(self):
+        android = FakeAndroid([android_dump(field("", focused=False), ("Message", ""))])
         with patch_all("run", android), patch_all("ANDROID_STEP_SECONDS", 0), self.assertRaises(build_script.BuildError) as raised:
             build_script.android_type("app-to-peer")
-        self.assertIn('"app-to-p" in the field', str(raised.exception))
+        self.assertEqual(android.typed, [])
+        self.assertIn('no focused text field showing ""', str(raised.exception))
+
+    def test_focused_field_is_read_from_the_dump(self):
+        ui = android_dump(field("citester", focused=False), field("app-to-p"), ("app-to-peer", ""))
+        self.assertEqual(build_script.android_focused_field(ui), "app-to-p")
+        self.assertIsNone(build_script.android_focused_field(android_dump(field("app-to-p", focused=False))))
+        self.assertIsNone(build_script.android_focused_field("ERROR: could not get idle state."))
+
+    def test_field_the_app_fills_slowly_is_read_until_it_shows_the_text(self):
+        with patch_all("android_screen", side_effect=fields("app-", "app-", "app-", "app-to-", "app-to-p")) as screen:
+            self.assertEqual(build_script.android_settled_field("app-to-p"), "app-to-p")
+        self.assertEqual(screen.call_count, 5)
+
+    def test_field_read_is_settled_after_the_same_text_in_several_dumps(self):
+        with patch_all("android_screen", side_effect=fields("pp", *["pp-to-p"] * 5, "never read")) as screen:
+            self.assertEqual(build_script.android_settled_field("app-to-p"), "pp-to-p")
+        self.assertEqual(screen.call_count, 6)
 
     def test_onboarding_makes_the_profile_and_answers_the_questions_up_to_the_chat_list(self):
         android = FakeAndroid(
@@ -853,8 +952,8 @@ class AndroidUiTest(unittest.TestCase):
                 texts("New in v7.0", "OK"),
                 texts("Get started"),
                 texts("Create your profile", "Enter profile name…"),
-                android_dump(("", "")),
-                texts("citester", "Create profile"),
+                android_dump(field("")),
+                android_dump(field("citester"), ("Create profile", "")),
                 texts("Your network", "Continue"),
                 texts("Use instant notifications?", "Allow"),
                 texts("Conditions of use", "Accept"),
@@ -871,8 +970,8 @@ class AndroidUiTest(unittest.TestCase):
             [
                 texts("Get started"),
                 texts("Enter profile name…"),
-                android_dump(("", "")),
-                texts("citester", "Create profile"),
+                android_dump(field("")),
+                android_dump(field("citester"), ("Create profile", "")),
                 texts("Your network", "Continue"),
                 texts("Your network", "Continue"),
                 texts("Instant notifications", "To improve privacy, SimpleX runs in background", "OK"),
@@ -1187,9 +1286,9 @@ class ConnectAndroidPeerTest(unittest.TestCase):
                 texts("Connection request sent!", "OK"),
                 texts("pq_peer"),
                 android_dump(*self.CHAT, ("Message", "")),
-                android_dump(*self.CHAT, ("", "")),
-                android_dump(*self.CHAT, ("app-to-p", "")),
-                android_dump(*self.CHAT, ("app-to-peer", ""), ("", "Send Message")),
+                android_dump(*self.CHAT, field("Message")),
+                android_dump(*self.CHAT, field("app-to-p")),
+                android_dump(*self.CHAT, field("app-to-peer"), ("", "Send Message")),
                 android_dump(*self.CHAT, ("app-to-peer", ""), ("Message", "")),
             ],
             others=self.peer(infos),

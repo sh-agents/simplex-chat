@@ -2,7 +2,6 @@
 
 import base64
 import contextlib
-import functools
 import os
 import platform
 import re
@@ -116,8 +115,14 @@ ANDROID_DATABASE_ERROR_TITLES = (
     "Database upgrade",
     "Database downgrade",
 )
-# the ARM translation drops characters typed faster than the app takes them
+# the ARM translation drops characters typed faster than the app takes them, at times the first one typed
 ANDROID_TYPED_CHARACTERS = 8
+ANDROID_TYPING_ATTEMPTS = 3
+# a field's text unchanged in this many dumps in a row is all the app took of the text typed
+ANDROID_FIELD_SETTLED_DUMPS = 5
+ANDROID_FIELD_CLASS = "android.widget.EditText"
+# the PasswordVisualTransformation of the app's passphrase field
+ANDROID_PASSWORD_MASK = "*"
 ANDROID_VIEW_ACTION = "android.intent.action.VIEW"
 ANDROID_USE_PROFILE_BUTTON = "Use current profile"
 ANDROID_CONNECTION_SENT_TEXT = "Connection request sent"
@@ -510,16 +515,21 @@ def android_screen_loaded() -> bool:
     return "<node" in ui and ANDROID_LOADING_TEXT not in ui
 
 
-def android_node_centre(ui: str, text: str) -> tuple[int, int] | None:
-    """The centre of the node on screen whose text or content description is text, else of the first that starts with
-    it, from uiautomator's dump; None also when the dump failed, as it does while the screen changes."""
+def android_nodes(ui: str) -> list[ElementTree.Element]:
+    """The nodes of uiautomator's dump; none when the dump failed, as it does while the screen changes."""
     start = ui.find("<hierarchy")
     try:
         hierarchy = ElementTree.fromstring(ui[start : ui.rfind(">") + 1]) if start >= 0 else None
     except ElementTree.ParseError:
         hierarchy = None
+    return list(hierarchy.iter("node")) if hierarchy is not None else []
+
+
+def android_node_centre(ui: str, text: str) -> tuple[int, int] | None:
+    """The centre of the node on screen whose text or content description is text, else of the first that starts with
+    it, from uiautomator's dump; None also when the dump failed."""
     starting: list[tuple[int, int]] = []
-    for node in hierarchy.iter("node") if hierarchy is not None else ():
+    for node in android_nodes(ui):
         bounds = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
         left, top, right, bottom = map(int, bounds.groups()) if bounds else (0, 0, 0, 0)
         labels = (node.get("text", ""), node.get("content-desc", ""))
@@ -548,16 +558,60 @@ def android_tap_when_shown(text: str, seconds: float = ANDROID_STEP_SECONDS) -> 
     wait_until(lambda: android_tap(text), seconds, f'"{text}" to tap')
 
 
-def android_field_shows(text: str) -> bool:
-    return f'text="{text}"' in android_screen()
+def android_focused_field(ui: str) -> str | None:
+    """The text of the focused text field in uiautomator's dump; None when no field has the focus or the dump failed."""
+    for node in android_nodes(ui):
+        if node.get("class") == ANDROID_FIELD_CLASS and node.get("focused") == "true":
+            return node.get("text", "")
+    return None
 
 
-def android_type(text: str) -> None:
-    """Types text, without spaces or shell characters, into the focused field a few characters at a time, each part
-    checked on the field."""
+def android_settled_field(expected: str) -> str:
+    """The focused field's text once it is expected, or once it stays the same in ANDROID_FIELD_SETTLED_DUMPS dumps."""
+    deadline = time.monotonic() + ANDROID_STEP_SECONDS
+    shown, dumps = None, 0
+    while (field := android_focused_field(android_screen())) != expected:
+        if field is not None:
+            dumps = dumps + 1 if field == shown else 1
+            shown = field
+            if dumps >= ANDROID_FIELD_SETTLED_DUMPS:
+                return field
+        if time.monotonic() > deadline:
+            raise BuildError(f'no focused text field showing "{expected}" or settled after {ANDROID_STEP_SECONDS} s')
+        time.sleep(1)
+    return expected
+
+
+def android_shown(text: str, masked: bool) -> str:
+    return ANDROID_PASSWORD_MASK * len(text) if masked else text
+
+
+def android_type_parts(text: str, masked: bool) -> str:
+    """Types text into the focused field a few characters at a time and reads each part back; the field's text once all
+    is typed, or at the first part the field doesn't show."""
+    field = ""
     for end in range(ANDROID_TYPED_CHARACTERS, len(text) + ANDROID_TYPED_CHARACTERS, ANDROID_TYPED_CHARACTERS):
         run(["adb", "shell", "input", "text", text[end - ANDROID_TYPED_CHARACTERS : end]])
-        wait_until(functools.partial(android_field_shows, text[:end]), ANDROID_STEP_SECONDS, f'"{text[:end]}" in the field')
+        expected = android_shown(text[:end], masked)
+        if (field := android_settled_field(expected)) != expected:
+            break
+    return field
+
+
+def android_type(text: str, masked: bool = False, hint: str = "") -> None:
+    """Types text, without spaces or shell characters, into the focused field, which shows hint as its text while empty;
+    a field that shows other text, or a masked field other than the text's length, is cleared and typed again."""
+    expected = android_shown(text, masked)
+    field = android_settled_field(hint)
+    for _ in range(ANDROID_TYPING_ATTEMPTS):
+        if field != hint:
+            run(["adb", "shell", "input", "keyevent", "KEYCODE_MOVE_END", *["KEYCODE_DEL"] * len(field)])
+            field = android_settled_field(hint)
+        if field == hint:
+            if (field := android_type_parts(text, masked)) == expected:
+                return
+            warn(f'the field shows "{field}" in place of "{expected}"')
+    raise BuildError(f'the field shows "{field}" in place of "{expected}" after {ANDROID_TYPING_ATTEMPTS} attempts')
 
 
 def android_onboarding() -> None:
@@ -708,7 +762,7 @@ def connect_android_peer(cli: Path, profile: str, name: str, out: Path, work: Pa
 
     wait_until(peer_message_shown, PEER_CONNECT_SECONDS, f'"{PEER_MESSAGE}" in a chat with "{ANDROID_PQ_TEXT}"')
     android_tap_when_shown(ANDROID_MESSAGE_FIELD)
-    android_type(APP_MESSAGE)
+    android_type(APP_MESSAGE, hint=ANDROID_MESSAGE_FIELD)
     android_tap_when_shown(ANDROID_SEND_BUTTON)
     peer.wait(f"/tail @{profile} 5", APP_MESSAGE, f'"{APP_MESSAGE}" from the app in the peer CLI')
     info = peer.chat(f"/i @{profile}")
@@ -747,7 +801,7 @@ def open_android_old_database(out: Path, work: Path) -> None:
         wait_until(lambda: ANDROID_PASSPHRASE_TEXT in android_screen(), ANDROID_FIRST_SCREEN_SECONDS, "passphrase screen")
         # the emulator has a hardware keyboard, so no on-screen keyboard covers the button
         wait_until(lambda: android_tap(ANDROID_PASSPHRASE_FIELD), SETTLE_SECONDS, "passphrase field")
-        run(["adb", "shell", "input", "text", OLD_DATABASE_KEY])
+        android_type(OLD_DATABASE_KEY, masked=True)
         wait_until(lambda: android_tap(ANDROID_SAVE_BUTTON), SETTLE_SECONDS, "button to open the chat")
         wait_until(chat_list_shown, ANDROID_FIRST_SCREEN_SECONDS, f"chat list with the group {OLD_DATABASE_GROUP}")
     except BuildError:
