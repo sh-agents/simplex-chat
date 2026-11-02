@@ -17,6 +17,7 @@ from . import (
     dmg,
     docker,
     ios,
+    link_without_rpaths,
     linux,
     macho,
     macos,
@@ -26,7 +27,25 @@ from . import (
     windows,
 )
 
-MODULES = (common, apk_zip, apple, docker, nix, desktop, dmg, openssl, android, linux, macho, macos, windows, ios, smoke, cli)
+MODULES = (
+    common,
+    apk_zip,
+    apple,
+    docker,
+    nix,
+    desktop,
+    dmg,
+    openssl,
+    android,
+    link_without_rpaths,
+    linux,
+    macho,
+    macos,
+    windows,
+    ios,
+    smoke,
+    cli,
+)
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 

@@ -190,6 +190,10 @@ class HostDesktopTest(unittest.TestCase):
         copy = self.build_root / "simplex-chat"
         self.assertEqual(self.openssl_dirs, [copy / "dist-openssl"])
         self.assertIn(f"extra-lib-dirs: {copy / 'dist-openssl/openssl-static'}", self.cabal_locals[0])
+        linker = self.build_root / "work/cc-without-rpaths"
+        linking = f"package *\n    ghc-options: -fno-use-rpaths -pgml {linker}\n"
+        self.assertTrue(self.cabal_locals[0].endswith(linking))
+        self.assertTrue(self.app_cabal_local.endswith(linking))
         self.assertFalse((self.source / "cabal.project.local").exists())
         self.assertEqual(
             calls,

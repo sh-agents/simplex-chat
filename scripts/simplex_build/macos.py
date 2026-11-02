@@ -9,6 +9,7 @@ import plistlib
 import re
 import shutil
 import struct
+import sys
 import tarfile
 import time
 from collections.abc import Iterator, Sequence
@@ -49,6 +50,19 @@ LIBFFI_URL = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3
 LIBFFI_SHA256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
 
 
+# Cabal and GHC link each library with an rpath to the directory of each library it depends on, GHC's own and the SDK's
+# among them, and GHC adds them again after the link; the libraries find each other at @loader_path
+LINKER = """#!{python}
+import sys
+sys.path.insert(0, {scripts!r})
+from simplex_build.link_without_rpaths import link
+link(sys.argv[1:])
+"""
+
+
+LINKER_NAME = "cc-without-rpaths"
+
+
 # GHC's libraries list the Command Line Tools' SDK, where GHC's configure found libiconv, in their library directories,
 # which the linker searches before SDKROOT
 COMMAND_LINE_TOOLS_SDK = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
@@ -78,8 +92,7 @@ DOS_EPOCH_YEAR = 1980
 HFS_PARTITION = "Apple_HFS"
 
 
-# rpaths relative to the library or the app; GHC's links also add absolute ones, such as the SDK's usr/lib in the Xcode
-# that linked them, which the libraries don't need on users' machines
+# rpaths relative to the library or the app, the only ones that the libraries' links keep
 RELATIVE_RPATH = "@"
 
 
@@ -136,8 +149,17 @@ def build_libffi(work: Path) -> Path:
     return single_file(source, "*-apple-darwin*/.libs/libffi.dylib")
 
 
-def copy_mac_dependencies(lib: Path, deps: Path, ghc_libdir: Path, copied: set[Path]) -> None:
-    """lib and the libraries it loads from its rpaths, recursively; GHC's libraries find each other at @loader_path."""
+def cabal_store_libraries() -> Path:
+    """The directory where cabal links the libraries of its package store, in the CABAL_DIR of build_root."""
+    cabal_dir = os.environ.get("CABAL_DIR")
+    if not cabal_dir:
+        raise BuildError("CABAL_DIR is not set: the libraries are built in build_root")
+    return Path(cabal_dir) / f"store/ghc-{GHC}/lib"
+
+
+def copy_mac_dependencies(lib: Path, deps: Path, ghc_libdir: Path, libraries: Sequence[Path], copied: set[Path]) -> None:
+    """lib and the libraries it loads at @rpath, recursively, from libraries or from the directories relative to GHC's
+    libdir in its rpaths; GHC's libraries find each other at @loader_path."""
     if lib in copied:
         return
     copied.add(lib)
@@ -145,14 +167,17 @@ def copy_mac_dependencies(lib: Path, deps: Path, ghc_libdir: Path, copied: set[P
     shutil.copy(lib, deps)
     if any("@loader_path/.." in rpath for rpath in own_rpaths):
         run(["install_name_tool", "-add_rpath", "@loader_path", deps / lib.name])
-    search = [Path(rpath.replace("@loader_path/..", str(ghc_libdir), 1)) for rpath in own_rpaths]
+    relative = [Path(rpath.replace("@loader_path/..", str(ghc_libdir), 1)) for rpath in own_rpaths if "@loader_path/.." in rpath]
+    search = [*libraries, *relative]
     for name in rpath_dependencies(lib):
-        for directory in search:
-            dependency = directory / name
-            if dependency.is_file():
-                if not (deps / name).is_file():
-                    shutil.copy(dependency, deps)
-                copy_mac_dependencies(dependency, deps, ghc_libdir, copied)
+        dependency = next((directory / name for directory in search if (directory / name).is_file()), None)
+        if dependency is None:
+            if not (deps / name).is_file():
+                raise BuildError(f"{name}, which {lib.name} loads, is in none of {', '.join(map(str, search))}")
+            continue
+        if not (deps / name).is_file():
+            shutil.copy(dependency, deps)
+        copy_mac_dependencies(dependency, deps, ghc_libdir, libraries, copied)
 
 
 def bundle_mac_libcrypto(libs: Path, database: Database) -> None:
@@ -174,10 +199,9 @@ def bundle_mac_libcrypto(libs: Path, database: Database) -> None:
         if linked:
             run(["install_name_tool", "-change", linked, f"@rpath/{bundled}", lib])
     dylibs = sorted(p for p in libs.rglob("*.dylib") if p.is_file())
-    for lib in dylibs:
-        for rpath in rpaths(lib):
-            if not rpath.startswith(RELATIVE_RPATH):
-                run(["install_name_tool", "-delete_rpath", rpath, lib])
+    absolute = [f"{lib.name} ({rpath})" for lib in dylibs for rpath in rpaths(lib) if not rpath.startswith(RELATIVE_RPATH)]
+    if absolute:
+        raise BuildError(f"these libraries were linked with absolute rpaths: {', '.join(absolute)}")
     local = [lib.name for lib in dylibs if any(LOCAL_DIRS.search(line) for line in otool("-l", lib))]
     if local:
         message = f"these libraries still point to local directories: {', '.join(local)}"
@@ -205,7 +229,7 @@ def build_mac_lib(source: Path, arch: str, database: Database, work: Path) -> Pa
     deps = build / "deps"
     deps.mkdir(exist_ok=True)
     shutil.copy(build_libffi(work), deps / "libffi.dylib")
-    copy_mac_dependencies(build / "libsimplex.dylib", deps, ghc_libdir, set())
+    copy_mac_dependencies(build / "libsimplex.dylib", deps, ghc_libdir, [cabal_store_libraries(), rts_dir], set())
     shutil.copy(rts_dir / f"libHSghc-boot-th-{GHC}-ghc{GHC}.dylib", deps)
     (deps / "libsimplex.dylib").unlink()
     libs = desktop_libs(source, f"mac-{arch}")
@@ -403,6 +427,15 @@ def java_home() -> Path:
     return Path(home)
 
 
+def rpathless_cabal_local(work: Path) -> str:
+    """cabal.project.local that links every package without absolute rpaths, with the linker of link_without_rpaths.py
+    written to work; the CLI and the libraries use the same, so that they share the packages they depend on."""
+    linker = work / LINKER_NAME
+    linker.write_text(LINKER.format(python=sys.executable, scripts=str(Path(__file__).resolve().parents[1])))
+    linker.chmod(0o755)
+    return f"package *\n    ghc-options: -fno-use-rpaths -pgml {linker}\n"
+
+
 def release_macos_libs(
     source: Path, openssl: OpenSsl, database: Database, keychain: Path | None, work: Path, out: Path
 ) -> Path:
@@ -410,7 +443,7 @@ def release_macos_libs(
     linked for its Gradle build."""
     host = macos_desktop()
     # bundle_mac_libcrypto copies the libcrypto that the libraries link into the app
-    (source / "cabal.project.local").write_text(openssl.cabal_local())
+    (source / "cabal.project.local").write_text(openssl.cabal_local() + rpathless_cabal_local(work))
     libs = build_mac_lib(source, host.arch, database, work)
     link_desktop_libs(source, host.libs_dir, f"macos-{COMPOSE_ARCHES[host.arch]}")
     released = work / "libs"
@@ -493,7 +526,7 @@ def build_desktop_macos(source: Path, out: Path, require_signing: bool) -> None:
         openssl_dir = openssl_work(root.source)
         openssl = host_openssl(openssl_dir)
         static = OpenSsl(openssl.include, static_libcrypto(openssl.lib, openssl_dir))
-        cli = build_host_cli(root.source, static.cabal_local())
+        cli = build_host_cli(root.source, static.cabal_local() + rpathless_cabal_local(work))
         check_static_openssl(cli, run(["otool", "-L", cli], capture=True).stdout)
         shutil.copy(cli, out / host.cli)
         libs = release_macos_libs(root.source, openssl, Database.SQLITE, keychain, work, out)

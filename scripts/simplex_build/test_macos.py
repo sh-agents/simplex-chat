@@ -4,13 +4,23 @@ import os
 import pathlib
 import plistlib
 import re
+import shlex
 import struct
+import subprocess
 import tempfile
 import unittest
 import zipfile
 from unittest import mock
 
-from .testing import REPO_ROOT, FakeOtool, Recorder, build_script, otool_big_l, otool_l, patch_all
+from .testing import (
+    REPO_ROOT,
+    FakeOtool,
+    Recorder,
+    build_script,
+    otool_big_l,
+    otool_l,
+    patch_all,
+)
 
 XCODE_SDK_LIB = "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"
 
@@ -34,34 +44,60 @@ class MacLibTest(unittest.TestCase):
             self.assertEqual(build_script.rpaths(lib), ["@loader_path/../lib/x", "/Users/runner/ghc"])
             self.assertEqual(build_script.libcrypto_path(lib), "/w/openssl/lib/libcrypto.3.dylib")
 
-    def test_dependencies_are_copied_once_with_loader_path_rpaths(self):
-        ghc = self.root / "ghc"
-        (ghc / "lib").mkdir(parents=True)
-        build = self.root / "build"
-        deps = build / "deps"
-        deps.mkdir(parents=True)
-        (build / "libsimplex.dylib").write_bytes(b"simplex")
-        (ghc / "lib/libHSbase.dylib").write_bytes(b"base")
-        (ghc / "lib/libHSrts.dylib").write_bytes(b"rts")
-        fake = FakeOtool(
+    def dependency_tree(self):
+        """libsimplex, linked without absolute rpaths, loading a store library, which loads GHC's base, which loads the
+        rts next to it, as GHC's libraries do, and libffi, which the build adds to deps."""
+        self.ghc = self.root / "ghc"
+        (self.ghc / "lib").mkdir(parents=True)
+        self.store = self.root / "cabal/store/ghc-9.6.3/lib"
+        self.store.mkdir(parents=True)
+        self.build = self.root / "build"
+        self.deps = self.build / "deps"
+        self.deps.mkdir(parents=True)
+        (self.build / "libsimplex.dylib").write_bytes(b"simplex")
+        (self.deps / "libffi.dylib").write_bytes(b"ffi")
+        (self.store / "libHSsmplxmq.dylib").write_bytes(b"smplxmq")
+        (self.ghc / "lib/libHSbase.dylib").write_bytes(b"base")
+        (self.ghc / "lib/libHSrts.dylib").write_bytes(b"rts")
+        return FakeOtool(
             big_l={
-                "libsimplex.dylib": otool_big_l("@rpath/libsimplex.dylib", ["@rpath/libHSbase.dylib", "@rpath/libHSrts.dylib"]),
+                "libsimplex.dylib": otool_big_l("@rpath/libsimplex.dylib", ["@rpath/libHSsmplxmq.dylib", "@rpath/libffi.dylib"]),
+                "libHSsmplxmq.dylib": otool_big_l("@rpath/libHSsmplxmq.dylib", ["@rpath/libHSbase.dylib"]),
                 "libHSbase.dylib": otool_big_l("@rpath/libHSbase.dylib", ["@rpath/libHSrts.dylib"]),
                 "libHSrts.dylib": otool_big_l("@rpath/libHSrts.dylib", []),
             },
             small_l={
-                "libsimplex.dylib": otool_l([str(ghc / "lib")]),
+                "libsimplex.dylib": otool_l(["@loader_path"]),
+                "libHSsmplxmq.dylib": otool_l([]),
                 "libHSbase.dylib": otool_l(["@loader_path/../lib"]),
                 "libHSrts.dylib": otool_l([]),
             },
         )
-        with patch_all("run", fake):
-            build_script.copy_mac_dependencies(build / "libsimplex.dylib", deps, ghc, set())
-        self.assertEqual(sorted(p.name for p in deps.iterdir()), ["libHSbase.dylib", "libHSrts.dylib", "libsimplex.dylib"])
-        add_rpath = [c for c in fake.commands if c[:2] == ["install_name_tool", "-add_rpath"]]
-        self.assertEqual(add_rpath, [["install_name_tool", "-add_rpath", "@loader_path", str(deps / "libHSbase.dylib")]])
 
-    def test_libcrypto_is_bundled_and_absolute_rpaths_deleted(self):
+    def test_dependencies_are_found_in_the_store_and_ghcs_libdir_without_rpaths(self):
+        fake = self.dependency_tree()
+        with patch_all("run", fake):
+            build_script.copy_mac_dependencies(self.build / "libsimplex.dylib", self.deps, self.ghc, [self.store, self.ghc / "lib"], set())
+        names = ["libHSbase.dylib", "libHSrts.dylib", "libHSsmplxmq.dylib", "libffi.dylib", "libsimplex.dylib"]
+        self.assertEqual(sorted(p.name for p in self.deps.iterdir()), names)
+        add_rpath = [c for c in fake.commands if c[:2] == ["install_name_tool", "-add_rpath"]]
+        self.assertEqual(add_rpath, [["install_name_tool", "-add_rpath", "@loader_path", str(self.deps / "libHSbase.dylib")]])
+
+    def test_a_dependency_in_no_library_directory_fails(self):
+        fake = self.dependency_tree()
+        (self.store / "libHSsmplxmq.dylib").unlink()
+        with patch_all("run", fake), self.assertRaises(build_script.BuildError) as raised:
+            build_script.copy_mac_dependencies(self.build / "libsimplex.dylib", self.deps, self.ghc, [self.store], set())
+        self.assertIn(f"libHSsmplxmq.dylib, which libsimplex.dylib loads, is in none of {self.store}", str(raised.exception))
+
+    def test_the_store_libraries_are_in_cabal_dir(self):
+        with mock.patch.dict(os.environ, {"CABAL_DIR": "/private/tmp/simplex-chat-build/cabal"}):
+            libraries = build_script.cabal_store_libraries()
+        self.assertEqual(libraries, pathlib.Path("/private/tmp/simplex-chat-build/cabal/store/ghc-9.6.3/lib"))
+        with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(build_script.BuildError):
+            build_script.cabal_store_libraries()
+
+    def test_libcrypto_is_bundled_and_relative_rpaths_kept(self):
         libs = self.root / "libs"
         libs.mkdir()
         openssl = self.root / "openssl/lib"
@@ -72,8 +108,8 @@ class MacLibTest(unittest.TestCase):
         linked = str(openssl / "libcrypto.3.dylib")
         fake = FakeOtool(
             small_l={
-                "libHSsmplxmq-6.5.dylib": otool_l(["/Users/runner/ghc/lib"], [linked]),
-                "libHSdrct-2.3.dylib": otool_l([XCODE_SDK_LIB], [linked]),
+                "libHSsmplxmq-6.5.dylib": otool_l([], [linked]),
+                "libHSdrct-2.3.dylib": otool_l([], [linked]),
                 "libsimplex.dylib": otool_l(["@loader_path", "@executable_path/../lib"]),
             }
         )
@@ -84,11 +120,28 @@ class MacLibTest(unittest.TestCase):
         changes = [c[-1] for c in fake.commands if c[:2] == ["install_name_tool", "-change"]]
         self.assertEqual(sorted(pathlib.Path(c).name for c in changes), ["libHSdrct-2.3.dylib", "libHSsmplxmq-6.5.dylib"])
         self.assertIn(["install_name_tool", "-id", "libcrypto.3.0.dylib", str(libs / "libcrypto.3.0.dylib")], fake.commands)
-        deleted = [c[2:] for c in fake.commands if c[:2] == ["install_name_tool", "-delete_rpath"]]
-        self.assertEqual(
-            deleted, [[XCODE_SDK_LIB, str(libs / "libHSdrct-2.3.dylib")], ["/Users/runner/ghc/lib", str(libs / "libHSsmplxmq-6.5.dylib")]]
-        )
         self.assertEqual(kept, ["@loader_path", "@executable_path/../lib"])
+
+    def test_libraries_linked_with_absolute_rpaths_fail(self):
+        libs = self.root / "libs"
+        libs.mkdir()
+        crypto = self.root / "libcrypto.3.dylib"
+        crypto.write_bytes(b"c")
+        for name in ("libHSsmplxmq-6.5.dylib", "libHSdrct-2.3.dylib", "libffi.dylib"):
+            (libs / name).write_bytes(b"x")
+        fake = FakeOtool(
+            small_l={
+                "libHSsmplxmq-6.5.dylib": otool_l(["@loader_path", "/Users/runner/.ghcup/ghc/9.6.3/lib"], [str(crypto)]),
+                "libHSdrct-2.3.dylib": otool_l([XCODE_SDK_LIB], [str(crypto)]),
+            }
+        )
+        with patch_all("run", fake), self.assertRaises(build_script.BuildError) as raised:
+            build_script.bundle_mac_libcrypto(libs, build_script.Database.SQLITE)
+        message = str(raised.exception)
+        self.assertIn(f"libHSdrct-2.3.dylib ({XCODE_SDK_LIB})", message)
+        self.assertIn("libHSsmplxmq-6.5.dylib (/Users/runner/.ghcup/ghc/9.6.3/lib)", message)
+        self.assertNotIn("@loader_path", message)
+        self.assertFalse(any(c[:2] == ["install_name_tool", "-delete_rpath"] for c in fake.commands))
 
     def test_the_path_that_otool_prints_first_is_not_a_local_directory(self):
         libs = self.root / "Users/runner/libs"
@@ -162,6 +215,50 @@ class MacLibTest(unittest.TestCase):
     def test_the_gradle_build_sets_the_deployment_target_as_the_minimum_macos(self):
         gradle = (REPO_ROOT / "apps/multiplatform/desktop/build.gradle.kts").read_text()
         self.assertEqual(re.findall(r'minimumSystemVersion = "([^"]+)"', gradle), [build_script.MACOS_DEPLOYMENT_TARGET])
+
+    def run_linker(self, args):
+        """The arguments that the linker of rpathless_cabal_local passes to cc, a stand-in that records them, with the
+        files of response files that cc gets in place of their names."""
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "cc").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CC_ARGS"\n')
+        (bin_dir / "cc").chmod(0o755)
+        local = build_script.rpathless_cabal_local(self.root)
+        linker = self.root / build_script.LINKER_NAME
+        self.assertEqual(local, f"package *\n    ghc-options: -fno-use-rpaths -pgml {linker}\n")
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CC_ARGS": str(self.root / "args")}
+        subprocess.run([linker, *args], env=env, check=True)
+        passed = (self.root / "args").read_text().splitlines()
+        responses = {arg: shlex.split(pathlib.Path(arg[1:]).read_text()) for arg in passed if pathlib.Path(arg[1:]).is_file()}
+        return [line for arg in passed for line in responses.get(arg, [arg])]
+
+    def test_the_linker_drops_absolute_rpaths_and_runs_cc_with_the_rest(self):
+        kept = ["-dynamiclib", "-Wl,-rpath,@loader_path", "-install_name", "@rpath/lib.dylib"]
+        self.assertEqual(self.run_linker([*kept[:2], "-Wl,-rpath,/Users/runner/.ghcup/ghc/9.6.3/lib", *kept[2:]]), kept)
+
+    def test_the_linker_drops_absolute_rpaths_from_ghcs_response_file(self):
+        response = self.root / "ghc_1.rsp"
+        quoted = ["-dynamiclib", "-o", "/tmp/a b/lib.dylib", f"-Wl,-rpath,{XCODE_SDK_LIB}", "-Wl,-headerpad,8000"]
+        response.write_text("".join('"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"\n' for arg in quoted))
+        self.assertEqual(self.run_linker([f"@{response}"]), ["-dynamiclib", "-o", "/tmp/a b/lib.dylib", "-Wl,-headerpad,8000"])
+
+    def test_each_form_of_an_absolute_rpath_is_dropped(self):
+        args = [
+            "-Wl,-rpath", "-Wl,/opt/ghc/lib",
+            "-Xlinker", "-rpath", "-Xlinker", "/opt/ghc/lib",
+            "-rpath", "/opt/ghc/lib",
+            "-Wl,-rpath,/opt/ghc/lib",
+            "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
+            "-rpath", "@loader_path/..",
+            "-Wl,-rpath",
+        ]  # fmt: skip
+        kept = ["-Xlinker", "-rpath", "-Xlinker", "@loader_path", "-rpath", "@loader_path/..", "-Wl,-rpath"]
+        self.assertEqual(build_script.without_absolute_rpaths(args), kept)
+        nested = self.root / "nested.rsp"
+        nested.write_text("'-Wl,-rpath,/opt' '-L/opt'\n")
+        outer = self.root / "outer.rsp"
+        outer.write_text(f"-o lib.dylib @{nested}\n")
+        self.assertEqual(list(build_script.expand([f"@{outer}", "@missing"])), ["-o", "lib.dylib", "-Wl,-rpath,/opt", "-L/opt", "@missing"])
 
     def test_binaries_for_a_newer_macos_than_the_deployment_target_fail(self):
         libs = self.root / "libs"
