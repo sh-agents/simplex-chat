@@ -425,19 +425,24 @@ class HostDesktopTest(unittest.TestCase):
             self.assertEqual({info.date_time for info in z.infolist()}, {(2024, 1, 1, 0, 0, 0)})
 
     def test_read_only_cabal_checkouts_are_removed(self):
-        pack = self.source / "dist-newstyle/src/simplexmq-abc/.git/objects/pack/p.pack"
-        pack.parent.mkdir(parents=True)
-        pack.write_bytes(b"pack")
-        pack.chmod(0o444)
-        pack.parent.chmod(0o555)
+        checkouts = [
+            "simplexmq-abc/.git/modules/blst/objects/pack/p.pack",
+            "hs-jpeg-t_-d0a4/.git/modules/jpeg-turbo/cbits/mozjpeg/objects/pack/p.pack",
+            "JuicyPixe_-e009/.git/modules/cbits/stb/objects/pack/p.pack",
+        ]
+        for checkout in checkouts:
+            pack = self.source / "dist-newstyle/src" / checkout
+            pack.parent.mkdir(parents=True)
+            pack.write_bytes(b"pack")
+            pack.chmod(0o444)
+            pack.parent.chmod(0o555)
         keep = self.source / "dist-newstyle/src/aeson-1"
         keep.mkdir()
         tarball = self.source / "dist-newstyle/src/direct-sq_-fd06-direct-sqlcipher-2.3.28.tar.gz"
         tarball.write_bytes(b"tar")
         build_script.remove_cabal_sources(self.source)
         self.assertFalse(tarball.exists())
-        self.assertFalse((self.source / "dist-newstyle/src/simplexmq-abc").exists())
-        self.assertTrue(keep.exists())
+        self.assertEqual(sorted(p.name for p in (self.source / "dist-newstyle/src").iterdir()), ["aeson-1"])
 
     def test_skiko_runtime_jar_leaves_the_app_and_its_classpath(self):
         app = self.root / "SimpleX/app"

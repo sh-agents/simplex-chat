@@ -154,10 +154,16 @@ def macos_desktop() -> HostDesktop:
     return host
 
 
+# cabal names a git checkout after its repository, cut to 9 characters and _ when longer than 10
+CABAL_SOURCES_WITH_PACKS = ("direct-sq", "simplexmq", "hs-jpeg-t", "JuicyPixe")
+
+
 def remove_cabal_sources(source: Path) -> None:
-    """cabal fails on Windows when these checkouts exist, and can't delete simplexmq's read-only git pack files."""
-    for path in [*source.glob("dist-newstyle/src/direct-sq*"), *source.glob("dist-newstyle/src/simplexmq*")]:
-        remove_tree(path)
+    """cabal fails on Windows when these checkouts exist, and can't delete the read-only git pack files of their
+    submodules (blst, libbbs, mozjpeg, libspng, miniz, stb)."""
+    for prefix in CABAL_SOURCES_WITH_PACKS:
+        for path in source.glob(f"dist-newstyle/src/{prefix}*"):
+            remove_tree(path)
 
 
 def build_host_cli(source: Path, cabal_local: str) -> Path:
