@@ -95,97 +95,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/ci/ios-sim/earlier-run.sh "${{ steps.names.outputs.backend }}"
 
-  core:
-    name: core library for the iOS simulator
-    needs: plan
-    if: needs.plan.outputs.core-run == ''
-    runs-on: macos-26
-    timeout-minutes: 240
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Use the release Xcode
-        uses: ./.github/actions/xcode
-
-      - name: Show runner
-        run: |
-          sw_vers
-          sysctl -n hw.ncpu hw.memsize
-          df -h /
-          xcodebuild -version
-          xcrun --show-sdk-path
-          ls /Library/Developer/CommandLineTools/SDKs || true
-
-      - name: Use the macOS 26 SDK
-        run: scripts/ci/ios-sim/use-macos26-sdk.sh
-
-      - name: Setup Haskell
-        uses: simplex-chat/setup-haskell-action@v2
-        with:
-          ghc-version: ${{ env.GHC_VER }}
-          cabal-version: ${{ env.CABAL_VER }}
-
-      - name: Install libraries
-        run: brew install libffi gmp
-
-      - name: Build core library
-        id: build
-        run: scripts/simplex-chat-build.py build libs ios-sim --out ~/Downloads
-
-      - name: Patch core library for the simulator
-        run: scripts/simplex-chat-build.py install libs ios ~/Downloads/${{ env.CORE_PKG }}
-
-      - name: Upload core library
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ needs.plan.outputs.core }}
-          path: ~/Downloads/${{ env.CORE_PKG }}
-          compression-level: 0
-          retention-days: 30
-          if-no-files-found: error
-
-  backend:
-    name: test backend for the app
-    needs: plan
-    if: needs.plan.outputs.run-backend == 'true' && needs.plan.outputs.backend-run == ''
-    runs-on: macos-26
-    timeout-minutes: 240
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Use the release Xcode
-        uses: ./.github/actions/xcode
-
-      - name: Show runner
-        run: |
-          sw_vers
-          xcodebuild -version
-          xcrun --show-sdk-path
-          ls /Library/Developer/CommandLineTools/SDKs || true
-
-      - name: Use the macOS 26 SDK
-        run: scripts/ci/ios-sim/use-macos26-sdk.sh
-
-      - name: Setup Haskell
-        uses: simplex-chat/setup-haskell-action@v2
-        with:
-          ghc-version: ${{ env.GHC_VER }}
-          cabal-version: ${{ env.CABAL_VER }}
-
-      - name: Build backend
-        run: scripts/ci/ios-sim/build-backend.sh ~/Downloads/${{ env.BACKEND_PKG }}
-
-      - name: Upload backend
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ needs.plan.outputs.backend }}
-          path: ~/Downloads/${{ env.BACKEND_PKG }}
-          compression-level: 0
-          retention-days: 30
-          if-no-files-found: error
-
   # the app must open this encrypted database, made by the previous release with its own OpenSSL
   old-database:
     name: previous release's database
@@ -208,13 +117,13 @@ jobs:
 
   app:
     name: app in the iOS simulator
-    needs: [plan, core, backend, old-database]
-    # core and backend are skipped when an earlier run built them, and backend also when the run doesn't start it
-    if: ${{ !cancelled() && !failure() && needs.plan.result == 'success' && needs.core.result != 'cancelled' && needs.backend.result != 'cancelled' }}
+    needs: [plan, old-database]
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       START_BACKEND: ${{ needs.plan.outputs.run-backend }}
+      BUILD_CORE: ${{ needs.plan.outputs.core-run == '' }}
+      BUILD_BACKEND: ${{ needs.plan.outputs.run-backend == 'true' && needs.plan.outputs.backend-run == '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -225,6 +134,7 @@ jobs:
       - name: Show runner
         run: |
           sw_vers
+          sysctl -n hw.ncpu hw.memsize
           df -h /
           xcodebuild -version
           xcrun --show-sdk-path
@@ -234,24 +144,64 @@ jobs:
       - name: Use the macOS 26 SDK
         run: scripts/ci/ios-sim/use-macos26-sdk.sh
 
+      - name: Setup Haskell
+        if: env.BUILD_CORE == 'true' || env.BUILD_BACKEND == 'true'
+        uses: simplex-chat/setup-haskell-action@v2
+        with:
+          ghc-version: ${{ env.GHC_VER }}
+          cabal-version: ${{ env.CABAL_VER }}
+
+      - name: Install libraries
+        if: env.BUILD_CORE == 'true'
+        run: brew install libffi gmp
+
+      - name: Build core library
+        if: env.BUILD_CORE == 'true'
+        run: scripts/simplex-chat-build.py build libs ios-sim --out ~/Downloads
+
+      - name: Upload core library
+        if: env.BUILD_CORE == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.plan.outputs.core }}
+          path: ~/Downloads/${{ env.CORE_PKG }}
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Download core library
+        if: env.BUILD_CORE != 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ needs.plan.outputs.core }}
           path: ~/Downloads
-          run-id: ${{ needs.plan.outputs.core-run || github.run_id }}
+          run-id: ${{ needs.plan.outputs.core-run }}
           github-token: ${{ github.token }}
 
       - name: Prepare libraries
         run: scripts/simplex-chat-build.py install libs ios ~/Downloads/${{ env.CORE_PKG }}
 
+      - name: Build backend
+        if: env.BUILD_BACKEND == 'true'
+        run: scripts/ci/ios-sim/build-backend.sh ~/Downloads/${{ env.BACKEND_PKG }}
+
+      - name: Upload backend
+        if: env.BUILD_BACKEND == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.plan.outputs.backend }}
+          path: ~/Downloads/${{ env.BACKEND_PKG }}
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Download backend
-        if: env.START_BACKEND == 'true'
+        if: env.START_BACKEND == 'true' && env.BUILD_BACKEND != 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ needs.plan.outputs.backend }}
           path: ~/Downloads
-          run-id: ${{ needs.plan.outputs.backend-run || github.run_id }}
+          run-id: ${{ needs.plan.outputs.backend-run }}
           github-token: ${{ github.token }}
 
       - name: Start test backend
@@ -293,7 +243,7 @@ jobs:
         run: scripts/ci/ios-sim/install-axe.sh
 
       - name: Run smoke test
-        run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" "$RUNNER_TEMP/smoke-test"
+        run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" "$RUNNER_TEMP/smoke-test" images
 
       - name: Download the previous release's database
         uses: actions/download-artifact@v8
@@ -392,6 +342,14 @@ jobs:
 
       - name: Run smoke test
         run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/SimpleX.app" "$RUNNER_TEMP/claude-test/smoke-test"
+
+      - name: Add test images
+        run: |
+          images=(tests/fixtures/test.jpg tests/fixtures/logo-large-rgba.png)
+          if sips -r 90 -s format heic tests/fixtures/test.jpg --out "$RUNNER_TEMP/test-card-portrait.heic"; then
+            images+=("$RUNNER_TEMP/test-card-portrait.heic")
+          fi
+          xcrun simctl addmedia "$SIM_UDID" "${images[@]}"
 
       - name: Install Claude Code
         run: |
