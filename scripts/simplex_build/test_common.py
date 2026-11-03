@@ -31,6 +31,20 @@ class ReleaseDetailsTest(unittest.TestCase):
         self.assertEqual(recorder.commands[0][-4:], ["-c", "core.autocrlf=false", "https://github.com/owner/fork.git", "simplex-chat"])
         self.assertEqual(recorder.commands[1][-2], "https://github.com/simplex-chat/simplex-chat.git")
 
+    def test_checkout_of_a_tag_has_its_submodules_and_their_submodules(self):
+        recorder = Recorder()
+        with patch_all("run", recorder):
+            build_script.checkout(pathlib.Path("w/simplex-chat"), "v7.1.0")
+        self.assertEqual(
+            recorder.commands,
+            [
+                ["git", "-C", "w/simplex-chat", "reset", "--hard", "--quiet"],
+                ["git", "-C", "w/simplex-chat", "clean", "-dfxq"],
+                ["git", "-C", "w/simplex-chat", "checkout", "--quiet", "v7.1.0"],
+                ["git", "-C", "w/simplex-chat", "submodule", "update", "--init", "--recursive", "--quiet"],
+            ],
+        )
+
     def test_android_build_tag(self):
         tags = ["v6.4.0", "v6.4.0-armv7a", "v7.1.0"]
         self.assertEqual(build_script.android_build_tag("v6.4.0", tags, Arch.ARMV7A), "v6.4.0-armv7a")
