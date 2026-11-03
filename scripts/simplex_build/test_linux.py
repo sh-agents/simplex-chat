@@ -499,6 +499,16 @@ class LibrarySearchPathTest(unittest.TestCase):
         )
         self.assertEqual(build_script.library_search_paths(FakeRunner(), []), {})
 
+    def test_host_runner_sets_origin_runpaths_in_the_libraries_directory(self):
+        lib = self.elf("libsimplex.so")
+        output = readelf({lib: [("RUNPATH", f"{STORE}:$ORIGIN")]})
+        with patch_all("run", return_value=mock.Mock(stdout=output)) as run:
+            build_script.set_origin_runpaths(build_script.HostRunner(), self.libs)
+        self.assertEqual(
+            [(call.args[0], call.kwargs["cwd"]) for call in run.call_args_list],
+            [(("readelf", "-d", str(lib)), self.libs), (("patchelf", "--set-rpath", "$ORIGIN", str(lib)), self.libs)],
+        )
+
     def test_libraries_that_look_elsewhere_look_only_in_their_own_directory(self):
         store = self.elf("libHShashable-1.4.3.0-98ac-ghc9.6.3.so")
         simplex = self.elf("libsimplex.so")

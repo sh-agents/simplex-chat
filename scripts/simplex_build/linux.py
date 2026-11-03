@@ -172,7 +172,7 @@ def library_search_paths(runner: Runner, files: Sequence[Path]) -> dict[Path, li
     named = {runner.path(file): file for file in files}
     found: dict[Path, list[str]] = {file: [] for file in files}
     current = files[0]
-    for line in runner.run(Step(("readelf", "-d", *named)), capture=True).splitlines():
+    for line in runner.run(Step(("readelf", "-d", *named), runner.path(files[0].parent)), capture=True).splitlines():
         if line.startswith(READELF_FILE):
             current = named[line.removeprefix(READELF_FILE).strip()]
         elif any(kind in line for kind in READELF_SEARCH_PATHS):
