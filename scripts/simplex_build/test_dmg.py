@@ -125,7 +125,7 @@ class LibdmgTest(unittest.TestCase):
                 tar.addfile(info, io.BytesIO(data))
         return target
 
-    def test_libdmg_is_built_from_the_pinned_source_with_its_clock_and_id_pinned_and_the_pinned_zlib(self):
+    def test_libdmg_is_built_from_the_pinned_source_with_its_clock_and_id_pinned_the_pinned_zlib_and_no_openssl(self):
         recorder = Recorder()
         with patch_all("fetch_pinned", self.fetch_sources), patch_all("run", recorder):
             tools = build_script.build_libdmg(self.root)
@@ -139,6 +139,7 @@ class LibdmgTest(unittest.TestCase):
         self.assertIn(f"-DZLIB_LIBRARY={zlib}/lib/libz.a", configure)
         self.assertIn(f"-DZLIB_INCLUDE_DIR={zlib}/include", configure)
         self.assertIn(f"-DCMAKE_EXE_LINKER_FLAGS=-L{zlib}/lib", configure)
+        self.assertIn("-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE", configure)
         self.assertEqual(recorder.commands[3], ["cmake", "--build", str(source / "build"), "--target", "hfsplus", "dmg-bin"])
         self.assertEqual(recorder.commands[4:], [["otool", "-L", str(tools.hfsplus)], ["otool", "-L", str(tools.dmg)]])
         self.assertEqual(tools, build_script.DmgTools(source / "build/hfs/hfsplus", source / "build/dmg/dmg"))
@@ -146,9 +147,30 @@ class LibdmgTest(unittest.TestCase):
     def test_a_tool_that_loads_the_system_zlib_fails(self):
         system = "dmg:\n\t/usr/lib/libz.1.dylib (compatibility version 1.0.0)\n\t/usr/lib/libSystem.B.dylib\n"
         recorder = Recorder(answers={"otool -L": system})
-        with patch_all("fetch_pinned", self.fetch_sources), patch_all("run", recorder), self.assertRaises(build_script.BuildError):
+        zlib_error = self.assertRaisesRegex(build_script.BuildError, "hfsplus loads the system's zlib")
+        with patch_all("fetch_pinned", self.fetch_sources), patch_all("run", recorder), zlib_error:
             build_script.build_libdmg(self.root)
-        build_script.check_static_zlib(pathlib.Path("dmg"), "dmg:\n\t/usr/lib/libbz2.1.0.dylib\n\t/usr/lib/libSystem.B.dylib\n")
+
+    def test_a_tool_that_loads_a_homebrew_library_fails(self):
+        homebrew = (
+            "/w/build/dmg/dmg:\n"
+            "\t/opt/homebrew/opt/openssl@4/lib/libcrypto.4.dylib (compatibility version 4.0.0, current version 4.0.0)\n"
+            "\t/usr/lib/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)\n"
+            "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n"
+        )
+        expected = "^dmg loads libraries that are not macOS's own: /opt/homebrew/opt/openssl@4/lib/libcrypto.4.dylib$"
+        with self.assertRaisesRegex(build_script.BuildError, expected):
+            build_script.check_tool_libraries(pathlib.Path("dmg"), homebrew)
+
+    def test_a_tool_that_loads_only_macos_libraries_passes(self):
+        system = (
+            "/w/build/dmg/dmg:\n"
+            "\t/usr/lib/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)\n"
+            "\t/usr/lib/liblzma.5.dylib (compatibility version 6.0.0, current version 6.3.0)\n"
+            "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0)\n"
+            "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n"
+        )
+        build_script.check_tool_libraries(pathlib.Path("dmg"), system)
 
 
 class HfsTest(unittest.TestCase):

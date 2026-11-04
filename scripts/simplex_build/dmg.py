@@ -57,6 +57,13 @@ ZLIB_SHA256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
 DMG_COMPRESSION = ("--compression", "zlib", "--level", "9")
 
 
+# OpenSSL only decrypts FileVault images for dmg's --key, which the build doesn't use; CMake finds Homebrew's
+LIBDMG_WITHOUT_OPENSSL = "-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE"
+
+
+MACOS_LIBRARY_DIRS = ("/usr/lib/", "/System/Library/")
+
+
 VOLUME_NAME = "SimpleX"
 
 
@@ -267,10 +274,14 @@ def build_zlib(work: Path) -> Path:
     return prefix
 
 
-def check_static_zlib(tool: Path, dependencies: str) -> None:
-    """dependencies: what otool -L prints of the tool."""
-    if "libz." in dependencies:
+def check_tool_libraries(tool: Path, dependencies: str) -> None:
+    """dependencies: what otool -L prints of the tool: only macOS's own libraries, without its zlib."""
+    libraries = [line.split(" (", 1)[0].strip() for line in dependencies.splitlines() if line.startswith("\t")]
+    if any("/libz." in library for library in libraries):
         raise BuildError(f"{tool.name} loads the system's zlib, instead of linking the pinned zlib statically")
+    outside = [library for library in libraries if not library.startswith(MACOS_LIBRARY_DIRS)]
+    if outside:
+        raise BuildError(f"{tool.name} loads libraries that are not macOS's own: {', '.join(outside)}")
 
 
 def build_libdmg(work: Path) -> DmgTools:
@@ -289,11 +300,11 @@ def build_libdmg(work: Path) -> DmgTools:
         # the CMakeLists link zlib by its name, z, which the linker looks for in -L directories before the SDK's
         f"-DCMAKE_EXE_LINKER_FLAGS=-L{zlib / 'lib'}",
     ]
-    run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release", *zlib_args])
+    run(["cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release", LIBDMG_WITHOUT_OPENSSL, *zlib_args])
     run(["cmake", "--build", build, "--target", "hfsplus", "dmg-bin"])
     tools = DmgTools(build / "hfs/hfsplus", build / "dmg/dmg")
     for tool in (tools.hfsplus, tools.dmg):
-        check_static_zlib(tool, run(["otool", "-L", tool], capture=True).stdout)
+        check_tool_libraries(tool, run(["otool", "-L", tool], capture=True).stdout)
     return tools
 
 
