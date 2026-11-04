@@ -27,7 +27,7 @@ Queueing for a runner adds from under a minute to 20 minutes. Results are artifa
 - `smoke-test.sh <app dir> <out dir> [start|onboarding|setup|backend]`: the scripted cases; the default is onboarding, a local group, both layouts, and `tests/fixtures/test.jpg` and `logo-large-rgba.png` picked in the file dialog, resized by the core, previewed and sent in the group. `setup` also creates a local group and makes the test SMP server the app's only names server; `backend` does that, connects to the seeded name, and checks both layouts.
 - `backend.sh start <tar.gz> <dir>` / `stop <dir>`: the test backend, below.
 - `claude-test.sh`, `claude-test.md` (the prompt), `claude-scope` (whether the prompt uses the test backend, and optionally the session's turns and budget), `claude-guard.py`, `claude-usage.py`: the Claude job.
-- `build-core.sh`, `install-core.sh`, `build-backend.sh`, `earlier-run.sh`, `release-app.sh`, `test-summary.py`: builds, reuse and reports.
+- `build-backend.sh`, `earlier-run.sh`, `release-app.sh`, `test-summary.py`: builds, reuse and reports.
 
 ## Snapshots
 

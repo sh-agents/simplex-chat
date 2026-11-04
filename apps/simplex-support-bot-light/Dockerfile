@@ -17,7 +17,7 @@ ARG GHC=9.6.3
 ARG CABAL=3.10.2.0
 
 # --------------------------------------------------------------------------- #
-# libsimplex — the cabal invocation of scripts/desktop/build-lib-linux.sh, which
+# libsimplex — the cabal invocation of build_linux_lib in scripts/simplex-chat-build.py, which
 # is what produces the .so the published libs archive is repackaged from.
 # --------------------------------------------------------------------------- #
 FROM ubuntu:${UBUNTU_LIBS} AS libsimplex

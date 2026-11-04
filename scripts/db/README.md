@@ -239,7 +239,7 @@
    Run in shell (paths are from project root):
 
    ```sh
-   ./scripts/desktop/build-lib-mac.sh arm64 postgres
+   ./scripts/simplex-chat-build.py build libs macos --database postgres --out ~/Downloads
 
    ./gradlew runDistributable -Pdatabase.backend=postgres
    # or
