@@ -284,6 +284,13 @@
 		E5DDBE702DC4217900A0EFF0 /* NSEAPITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DDBE6F2DC4217900A0EFF0 /* NSEAPITypes.swift */; };
 		E5E418012F83D2CA00252B9E /* OnboardingCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E418002F83D2CA00252B9E /* OnboardingCards.swift */; };
 		E5E418022F83D2CA00252B9E /* ChannelWebAccessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E418032F83D2CA00252B9E /* ChannelWebAccessView.swift */; };
+		5C6D058D03DAE4E3FD2EFE63 /* RemoteCtrlKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C8EE7D2D0B08215553ECECB /* RemoteCtrlKeepAlive.swift */; };
+		5CABBF2D63B0076484A1D7D3 /* RemoteCtrlActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C75CEC31A05DB3C3BAFC871 /* RemoteCtrlActivity.swift */; };
+		5C04D8B40E32FFF792116B3F /* RemoteCtrlActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C75CEC31A05DB3C3BAFC871 /* RemoteCtrlActivity.swift */; };
+		5C97F5D206ADA15E3D379665 /* RemoteCtrlLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C976F2F29E49AEC011BD8C3 /* RemoteCtrlLiveActivity.swift */; };
+		5C0F632AD82E57A6531E9B75 /* SimpleX Live Activity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 5C6B26D08D4232E559E2326B /* SimpleX Live Activity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		5C324E561A566FBF24268230 /* ActivityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5C8C62C14379F0693D48C2D8 /* ActivityKit.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+		5C57D469CE39365BDDEF5B43 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5C550DEB949D8D0937B9C4EC /* AppIntents.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -336,6 +343,13 @@
 			remoteGlobalIDString = 5CE2BA672845308900EC33A6;
 			remoteInfo = SimpleXChat;
 		};
+		5CA0012C2871D77CA2A76F53 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5CA059BE279559F40002BEB4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C8D0F7221FD971602238A9C;
+			remoteInfo = "SimpleX Live Activity";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -358,6 +372,7 @@
 			files = (
 				CEE723B12C3BD3D70009AE93 /* SimpleX SE.appex in Embed App Extensions */,
 				5CE2BA9D284555F500EC33A6 /* SimpleX NSE.appex in Embed App Extensions */,
+				5C0F632AD82E57A6531E9B75 /* SimpleX Live Activity.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -736,6 +751,13 @@
 		E5DDBE6F2DC4217900A0EFF0 /* NSEAPITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NSEAPITypes.swift; sourceTree = "<group>"; };
 		E5E418002F83D2CA00252B9E /* OnboardingCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingCards.swift; sourceTree = "<group>"; };
 		E5E418032F83D2CA00252B9E /* ChannelWebAccessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelWebAccessView.swift; sourceTree = "<group>"; };
+		5C8EE7D2D0B08215553ECECB /* RemoteCtrlKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCtrlKeepAlive.swift; sourceTree = "<group>"; };
+		5C75CEC31A05DB3C3BAFC871 /* RemoteCtrlActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCtrlActivity.swift; sourceTree = "<group>"; };
+		5C976F2F29E49AEC011BD8C3 /* RemoteCtrlLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCtrlLiveActivity.swift; sourceTree = "<group>"; };
+		5C86508B6ECCD1E050E95BF9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		5C6B26D08D4232E559E2326B /* SimpleX Live Activity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "SimpleX Live Activity.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5C8C62C14379F0693D48C2D8 /* ActivityKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ActivityKit.framework; path = System/Library/Frameworks/ActivityKit.framework; sourceTree = SDKROOT; };
+		5C550DEB949D8D0937B9C4EC /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -753,6 +775,8 @@
 				D7F0E33929964E7E0068AF69 /* LZString in Frameworks */,
 				D741547A29AF90B00022400A /* PushKit.framework in Frameworks */,
 				646BB38C283BEEB9001CE359 /* LocalAuthentication.framework in Frameworks */,
+				5C324E561A566FBF24268230 /* ActivityKit.framework in Frameworks */,
+				5C57D469CE39365BDDEF5B43 /* AppIntents.framework in Frameworks */,
 				5C8F01CD27A6F0D8007D2C8D /* CodeScanner in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -799,6 +823,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				E5DCF8DB2C56FAC1007928CC /* SimpleXChat.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5C64E802B6A3259D60F0C600 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -888,6 +919,8 @@
 				D741547929AF90B00022400A /* PushKit.framework */,
 				D741547729AF89AF0022400A /* StoreKit.framework */,
 				646BB38B283BEEB9001CE359 /* LocalAuthentication.framework */,
+				5C8C62C14379F0693D48C2D8 /* ActivityKit.framework */,
+				5C550DEB949D8D0937B9C4EC /* AppIntents.framework */,
 				5CDCAD6028187D7900503DA2 /* libz.tbd */,
 				5CDCAD5E28187D4A00503DA2 /* libiconv.tbd */,
 			);
@@ -907,6 +940,8 @@
 				5CB346E82869E8BA001FD2EF /* PushEnvironment.swift */,
 				5C93293E2928E0FD0090FFF9 /* AudioRecPlay.swift */,
 				8CC956ED2BC0041000412A11 /* NetworkObserver.swift */,
+				5C8EE7D2D0B08215553ECECB /* RemoteCtrlKeepAlive.swift */,
+				5C75CEC31A05DB3C3BAFC871 /* RemoteCtrlActivity.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -957,6 +992,7 @@
 				5CA059C2279559F40002BEB4 /* Shared */,
 				5CDCAD462818589900503DA2 /* SimpleX NSE */,
 				CEE723A82C3BD3D70009AE93 /* SimpleX SE */,
+				5CA9946F406D0179CFCE52B8 /* SimpleX Live Activity */,
 				5CA059DA279559F40002BEB4 /* Tests iOS */,
 				E5AEC0C42F9C000100270665 /* SimpleX Snapshots */,
 				5CE2BA692845308900EC33A6 /* SimpleXChat */,
@@ -992,6 +1028,7 @@
 				5CDCAD452818589900503DA2 /* SimpleX NSE.appex */,
 				5CE2BA682845308900EC33A6 /* SimpleXChat.framework */,
 				CEE723A72C3BD3D70009AE93 /* SimpleX SE.appex */,
+				5C6B26D08D4232E559E2326B /* SimpleX Live Activity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -1327,6 +1364,15 @@
 			path = "SimpleX SE";
 			sourceTree = "<group>";
 		};
+		5CA9946F406D0179CFCE52B8 /* SimpleX Live Activity */ = {
+			isa = PBXGroup;
+			children = (
+				5C86508B6ECCD1E050E95BF9 /* Info.plist */,
+				5C976F2F29E49AEC011BD8C3 /* RemoteCtrlLiveActivity.swift */,
+			);
+			path = "SimpleX Live Activity";
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXHeadersBuildPhase section */
@@ -1361,6 +1407,7 @@
 				5CE2BA6F2845308900EC33A6 /* PBXTargetDependency */,
 				5CE2BA9F284555F500EC33A6 /* PBXTargetDependency */,
 				CEE723B02C3BD3D70009AE93 /* PBXTargetDependency */,
+				5C9FCDA87A189113F45CF137 /* PBXTargetDependency */,
 			);
 			name = "SimpleX (iOS)";
 			packageProductDependencies = (
@@ -1469,6 +1516,22 @@
 			productReference = CEE723A72C3BD3D70009AE93 /* SimpleX SE.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		5C8D0F7221FD971602238A9C /* SimpleX Live Activity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5C560F6F384021A4D7E86CA1 /* Build configuration list for PBXNativeTarget "SimpleX Live Activity" */;
+			buildPhases = (
+				5CE7E28716B96578A141EC6C /* Sources */,
+				5C64E802B6A3259D60F0C600 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "SimpleX Live Activity";
+			productName = "SimpleX Live Activity";
+			productReference = 5C6B26D08D4232E559E2326B /* SimpleX Live Activity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -1498,6 +1561,9 @@
 					};
 					CEE723A62C3BD3D70009AE93 = {
 						CreatedOnToolsVersion = 15.4;
+					};
+					5C8D0F7221FD971602238A9C = {
+						CreatedOnToolsVersion = 26.0;
 					};
 					E5AEC0C82F9C000100270665 = {
 						CreatedOnToolsVersion = 26.0;
@@ -1549,6 +1615,7 @@
 				5CDCAD442818589900503DA2 /* SimpleX NSE */,
 				CEE723A62C3BD3D70009AE93 /* SimpleX SE */,
 				5CE2BA672845308900EC33A6 /* SimpleXChat */,
+				5C8D0F7221FD971602238A9C /* SimpleX Live Activity */,
 			);
 		};
 /* End PBXProject section */
@@ -1786,6 +1853,8 @@
 				E5AEC0AF2F91A73500270665 /* ComposeChatLinkView.swift in Sources */,
 				CEA6E91C2CBD21B0002B5DB4 /* UserDefault.swift in Sources */,
 				5CB346E52868AA7F001FD2EF /* SuspendChat.swift in Sources */,
+				5C6D058D03DAE4E3FD2EFE63 /* RemoteCtrlKeepAlive.swift in Sources */,
+				5CABBF2D63B0076484A1D7D3 /* RemoteCtrlActivity.swift in Sources */,
 				8CAEF1502D11A6A000240F00 /* ChatItemsLoader.swift in Sources */,
 				5C9C2DA52894777E00CC63B1 /* GroupProfileView.swift in Sources */,
 				5CEACCED27DEA495000BD591 /* MsgContentView.swift in Sources */,
@@ -1912,6 +1981,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5CE7E28716B96578A141EC6C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5C04D8B40E32FFF792116B3F /* RemoteCtrlActivity.swift in Sources */,
+				5C97F5D206ADA15E3D379665 /* RemoteCtrlLiveActivity.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -1950,6 +2028,11 @@
 			isa = PBXTargetDependency;
 			target = 5CE2BA672845308900EC33A6 /* SimpleXChat */;
 			targetProxy = CEE723D12C3C21C90009AE93 /* PBXContainerItemProxy */;
+		};
+		5C9FCDA87A189113F45CF137 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C8D0F7221FD971602238A9C /* SimpleX Live Activity */;
+			targetProxy = 5CA0012C2871D77CA2A76F53 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -2645,6 +2728,65 @@
 			};
 			name = Release;
 		};
+		5C3B641C2F68C3A48DC451CE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 367;
+				DEVELOPMENT_TEAM = 5NN7GUYB6T;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "SimpleX Live Activity/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "SimpleX Live Activity";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 SimpleX Chat. All rights reserved.";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 7.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.app.SimpleX-Live-Activity";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "LIVE_ACTIVITY_EXTENSION $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		5CDAE33EF01467B24B7C9323 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 367;
+				DEVELOPMENT_TEAM = 5NN7GUYB6T;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "SimpleX Live Activity/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "SimpleX Live Activity";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 SimpleX Chat. All rights reserved.";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 7.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.app.SimpleX-Live-Activity";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "LIVE_ACTIVITY_EXTENSION $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -2707,6 +2849,15 @@
 			buildConfigurations = (
 				CEE723B22C3BD3D70009AE93 /* Debug */,
 				CEE723B32C3BD3D70009AE93 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5C560F6F384021A4D7E86CA1 /* Build configuration list for PBXNativeTarget "SimpleX Live Activity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5C3B641C2F68C3A48DC451CE /* Debug */,
+				5CDAE33EF01467B24B7C9323 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

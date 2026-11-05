@@ -56,6 +56,15 @@ func suspendChat() {
     }
 }
 
+func suspendChatInBackground() {
+    if CallController.useCallKit() && ChatModel.shared.activeCall != nil {
+        CallController.shared.shouldSuspendChat = true
+    } else {
+        suspendChat()
+        BGManager.shared.schedule()
+    }
+}
+
 func suspendBgRefresh() {
     suspendLockQueue.sync {
         if case .bgRefresh = AppChatState.shared.value  {
