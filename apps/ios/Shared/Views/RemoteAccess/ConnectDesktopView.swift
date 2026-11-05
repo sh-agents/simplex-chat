@@ -498,13 +498,8 @@ struct ConnectDesktopView: View {
     private func disconnectDesktop(_ action: UserDisconnectAction? = nil) {
         Task {
             do {
-                try await stopRemoteCtrl()
+                try await stopRemoteCtrlSession()
                 await MainActor.run {
-                    if case .connected = m.remoteCtrlSession?.sessionState {
-                        switchToLocalSession()
-                    } else {
-                        m.remoteCtrlSession = nil
-                    }
                     switch action {
                     case .back: dismiss()
                     case .dismiss: dismiss()
