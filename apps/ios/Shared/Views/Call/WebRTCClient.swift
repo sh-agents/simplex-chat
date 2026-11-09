@@ -969,6 +969,9 @@ extension WebRTCClient: RTCPeerConnectionDelegate {
         debugPrint("Connection new connection state: \(newState.toString() ?? "" + newState.rawValue.description) \(connection.receivers)")
 
         guard let connectionStateString = newState.toString() else { return }
+#if DEBUG
+        logger.debug("WebRTCClient: ice connection state \(connectionStateString, privacy: .public)")
+#endif
         Task {
             if activeCall?.wasConnected == true && ChatModel.shared.activeCall?.contact.callReconnectSupported == true {
                 switch newState {
@@ -1006,6 +1009,12 @@ extension WebRTCClient: RTCPeerConnectionDelegate {
     func peerConnection(_ connection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
         logger.debug("connection new gathering state: \(newState.toString() ?? "" + newState.rawValue.description)")
     }
+
+#if DEBUG
+    func peerConnection(_ connection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
+        logger.debug("WebRTCClient: peer connection state \(newState.toString() ?? newState.rawValue.description, privacy: .public)")
+    }
+#endif
 
     func peerConnection(_ connection: RTCPeerConnection, didGenerate candidate: WebRTC.RTCIceCandidate) {
 //        logger.debug("Connection generated candidate \(candidate.debugDescription)")
