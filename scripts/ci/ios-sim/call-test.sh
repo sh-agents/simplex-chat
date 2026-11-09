@@ -203,11 +203,14 @@ fixed() {
   [[ " $fixed_peers " == *" $1 "* ]]
 }
 
-# fails when the peer's app has the fix, otherwise warns
+# fails the test at its end when the peer's app has the fix, otherwise warns
+hang_up_failures=0
 expect_fixed() {
   local peer=$1 message=$2
   if fixed "$peer"; then
-    fail "$message"
+    echo "::error::$message"
+    hang_up_failures=$((hang_up_failures + 1))
+    return
   fi
   echo "::warning::$message (not checked: $peer's app is not the fixed one)"
 }
@@ -224,7 +227,7 @@ log_seconds() {
 # The ender ends the call; the receiver's app ends it when the chat delivers the end. With background, the receiver's
 # app is in the background from before the end until its call ended.
 hang_up() {
-  local ender=$1 receiver=$2 call=$3 background=$4 ender_from receiver_from ended sent reconnect delay deadline
+  local ender=$1 receiver=$2 call=$3 background=$4 ender_from receiver_from ended sent reconnect delay deadline peer from
   ender_from=$(($(wc -l < "$out/$ender/app.log") + 1))
   receiver_from=$(($(wc -l < "$out/$receiver/app.log") + 1))
   if [ -n "$background" ]; then
@@ -256,6 +259,14 @@ hang_up() {
   [ -n "$sent" ] || fail "$call: $ender's log has no CallManager.endCall"
   delay=$(awk -v a="$(log_seconds "$sent")" -v b="$(log_seconds "$ended")" 'BEGIN { printf "%.1f", b - a }')
   reconnect=$(log_line "$receiver" "$receiver_from" "WebRTCClient: reconnecting")
+  echo "::group::$call: hang-up in both apps' logs"
+  for peer in "$ender" "$receiver"; do
+    from=$([ "$peer" = "$ender" ] && echo "$ender_from" || echo "$receiver_from")
+    tail -n +"$from" "$out/$peer/app.log" |
+      grep -E "chatSendCmd apiEndCall|CallManager.endCall|processReceivedMsg: callEnded|WebRTC: processed cmd|WebRTCClient: (reconnecting|ending the call)" |
+      sed "s/^\([^ ]* [^ ]*\).*SimpleX\[[^]]*\] /\1 $peer: /"
+  done | sort
+  echo "::endgroup::"
   local reconnected=no
   [ -z "$reconnect" ] || reconnected=yes
   echo "$call: $ender ended the call, $receiver's call ended $delay s later, $receiver reconnecting first: $reconnected"
@@ -392,5 +403,7 @@ on alice shot invitation-closed
 video_call alice bob alice
 video_call bob alice bob
 video_call alice bob bob background
+
+[ "$hang_up_failures" -eq 0 ] || fail "$hang_up_failures hang-up checks failed"
 
 echo "call test passed: alice ($app_alice) and bob ($app_bob) called each other, e2e encrypted, with audio and video both ways"
