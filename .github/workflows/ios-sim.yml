@@ -311,7 +311,7 @@ jobs:
   calls:
     name: calls between ${{ matrix.peers }}
     needs: app
-    if: ${{ !cancelled() && (inputs.apps_run != '' || needs.app.outputs.other-app == 'success') }}
+    if: ${{ !cancelled() && inputs.calls && (inputs.apps_run != '' || needs.app.outputs.other-app == 'success') }}
     runs-on: macos-26
     timeout-minutes: 90
     strategy:
@@ -405,7 +405,7 @@ jobs:
   ios-calls-android:
     name: iOS app calls the Android app
     needs: [plan, app]
-    if: ${{ !cancelled() && inputs.calls_android && needs.app.outputs.app == 'success' }}
+    if: ${{ !cancelled() && inputs.calls_android && (inputs.apps_run != '' || needs.app.outputs.app == 'success') }}
     runs-on: macos-26
     timeout-minutes: 180
     steps:
@@ -420,6 +420,8 @@ jobs:
         with:
           name: ios-sim-app
           path: ${{ runner.temp }}/branch
+          run-id: ${{ inputs.apps_run || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Unpack app
         run: tar -xzf "$RUNNER_TEMP/branch/SimpleX.app.tar.gz" -C "$RUNNER_TEMP/branch"

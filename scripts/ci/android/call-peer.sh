@@ -40,9 +40,11 @@ wait_call_end() {
 }
 
 adb shell am start -a android.intent.action.VIEW -d "$link" "$package" > /dev/null
-"$ui" wait "Use current profile" 60 || "$ui" wait "Connect" 10 || fail "the app did not offer to open the iPhone's link"
+"$ui" wait "Open new chat" 60 || fail "the app did not offer to open the iPhone's link"
 "$ui" shot link-opened
-"$ui" click-text "Use current profile" 5 || "$ui" click-text "Connect" 5
+"$ui" click-text "Open new chat"
+"$ui" click-text Connect 60 || fail "the new chat with $peer has no Connect button"
+"$ui" shot connecting
 "$ui" wait "$peer" 600 || fail "no contact $peer 10 min after opening the link"
 "$ui" shot connected
 
