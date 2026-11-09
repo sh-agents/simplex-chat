@@ -19,6 +19,10 @@ on:
         description: The other ref's app for the call test, built with this branch's core library
         type: string
         default: master
+      apps_run:
+        description: Only test calls, with the two apps of this earlier run of ios-sim (its id), not built again
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -106,8 +110,11 @@ jobs:
   app:
     name: app in the iOS simulator
     needs: plan
+    if: inputs.apps_run == ''
     runs-on: macos-26
     timeout-minutes: 360
+    outputs:
+      other-app: ${{ steps.upload-other-app.outcome }}
     env:
       START_BACKEND: ${{ needs.plan.outputs.run-backend }}
       BUILD_CORE: ${{ needs.plan.outputs.core-run == '' }}
@@ -219,7 +226,26 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      - name: Build the other ref's app
+        id: other-app
+        if: env.CALLS == 'true'
+        run: |
+          scripts/ci/ios-sim/build-app.sh "$RUNNER_TEMP/DerivedData-other" "$CALLS_WITH"
+          tar -czf "$RUNNER_TEMP/SimpleX-other.app.tar.gz" -C "$RUNNER_TEMP/DerivedData-other/Build/Products/Debug-iphonesimulator" SimpleX.app
+
+      - name: Upload the other ref's app
+        id: upload-other-app
+        if: steps.other-app.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-sim-other-app
+          path: ${{ runner.temp }}/SimpleX-other.app.tar.gz
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Test calls between two call clients
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 30
         run: scripts/ci/ios-sim/call-xctest.sh "$RUNNER_TEMP/DerivedData" "$RUNNER_TEMP/call-test/xctest"
 
@@ -231,32 +257,6 @@ jobs:
       - name: Run smoke test
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: scripts/ci/ios-sim/smoke-test.sh "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" "$RUNNER_TEMP/smoke-test" images
-
-      - name: Build the other ref's app
-        id: other-app
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.CALLS == 'true' }}
-        run: scripts/ci/ios-sim/build-app.sh "$RUNNER_TEMP/DerivedData-other" "$CALLS_WITH"
-
-      - name: Test calls between two of this branch's apps
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.CALLS == 'true' }}
-        run: |
-          if [ -n "${SIM_UDID:-}" ]; then xcrun simctl shutdown "$SIM_UDID" || true; fi
-          app=$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app
-          scripts/ci/ios-sim/call-test.sh "$app" "$app" "$RUNNER_TEMP/call-test/branch-branch"
-
-      - name: Test calls between this branch's app and the other ref's
-        if: ${{ !cancelled() && steps.other-app.outcome == 'success' }}
-        run: |
-          scripts/ci/ios-sim/call-test.sh \
-            "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" \
-            "$RUNNER_TEMP/DerivedData-other/Build/Products/Debug-iphonesimulator/SimpleX.app" \
-            "$RUNNER_TEMP/call-test/branch-other" alice
-
-      - name: Test calls between two of the other ref's apps
-        if: ${{ !cancelled() && steps.other-app.outcome == 'success' }}
-        run: |
-          app=$RUNNER_TEMP/DerivedData-other/Build/Products/Debug-iphonesimulator/SimpleX.app
-          scripts/ci/ios-sim/call-test.sh "$app" "$app" "$RUNNER_TEMP/call-test/other-other" ""
 
       - name: Stop test backend
         if: ${{ !cancelled() && env.START_BACKEND == 'true' }}
@@ -288,6 +288,75 @@ jobs:
           path: |
             ${{ runner.temp }}/backend/*.log
             ${{ runner.temp }}/backend/seed.md
+          retention-days: 3
+          if-no-files-found: warn
+
+  calls:
+    name: calls between ${{ matrix.peers }}
+    needs: app
+    if: ${{ !cancelled() && (inputs.apps_run != '' || needs.app.outputs.other-app == 'success') }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - peers: branch-branch
+            alice: branch
+            bob: branch
+            fixed: alice bob
+          - peers: branch-other
+            alice: branch
+            bob: other
+            fixed: alice
+          - peers: other-other
+            alice: other
+            bob: other
+            fixed: ""
+    env:
+      ALICE: ${{ matrix.alice }}
+      BOB: ${{ matrix.bob }}
+      FIXED: ${{ matrix.fixed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Use the macOS 26 SDK
+        run: scripts/ci/ios-sim/use-macos26-sdk.sh
+
+      - name: Download this branch's app
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-sim-app
+          path: ${{ runner.temp }}/branch
+          run-id: ${{ inputs.apps_run || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the other ref's app
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-sim-other-app
+          path: ${{ runner.temp }}/other
+          run-id: ${{ inputs.apps_run || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Unpack apps
+        run: |
+          tar -xzf "$RUNNER_TEMP/branch/SimpleX.app.tar.gz" -C "$RUNNER_TEMP/branch"
+          tar -xzf "$RUNNER_TEMP/other/SimpleX-other.app.tar.gz" -C "$RUNNER_TEMP/other"
+
+      - name: Install AXe
+        run: scripts/ci/ios-sim/install-axe.sh
+
+      - name: Test calls
+        run: scripts/ci/ios-sim/call-test.sh "$RUNNER_TEMP/$ALICE/SimpleX.app" "$RUNNER_TEMP/$BOB/SimpleX.app" "$RUNNER_TEMP/call-test" "$FIXED"
+
+      - name: Upload call test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-sim-call-test-${{ matrix.peers }}
+          path: ${{ runner.temp }}/call-test
           retention-days: 3
           if-no-files-found: warn
 
