@@ -60,10 +60,11 @@ ui_retry() {
 }
 
 # From the app's first screen to the chat list, creating the profile $1; shot names start with $2.
-# Waits are long: a runner with two simulators read no accessibility tree for over 30 s (runs 41229483743, 41248278756).
+# Waits are long: a runner with two simulators read no accessibility tree for over 30 s (runs 41229483743, 41248278756),
+# and a second simulator's first screen took over 3 min (run 42709556460).
 onboard() {
   local name=$1 prefix=${2:-}
-  "$ui" wait "Get started" 180
+  "$ui" wait "Get started" 600
   "$ui" shot "${prefix}first-screen"
   ui_retry tap "Get started" 60
 
