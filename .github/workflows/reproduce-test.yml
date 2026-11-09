@@ -1,0 +1,132 @@
+name: reproduce-test
+
+on:
+  push:
+    branches: [sh/repro-v7.1.2]
+    paths: [.github/workflows/reproduce-test.yml]
+
+permissions:
+  contents: read
+
+env:
+  TAG: v7.1.2
+  RESULTS: v7.1.2-simplex-chat
+  HOMEBREW_NO_AUTO_UPDATE: 1
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk space
+        run: scripts/ci/linux_util_free_space.sh
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Reproduce
+        run: python3 scripts/simplex-chat-build.py reproduce "$TAG" desktop
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: linux-${{ matrix.runner }}
+          path: ${{ env.RESULTS }}
+          retention-days: 3
+
+  android:
+    name: Android
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk space
+        run: scripts/ci/linux_util_free_space.sh
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Reproduce
+        run: python3 scripts/simplex-chat-build.py reproduce "$TAG" android --nix-cache
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: android
+          path: ${{ env.RESULTS }}
+          retention-days: 3
+
+  macos:
+    name: macOS ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-26-intel]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
+      - name: Point Command Line Tools SDK to Xcode SDK
+        run: sudo ln -sfn "$(xcrun --sdk macosx --show-sdk-path)" /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+      - uses: simplex-chat/setup-haskell-action@v2
+        with:
+          ghc-version: 9.6.3
+          cabal-version: 3.10.2.0
+      - uses: ./.github/actions/setup-corretto
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Reproduce
+        run: python3 scripts/simplex-chat-build.py reproduce "$TAG" macos
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: macos-${{ matrix.runner }}
+          path: ${{ env.RESULTS }}
+          retention-days: 3
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: simplex-chat/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 16GB
+          disk-root: "D:"
+      - uses: simplex-chat/setup-haskell-action@v2
+        with:
+          ghc-version: 9.6.3
+          cabal-version: 3.10.2.0
+      - uses: ./.github/actions/setup-corretto
+      - uses: simplex-chat/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: >-
+            git
+            perl
+            make
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            python:p
+      - name: Reproduce
+        run: |
+          export PATH=$PATH:/c/ghcup/bin:$(echo /c/tools/ghc-*/bin || echo)
+          python scripts/simplex-chat-build.py reproduce "$TAG" windows
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: windows
+          path: ${{ env.RESULTS }}
+          retention-days: 3
