@@ -263,7 +263,7 @@ hang_up() {
   for peer in "$ender" "$receiver"; do
     from=$([ "$peer" = "$ender" ] && echo "$ender_from" || echo "$receiver_from")
     tail -n +"$from" "$out/$peer/app.log" |
-      grep -E "chatSendCmd apiEndCall|CallManager.endCall|processReceivedMsg: callEnded|WebRTC: processed cmd|WebRTCClient: (reconnecting|ending the call)" |
+      grep -E "chatSendCmd apiEndCall|CallManager.endCall|processReceivedMsg: callEnded|WebRTC: processed cmd|WebRTCClient: (reconnecting|ending the call|ice connection state|peer connection state)" |
       sed "s/^\([^ ]* [^ ]*\).*SimpleX\[[^]]*\] /\1 $peer: /"
   done | sort
   echo "::endgroup::"
