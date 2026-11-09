@@ -309,6 +309,9 @@ final class WebRTCClient: NSObject, RTCVideoViewDelegate, RTCFrameEncryptorDeleg
     }
 
     private func startReconnecting(_ connection: RTCPeerConnection) async {
+#if DEBUG
+        logger.debug("WebRTCClient: reconnecting")
+#endif
         activeCall?.reconnection = Task {
             _ = try? await Task.sleep(nanoseconds: WebRTCClient.reconnectTimeout)
             if Task.isCancelled { return }
@@ -445,6 +448,71 @@ final class WebRTCClient: NSObject, RTCVideoViewDelegate, RTCFrameEncryptorDeleg
             }
         }
     }
+
+#if DEBUG
+    struct MediaStats: Equatable {
+        var audioPacketsReceived: Int64 = 0
+        var videoFramesDecoded: Int64 = 0
+        var videoFramesEncoded: Int64 = 0
+        var codecs: Set<String> = []
+    }
+
+    struct FrameCounts: Equatable {
+        var encrypted = 0
+        var decrypted = 0
+        var errors = 0
+    }
+
+    private let frameCountsLock = NSLock()
+    private var currentFrameCounts = FrameCounts()
+
+    var frameCounts: FrameCounts {
+        frameCountsLock.lock()
+        defer { frameCountsLock.unlock() }
+        return currentFrameCounts
+    }
+
+    private func countFrame(_ op: String, ok: Bool) {
+        frameCountsLock.lock()
+        defer { frameCountsLock.unlock() }
+        if !ok {
+            currentFrameCounts.errors += 1
+        } else if op == "encrypt" {
+            currentFrameCounts.encrypted += 1
+        } else {
+            currentFrameCounts.decrypted += 1
+        }
+    }
+
+    func mediaStats() async -> MediaStats? {
+        guard let connection = activeCall?.connection else { return nil }
+        let report = await connection.statistics()
+        var stats = MediaStats()
+        for stat in report.statistics.values where stat.type == "inbound-rtp" || stat.type == "outbound-rtp" {
+            let count = { (key: String) in (stat.values[key] as? NSNumber)?.int64Value ?? 0 }
+            if let codec = (stat.values["codecId"] as? String).flatMap({ report.statistics[$0]?.values["mimeType"] as? String }) {
+                stats.codecs.insert(codec)
+            }
+            switch (stat.type, stat.values["kind"] as? String ?? "") {
+            case ("inbound-rtp", "audio"): stats.audioPacketsReceived += count("packetsReceived")
+            case ("inbound-rtp", "video"): stats.videoFramesDecoded += count("framesDecoded")
+            case ("outbound-rtp", "video"): stats.videoFramesEncoded += count("framesEncoded")
+            default: ()
+            }
+        }
+        return stats
+    }
+
+    func logMediaStats(_ connection: RTCPeerConnection) {
+        Task {
+            while let call = activeCall, call.connection == connection, let stats = await mediaStats() {
+                let frames = frameCounts
+                logger.debug("call media stats: audio packets received \(stats.audioPacketsReceived), video frames decoded \(stats.videoFramesDecoded), encoded \(stats.videoFramesEncoded), frames encrypted \(frames.encrypted), decrypted \(frames.decrypted), crypto errors \(frames.errors), codecs \(stats.codecs.sorted().joined(separator: " "), privacy: .public)")
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+#endif
 
     @MainActor
     func onMediaMuteUnmute(_ transceiverMid: String?, _ mute: Bool) {
@@ -662,6 +730,9 @@ final class WebRTCClient: NSObject, RTCVideoViewDelegate, RTCFrameEncryptorDeleg
     private func checkCrypto(_ op: String, _ r: UnsafeMutablePointer<CChar>?) -> Bool {
         guard let r = r else { return true }
         let err = fromCString(r)
+#if DEBUG
+        countFrame(op, ok: err == "")
+#endif
         if err != "" {
             logger.error("\(op) error: \(err)")
             return false
@@ -921,6 +992,9 @@ extension WebRTCClient: RTCPeerConnectionDelegate {
                 setSpeakerEnabledAndConfigureSession(enableSpeaker)
             case .connected:
                 stopReconnecting()
+#if DEBUG
+                if activeCall?.wasConnected != true { logMediaStats(connection) }
+#endif
                 activeCall?.wasConnected = true
                 sendConnectedEvent(connection)
             case .disconnected, .failed: endCall()
