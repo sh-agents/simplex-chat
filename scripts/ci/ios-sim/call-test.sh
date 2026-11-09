@@ -7,13 +7,17 @@
 # A call passes when both screens show it connected and e2e encrypted and, by the media stats a debug build logs, each
 # app decoded the other's VP8 video, received its audio, and encrypted and decrypted frames without errors. Whether the screen draws the peer's video is reported, not checked: in run 41256820483 the
 # runner's simulators drew no video at all, not even the own camera's.
-# Usage: scripts/ci/ios-sim/call-test.sh <alice's SimpleX.app> <bob's SimpleX.app> <output dir>
+# Each call is ended by one peer. The other peer's call must end on the end message, without reconnecting first,
+# also with its app in the background. A failure is reported, not failed, when the peer whose app has the fix is not
+# in the fixed peers.
+# Usage: scripts/ci/ios-sim/call-test.sh <alice's SimpleX.app> <bob's SimpleX.app> <output dir> [fixed peers]
 
 set -euo pipefail
 
 out=$3
 app_alice=$1
 app_bob=$2
+fixed_peers=${4-alice bob}
 here=$(dirname "$0")
 ui=$here/ui
 # shellcheck source=scripts/ci/ios-sim/sim-lib.sh
@@ -22,6 +26,8 @@ ui=$here/ui
 video_frames=30
 audio_packets=100
 media_timeout=180
+# a call that waits for its reconnection to time out (WebRTCClient.reconnectTimeout, 30 s) ends later than this
+max_end_delay=20
 # The call screen's buttons are not in the accessibility tree: the red end call button is tapped where it is drawn, at
 # the bottom centre of the 402 x 874 point screen.
 end_call_x=201
@@ -193,17 +199,71 @@ sample_app() {
   echo "::endgroup::"
 }
 
-# The peer ends its call; the other app ends it when the chat delivers the end.
-end_call() {
-  local peer=$1 other=$2 call=$3
-  on "$peer" tap-xy "$end_call_x" "$end_call_y"
-  if ! call_ended "$peer"; then
-    sample_app "$peer"
-    fail "$call: $peer's call did not end when $peer ended it"
+fixed() {
+  [[ " $fixed_peers " == *" $1 "* ]]
+}
+
+# fails when the peer's app has the fix, otherwise warns
+expect_fixed() {
+  local peer=$1 message=$2
+  if fixed "$peer"; then
+    fail "$message"
   fi
-  if ! call_ended "$other"; then
-    sample_app "$other"
-    fail "$call: $other's call did not end when $peer ended it"
+  echo "::warning::$message (not checked: $peer's app is not the fixed one)"
+}
+
+log_line() {
+  tail -n +"$2" "$out/$1/app.log" | grep -m 1 -F "$3" || true
+}
+
+# seconds since midnight of a compact log line, such as "2026-11-09 12:34:56.789 Df SimpleX[...] ..."
+log_seconds() {
+  awk '{ split($2, t, ":"); printf "%.3f", t[1] * 3600 + t[2] * 60 + t[3] }' <<< "$1"
+}
+
+# The ender ends the call; the receiver's app ends it when the chat delivers the end. With background, the receiver's
+# app is in the background from before the end until its call ended.
+hang_up() {
+  local ender=$1 receiver=$2 call=$3 background=$4 ender_from receiver_from ended sent reconnect delay deadline
+  ender_from=$(($(wc -l < "$out/$ender/app.log") + 1))
+  receiver_from=$(($(wc -l < "$out/$receiver/app.log") + 1))
+  if [ -n "$background" ]; then
+    axe button home --udid "$(get udid "$receiver")"
+    sleep 5
+    on "$receiver" shot "$call-background"
+  fi
+  on "$ender" tap-xy "$end_call_x" "$end_call_y"
+  if ! call_ended "$ender"; then
+    sample_app "$ender"
+    fail "$call: $ender's call did not end when $ender ended it"
+  fi
+  deadline=$((SECONDS + 90))
+  until ended=$(log_line "$receiver" "$receiver_from" "WebRTCClient: ending the call") && [ -n "$ended" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      sample_app "$receiver"
+      fail "$call: $receiver's call did not end when $ender ended it"
+    fi
+    sleep 1
+  done
+  if [ -n "$background" ]; then
+    xcrun simctl launch "$(get udid "$receiver")" "$bundle_id" > /dev/null
+  fi
+  if ! call_ended "$receiver"; then
+    sample_app "$receiver"
+    fail "$call: $receiver's call screen stayed after its call ended"
+  fi
+  sent=$(log_line "$ender" "$ender_from" "CallManager.endCall: ending call")
+  [ -n "$sent" ] || fail "$call: $ender's log has no CallManager.endCall"
+  delay=$(awk -v a="$(log_seconds "$sent")" -v b="$(log_seconds "$ended")" 'BEGIN { printf "%.1f", b - a }')
+  reconnect=$(log_line "$receiver" "$receiver_from" "WebRTCClient: reconnecting")
+  local reconnected=no
+  [ -z "$reconnect" ] || reconnected=yes
+  echo "$call: $ender ended the call, $receiver's call ended $delay s later, $receiver reconnecting first: $reconnected"
+  if [ -n "$reconnect" ]; then
+    expect_fixed "$ender" "$call: $receiver reconnected before $ender's end of the call arrived"
+  fi
+  if [ -n "$background" ] && awk -v d="$delay" -v m="$max_end_delay" 'BEGIN { exit !(d > m) }'; then
+    expect_fixed "$receiver" "$call: $receiver's app in the background ended its call $delay s after $ender ended it, more than $max_end_delay s"
   fi
 }
 
@@ -273,7 +333,8 @@ check_media() {
 }
 
 video_call() {
-  local caller=$1 callee=$2 call="$1-calls-$2" caller_from callee_from
+  local caller=$1 callee=$2 ender=$3 background=${4:-} call="$1-calls-$2-$3-ends${4:+-$4}" caller_from callee_from receiver
+  receiver=$([ "$ender" = "$caller" ] && echo "$callee" || echo "$caller")
   ensure_running "$caller"
   ensure_running "$callee"
   caller_from=$(($(wc -l < "$out/$caller/app.log") + 1))
@@ -293,9 +354,7 @@ video_call() {
   report_screen "$callee" "$call"
   check_media "$caller" "$call" "$caller_from"
   check_media "$callee" "$call" "$callee_from"
-  # Alice, this branch's app, ends both calls: before this branch's fix, ending a call closed it twice at once and
-  # froze the app (run 41333783822).
-  end_call alice bob "$call"
+  hang_up "$ender" "$receiver" "$call" "$background"
   on "$caller" shot "$call-ended"
   on "$callee" shot "$call-ended"
   echo "$call: connected, e2e encrypted, audio and video both ways"
@@ -330,7 +389,8 @@ on alice shot connected-to-bob
 on alice swipe 201 150 201 800
 on alice shot invitation-closed
 
-video_call alice bob
-video_call bob alice
+video_call alice bob alice
+video_call bob alice bob
+video_call alice bob bob background
 
 echo "call test passed: alice ($app_alice) and bob ($app_bob) called each other, e2e encrypted, with audio and video both ways"

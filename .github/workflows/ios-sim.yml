@@ -250,7 +250,13 @@ jobs:
           scripts/ci/ios-sim/call-test.sh \
             "$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/SimpleX.app" \
             "$RUNNER_TEMP/DerivedData-other/Build/Products/Debug-iphonesimulator/SimpleX.app" \
-            "$RUNNER_TEMP/call-test/branch-other"
+            "$RUNNER_TEMP/call-test/branch-other" alice
+
+      - name: Test calls between two of the other ref's apps
+        if: ${{ !cancelled() && steps.other-app.outcome == 'success' }}
+        run: |
+          app=$RUNNER_TEMP/DerivedData-other/Build/Products/Debug-iphonesimulator/SimpleX.app
+          scripts/ci/ios-sim/call-test.sh "$app" "$app" "$RUNNER_TEMP/call-test/other-other" ""
 
       - name: Stop test backend
         if: ${{ !cancelled() && env.START_BACKEND == 'true' }}
