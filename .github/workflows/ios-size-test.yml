@@ -1,0 +1,140 @@
+name: ios-size-test
+
+# Temporary: the iOS archive's size with Swift -O and -Osize (the core of run 42366640620, 7.1.2), with link maps,
+# and with the core at -O1, built from source as build-apps builds it.
+
+on:
+  push:
+    branches: [sh/ios-size-research]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  BASELINE_RUN: 42366640620
+
+jobs:
+  swift:
+    name: Swift -O and -Osize
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: tree:0
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
+
+      - name: Use the macOS 26 SDK
+        run: scripts/ci/ios-sim/use-macos26-sdk.sh
+
+      - name: Download the 7.1.2 archive and core
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-archive-unsigned
+          path: ${{ runner.temp }}/baseline
+          run-id: ${{ env.BASELINE_RUN }}
+          github-token: ${{ github.token }}
+
+      - name: Install the core
+        run: |
+          python3 scripts/simplex-chat-build.py install libs ios "$RUNNER_TEMP/baseline/pkg-ios-aarch64-swift-json.zip"
+          unzip -q "$RUNNER_TEMP/baseline/SimpleX.xcarchive.zip" -d "$RUNNER_TEMP/baseline"
+
+      - name: Archive with -O
+        run: |
+          xcodebuild archive -quiet -project apps/ios/SimpleX.xcodeproj -scheme "SimpleX (iOS)" -configuration Release \
+            -destination generic/platform=iOS -archivePath "$RUNNER_TEMP/O.xcarchive" -derivedDataPath "$RUNNER_TEMP/dd-O" \
+            -onlyUsePackageVersionsFromResolvedFile -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO LD_GENERATE_MAP_FILE=YES
+
+      - name: Archive with -Osize
+        run: |
+          python3 .github/size-test/variant.py osize
+          git diff --stat
+          xcodebuild archive -quiet -project apps/ios/SimpleX.xcodeproj -scheme "SimpleX (iOS)" -configuration Release \
+            -destination generic/platform=iOS -archivePath "$RUNNER_TEMP/Osize.xcarchive" -derivedDataPath "$RUNNER_TEMP/dd-Osize" \
+            -onlyUsePackageVersionsFromResolvedFile -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO LD_GENERATE_MAP_FILE=YES
+          git checkout -- apps/ios/SimpleX.xcodeproj/project.pbxproj
+
+      - name: Measure
+        run: |
+          mkdir -p "$RUNNER_TEMP/results/maps"
+          python3 .github/size-test/measure.py "$RUNNER_TEMP/results/swift.json" \
+            7.1.2 "$RUNNER_TEMP/baseline/SimpleX.xcarchive" O "$RUNNER_TEMP/O.xcarchive" Osize "$RUNNER_TEMP/Osize.xcarchive"
+          for variant in O Osize; do
+            find "$RUNNER_TEMP/dd-$variant" -name '*LinkMap*arm64*.txt' | while read -r map; do
+              cp "$map" "$RUNNER_TEMP/results/maps/$variant-$(basename "$map")"
+            done
+          done
+          ls -la "$RUNNER_TEMP/results/maps"
+          for map in "$RUNNER_TEMP"/results/maps/O-SimpleXChat-LinkMap*.txt "$RUNNER_TEMP"/results/maps/O-SimpleX-LinkMap*.txt; do
+            python3 .github/size-test/linkmap.py "$map" 40
+          done
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-size-swift
+          path: ${{ runner.temp }}/results
+          retention-days: 14
+
+  core-o1:
+    name: core at -O1
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: tree:0
+
+      - name: Use the release Xcode
+        uses: ./.github/actions/xcode
+
+      - name: Use the macOS 26 SDK
+        run: scripts/ci/ios-sim/use-macos26-sdk.sh
+
+      - name: Core at -O1
+        run: |
+          python3 .github/size-test/variant.py core-o1
+          git diff
+
+      - name: Build archive
+        run: scripts/simplex-chat-build.py build xcarchive --out "$RUNNER_TEMP/out" --install-nix
+
+      - name: Download the 7.1.2 archive and core
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-archive-unsigned
+          path: ${{ runner.temp }}/baseline
+          run-id: ${{ env.BASELINE_RUN }}
+          github-token: ${{ github.token }}
+
+      - name: Measure
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          unzip -q "$RUNNER_TEMP/baseline/SimpleX.xcarchive.zip" -d "$RUNNER_TEMP/baseline"
+          unzip -q "$RUNNER_TEMP/out/SimpleX.xcarchive.zip" -d "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/out/pkg-ios-aarch64-swift-json.zip" "$RUNNER_TEMP/results/core-O1-pkg.zip"
+          python3 .github/size-test/measure.py "$RUNNER_TEMP/results/core-o1.json" \
+            7.1.2 "$RUNNER_TEMP/baseline/SimpleX.xcarchive" core-O1 "$RUNNER_TEMP/out/SimpleX.xcarchive"
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-size-core-o1
+          path: ${{ runner.temp }}/results
+          retention-days: 14
