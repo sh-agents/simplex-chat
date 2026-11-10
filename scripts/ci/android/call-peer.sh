@@ -70,7 +70,9 @@ sleep 15
 "$ui" click-text "$peer" 30
 "$ui" wait "Message" 30
 "$ui" click-text "$peer" 10
-"$ui" click-text video 30 || fail "$call: no video call button in $peer's info"
+"$ui" wait video 30 || fail "$call: no video call button in $peer's info"
+read -r x _ _ top _ _ < <("$ui" find video)
+"$ui" click "$x" $((top - 70))
 from=$(($(log_lines) + 1))
 "$ui" wait "e2e encrypted" 600 || fail "$call: $peer did not accept the call"
 "$ui" shot "$call-connected"
