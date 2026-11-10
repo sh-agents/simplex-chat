@@ -506,6 +506,8 @@ jobs:
         run: scripts/ci/android/install-sdk.sh "$RUNNER_TEMP/android-sdk"
 
       - name: Boot emulator
+        env:
+          EMULATOR_CAMERA: emulated
         run: scripts/ci/android/emulator.sh start "$RUNNER_TEMP/android-call"
 
       - name: Onboard
