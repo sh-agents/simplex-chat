@@ -2864,10 +2864,10 @@
 		};
 		D7197A1629AE89660055C05A /* XCRemoteSwiftPackageReference "WebRTC" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/simplex-chat/WebRTC.git";
+			repositoryURL = "https://github.com/sh-agents/WebRTC.git";
 			requirement = {
 				kind = revision;
-				revision = 7771ab09f540f620d7780298e378e006a5fe5a7d;
+				revision = a486e83dc963b536ced746e6f4b52aa6f0b26990;
 			};
 		};
 		D77B92DA2952372200A5A1CC /* XCRemoteSwiftPackageReference "SwiftyGif" */ = {

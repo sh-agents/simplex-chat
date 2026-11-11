@@ -13,7 +13,6 @@ import SimpleXChat
 final class WebRTCClient: NSObject, RTCVideoViewDelegate, RTCFrameEncryptorDelegate, RTCFrameDecryptorDelegate {
     private static let factory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
-        RTCInitFieldTrialDictionary(["WebRTC-RtcEventLogKillSwitch": kRTCFieldTrialEnabledValue])
         return RTCPeerConnectionFactory(encoderFactory: VP8EncoderFactory(), decoderFactory: VP8DecoderFactory())
     }()
     private static let ivTagBytes: Int = 28
