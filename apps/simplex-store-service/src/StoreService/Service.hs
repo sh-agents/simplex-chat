@@ -47,7 +47,7 @@ where
 
 import StoreService.Catalog (StoreProduct (..), defaultCatalog, storeProduct)
 import StoreService.Codes (issueFailedText, issueOneCode, singleUse)
-import StoreService.Config (AppleStoreConfig (..), BadgeIssuerKey (..), ChainConfig (..), NamesConfig (..), PlayStoreConfig (..), ServiceConfig (..), minNameYears, readServiceConfig)
+import StoreService.Config (AppleStoreConfig (..), BadgeIssuerKey (..), ChainConfig (..), ListenerConfig (..), NamesConfig (..), PlayStoreConfig (..), ServiceConfig (..), minNameYears, readServiceConfig)
 import StoreService.Group (GroupEvent, ensureManagedGroup, fmtTime, groupEvent, hasTracker, joinerAcceptance, refreshTracker, revokeWithTracker, runGroupLane)
 import StoreService.Group.Command (MoneyCmd (..), badgeTypeP, balanceArgsP, closeArgsP, codeP, maxMonths, maxNameYears, nameCodeP, prepaidCodeP, recordRefundArgsP, textTokenP)
 import StoreService.Names.Abi (hex)
@@ -56,6 +56,7 @@ import StoreService.Names.Chain (ChainClient, newChainClient, nodeChainId)
 import StoreService.Names.Codes (issueNameCode, revokeNameCode)
 import StoreService.Names.Contracts (Contracts, Terms (..), communityName, namePolicy, newContracts, runTermsFetch, termsLinkAllowed, termsLinks, termsOf)
 import StoreService.Names.Env (NamesEnv (..), newNamesEnv)
+import StoreService.Names.Metrics (runMetrics)
 import StoreService.Names.Orders (ordersEnv)
 import StoreService.Names.Phases (RegistrationId (..))
 import StoreService.Names.Records (runRecordEdits)
@@ -327,7 +328,7 @@ storeService opts serviceCfg baseCfg env = do
       webEnv <- newWebEnv chatStore sc ws hints providers namesEnv
       exportWebapp sc
       pollerEnv <- newPollerEnv chatStore ws (nePhases <$> namesEnv) hints providers (poll sc)
-      nameLanes <- maybe (pure []) namesLanes namesEnv
+      nameLanes <- maybe (pure []) (namesLanes $ listener sc) namesEnv
       pure $ [runWebListeners webEnv, runPoller pollerEnv] <> nameLanes
 
 startNames :: ChatController -> Turns -> Waiters -> [Provider] -> NamesConfig -> IO NamesEnv
@@ -368,10 +369,12 @@ logNamePolicy NamesConfig {nCommunity} ct =
 
 -- | The workers resume every registration in their phases, the code sweep runs at the start and then daily, and the
 -- terms fetch at the start and then hourly.
-namesLanes :: NamesEnv -> IO [IO ()]
-namesLanes ne@NamesEnv {neChain, neContracts, neSender, neRecords} = do
+namesLanes :: ListenerConfig -> NamesEnv -> IO [IO ()]
+namesLanes lc@ListenerConfig {lMetricsPort} ne@NamesEnv {neStore, neChain, neContracts, neSender, neRecords} = do
   worker <- newWorker (ordersEnv ne) neChain neSender
-  pure [runSender neSender, runRecordEdits neRecords, runWorkers worker, runCodeSweep worker, runTermsFetch neContracts]
+  pure $
+    [runSender neSender, runRecordEdits neRecords, runWorkers worker, runCodeSweep worker, runTermsFetch neContracts]
+      <> [runMetrics lc port neStore neContracts | Just port <- [lMetricsPort]]
 
 seedServiceCatalog :: DBStore -> IO ()
 seedServiceCatalog st = do
