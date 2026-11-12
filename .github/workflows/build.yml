@@ -468,7 +468,7 @@ jobs:
           cabal update
           cabal build -j --enable-tests ${{ env.ghc_options }}
           mkdir -p /out
-          for i in simplex-chat simplex-chat-test; do
+          for i in simplex-chat simplex-chat-test simplex-store-service; do
             bin=$(find /project/dist-newstyle -name "$i" -type f -executable)
             chmod +x "$bin"
             cp "$bin" /out/
@@ -557,6 +557,14 @@ jobs:
         shell: bash
         run: |
           docker cp builder:/out/simplex-chat-test .
+          docker cp builder:/out/simplex-store-service .
+
+      - name: Upload the store service binary
+        if: matrix.should_run == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: simplex-store-service-${{ matrix.os }}-ghc${{ matrix.ghc }}
+          path: simplex-store-service
 
       - name: Copy CLI from container and prepare it
         id: linux_cli_prepare
