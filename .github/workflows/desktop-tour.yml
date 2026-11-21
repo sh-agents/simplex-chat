@@ -1,6 +1,8 @@
 name: desktop-tour
 
 on:
+  push:
+    branches: [sh/linux-desktop-tour]
   workflow_dispatch:
     inputs:
       base:
