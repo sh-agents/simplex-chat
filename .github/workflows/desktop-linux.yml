@@ -204,8 +204,8 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xdotool openbox imagemagick tesseract-ocr sqlite3 fonts-dejavu-core
-          dpkg-query -W xvfb xdotool openbox imagemagick tesseract-ocr sqlite3 fonts-dejavu-core
+          sudo apt-get install -y xvfb xdotool openbox imagemagick tesseract-ocr sqlite3 fonts-dejavu-core ffmpeg
+          dpkg-query -W xvfb xdotool openbox imagemagick tesseract-ocr sqlite3 fonts-dejavu-core ffmpeg
 
       - name: Download core library
         uses: actions/download-artifact@v8
@@ -218,6 +218,10 @@ jobs:
       - name: Install core library
         id: core
         run: scripts/ci/desktop-linux/install-core.sh ~/core/${{ env.CORE_PKG }}
+
+      - name: Install VLC
+        id: vlc
+        run: scripts/desktop/prepare-vlc-linux.sh
 
       - name: Download backend
         if: needs.plan.outputs.run-backend == 'true'
@@ -245,7 +249,7 @@ jobs:
       # the Kotlin compiler daemon otherwise gets gradle.properties' 2 GB, which compiling :common runs out of
       - name: Build app
         id: build
-        if: ${{ !cancelled() && steps.core.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.core.outcome == 'success' && steps.vlc.outcome == 'success' }}
         working-directory: apps/multiplatform
         run: |
           ./gradlew --no-daemon --console=plain -Psimplex.assets.dir=../../assets -Pkotlin.daemon.jvmargs=-Xmx4g :desktop:createDistributable
