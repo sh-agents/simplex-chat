@@ -29,6 +29,9 @@ package=chat.simplex.app
 local_chat="seeded notes"
 tour_settle=1
 tour_scroll=10
+tour_label_scrolls=4
+tour_label_wait=5
+tour_clock=1200
 search_field="Search or paste SimpleX link"
 ui=$(dirname "$0")/ui
 fixtures=$(dirname "$0")/../../../tests/fixtures
@@ -346,6 +349,14 @@ open_group_info() {
   "$ui" click-text "$local_chat" 10
 }
 
+click_scrolled() {
+  for _ in $(seq "$tour_label_scrolls"); do
+    "$ui" click-text "$1" "$tour_label_wait" && return 0
+    "$ui" scroll "$(($(screen_width) / 2))" "$(($(screen_height) / 2))" down
+  done
+  return 1
+}
+
 visit() {
   local name=$1 opener=$2 label
   shift 2
@@ -355,7 +366,7 @@ visit() {
     return
   fi
   for label in "$@"; do
-    if ! "$ui" click-text "$label" 10; then
+    if ! click_scrolled "$label"; then
       check "tour: $name opens" false
       return
     fi
@@ -368,7 +379,14 @@ visit() {
   check "tour: $name opens" true
 }
 
+freeze_status_bar() {
+  adb shell settings put global sysui_demo_allowed 1
+  adb shell am broadcast -a com.android.systemui.demo -e command enter > /dev/null
+  adb shell am broadcast -a com.android.systemui.demo -e command clock -e hhmm "$tour_clock" > /dev/null
+}
+
 tour() {
+  freeze_status_bar
   visit user-menu open_user_menu
   visit settings open_settings
   visit appearance open_settings "Appearance"
@@ -378,7 +396,6 @@ tour() {
   visit whats-new open_settings "Help & support" "What's new"
   visit about open_settings "Help & support" "About SimpleX Chat"
   visit chat-data open_settings "Chat data"
-  visit migrate open_settings "Migrate to another device"
   visit support open_settings "Support SimpleX"
   visit network open_settings "Network & servers"
   visit your-servers open_settings "Network & servers" "Your servers"
@@ -394,6 +411,7 @@ tour() {
   visit local-chat open_local_chat
   visit group-info open_group_info
   visit attachment-menu open_local_chat "Attach"
+  visit migrate open_settings "Migrate to another device"
 }
 
 # private routing to unknown servers only: the preset servers that would proxy to the test SMP server can't reach the
