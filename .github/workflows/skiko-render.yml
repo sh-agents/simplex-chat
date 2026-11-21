@@ -10,14 +10,14 @@ permissions:
   contents: read
 
 jobs:
-  render:
-    name: previews with Skiko 0.9.4.2 and 0.9.24, ${{ matrix.os }}
+  bubble-layout:
+    name: BubbleLayoutTest with Skiko 0.9.24, ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -33,35 +33,15 @@ jobs:
           distribution: corretto
           java-version: 17
 
-      - name: Render with Skiko 0.9.24
+      - name: Run BubbleLayoutTest
         working-directory: apps/multiplatform
-        env:
-          SNAPSHOT_DIR: ${{ runner.temp }}/after
-        run: ./gradlew --no-daemon --console=plain -Psimplex.assets.dir=../../assets -Pkotlin.daemon.jvmargs=-Xmx4g :common:desktopTest --tests chat.simplex.app.SnapshotTest
+        run: ./gradlew --no-daemon --console=plain -Psimplex.assets.dir=../../assets -Pkotlin.daemon.jvmargs=-Xmx4g :common:desktopTest --tests chat.simplex.app.BubbleLayoutTest
 
-      - name: Restore the build script of master
-        run: |
-          git fetch --depth=1 origin master
-          git checkout FETCH_HEAD -- apps/multiplatform/build.gradle.kts
-          git diff --cached --stat
-
-      - name: Render with Skiko 0.9.4.2
-        working-directory: apps/multiplatform
-        env:
-          SNAPSHOT_DIR: ${{ runner.temp }}/before
-        run: ./gradlew --no-daemon --console=plain -Psimplex.assets.dir=../../assets -Pkotlin.daemon.jvmargs=-Xmx4g :common:desktopTest --tests chat.simplex.app.SnapshotTest
-
-      - name: Compare
-        run: python3 scripts/ci/snapshots-compare.py "$RUNNER_TEMP/before" "$RUNNER_TEMP/after" "$RUNNER_TEMP/diff" || true
-
-      - name: Upload renders
+      - name: Upload test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: skiko-render-${{ matrix.os }}
-          path: |
-            ${{ runner.temp }}/before
-            ${{ runner.temp }}/after
-            ${{ runner.temp }}/diff
+          name: bubble-layout-${{ matrix.os }}
+          path: apps/multiplatform/common/build/test-results/desktopTest
           retention-days: 7
           if-no-files-found: warn
