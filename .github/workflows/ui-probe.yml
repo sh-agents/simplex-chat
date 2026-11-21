@@ -1,0 +1,66 @@
+name: ui-probe
+
+on:
+  push:
+    branches: [sh/linux-desktop-snapshots]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: UI automation on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          python -m pip install pyautogui==0.9.54 pytesseract==0.3.13 pillow==11.3.0 pygetwindow==0.0.9
+          if [ "$RUNNER_OS" = macOS ]; then brew install tesseract; else choco install -y tesseract; fi
+
+      - name: Probe
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe"
+          if [ "$RUNNER_OS" = macOS ]; then
+            open -a TextEdit
+            export PATH="/opt/homebrew/bin:$PATH"
+          else
+            notepad.exe &
+            export PATH="/c/Program Files/Tesseract-OCR:$PATH"
+          fi
+          sleep 8
+          python - "$RUNNER_TEMP/probe" <<'EOF'
+          import sys, time, pyautogui, pytesseract
+          out = sys.argv[1]
+          print("screen", pyautogui.size())
+          shot = pyautogui.screenshot()
+          shot.save(f"{out}/1-start.png")
+          print("start text:", pytesseract.image_to_string(shot)[:400])
+          w, h = pyautogui.size()
+          pyautogui.click(w // 2, h // 2)
+          time.sleep(1)
+          pyautogui.write("probe typed text", interval=0.05)
+          time.sleep(1)
+          shot = pyautogui.screenshot()
+          shot.save(f"{out}/2-typed.png")
+          text = pytesseract.image_to_string(shot)
+          print("typed text:", text[:400])
+          print("FOUND" if "probe typed text" in text.replace("\n", " ") else "NOT FOUND")
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: ui-probe-${{ matrix.os }}
+          path: ${{ runner.temp }}/probe
