@@ -1,6 +1,8 @@
 name: desktop-snapshots
 
 on:
+  push:
+    branches: [sh/linux-desktop-snapshots]
   workflow_dispatch:
     inputs:
       base:
