@@ -18,7 +18,7 @@ import kotlin.math.max
 // on the render thread while vlcPreviewFactory is built on the preview thread) corrupts the ServiceLoader
 // enumeration and throws NoSuchElementException from CompoundEnumeration.nextElement.
 private val vlcFactoryLock = Any()
-private const val VLC_DEMUX = "--demux=mp4,mkv,avi,es,ps"
+private const val VLC_DEMUX = "--demux=any"
 internal val vlcFactory: MediaPlayerFactory by lazy { synchronized(vlcFactoryLock) { MediaPlayerFactory(VLC_DEMUX) } }
 // No hardware acceleration - more secure for previews
 internal val vlcPreviewFactory: MediaPlayerFactory by lazy { synchronized(vlcFactoryLock) { MediaPlayerFactory("--avcodec-hw=none", VLC_DEMUX) } }
