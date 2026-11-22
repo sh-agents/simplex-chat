@@ -59,5 +59,5 @@ sequenceDiagram
 
 - Fork release: five bundles and two package lists; the GitHub digest of each asset equals the script's SHA-256.
 - Package lists: the Debian revisions of libssh2, libssh, libass, libarchive, OpenSSL, srt, librabbitmq, cyrus-sasl2, aom, brotli, libpng, pcre2 and xz-utils of the snapshot.
-- build.yml dispatch: kotlin scope.
+- build.yml dispatch: kotlin scope; after stable with the plugin allowlist is merged into master and into this branch, also the vlc jobs, which check each bundle on Linux, macOS and Windows.
 - desktop-linux: smoke test passes the video checks: the compose area shows the video's frame, and the video is sent.
